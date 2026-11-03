@@ -2,15 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import subprocess
 import sys
 import time
+from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 from uuid import UUID
 
+import anyio
 import httpx
 import structlog
+
+if TYPE_CHECKING:
+    from mcp import ClientSession
 
 logger = structlog.get_logger()
 
@@ -19,6 +26,20 @@ _MCP_INSTALL_HINT = (
     "MCP 客户端库未安装。请运行: pip install mcp>=1.0.0\n"
     "或安装项目完整依赖: pip install aio-agent-platform[all]"
 )
+
+
+async def _join_task(task: asyncio.Task) -> bool:
+    """Finish cleanup despite caller cancellation; report deferred cancellation."""
+    cancelled = False
+    with anyio.CancelScope(shield=True):
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                cancelled = True
+    if not task.cancelled():  # An owner can be cancelled before its first step.
+        task.result()
+    return cancelled
 
 
 def _ensure_mcp_package() -> None:
@@ -73,11 +94,15 @@ class MCPServerConnection:
     def __init__(self, server_id: UUID, config: dict):
         self.server_id = server_id
         self.config = config
-        self.session = None  # ClientSession
+        self.session: ClientSession | None = None
         self.tools: list[MCPToolInfo] = []
         self.tools_refreshed_at = 0.0
-        self._transport_cm = None  # transport context manager
-        self._session_cm = None  # session context manager
+        self._owner_task: asyncio.Task | None = None
+        self._ready = asyncio.Event()
+        self._stop = asyncio.Event()
+        self._owner_error: BaseException | None = None
+        self._lifecycle_lock = asyncio.Lock()
+        self._closed = False
         self._connected = False
 
     @property
@@ -86,85 +111,100 @@ class MCPServerConnection:
 
     async def connect(self) -> None:
         """Establish connection and discover tools."""
+        async with self._lifecycle_lock:
+            if self.connected:
+                return
+            self._closed = False
+            await self._start_owner()
+
+    async def _start_owner(self) -> None:
+        await self._cleanup()
+        self._ready = asyncio.Event()
+        self._stop = asyncio.Event()
+        self._owner_error = None
+        self._owner_task = asyncio.create_task(
+            self._run_connection(), name=f"mcp-connection-{self.server_id}"
+        )
         try:
-            transport_type = self.config["transport_type"]
-
-            if transport_type == "sse":
-                await self._connect_sse()
-            elif transport_type == "streamable-http":
-                await self._connect_streamable_http()
-            else:
-                raise ValueError(f"Unknown transport type: {transport_type}")
-
-            self._connected = True
-            logger.info(
-                "mcp_server_connected",
-                server_id=str(self.server_id),
-                name=self.config.get("name"),
-                transport=transport_type,
-            )
-
-            # Discover tools
-            await self.refresh_tools()
-
-        except Exception as e:
-            logger.error(
-                "mcp_server_connect_failed",
-                server_id=str(self.server_id),
-                name=self.config.get("name"),
-                error=str(e),
-            )
-            # Clean up on failure
+            await self._ready.wait()
+            if not self.connected:
+                error = self._owner_error
+                if isinstance(error, Exception):
+                    raise error
+                raise RuntimeError("MCP connection stopped during startup") from error
+        except BaseException:
             await self._cleanup()
             raise
 
-    async def _connect_sse(self) -> None:
-        """Connect via SSE (HTTP endpoint with Server-Sent Events)."""
-        _ensure_mcp_package()
-        from mcp import ClientSession
-        from mcp.client.sse import sse_client
+    async def _run_connection(self) -> None:
+        """Own every SDK cancel scope from entry to exit in this single task.
 
+        SDK transports and ClientSession contain AnyIO task groups. Their
+        contexts must never straddle the startup/request/shutdown tasks.
+        Callers may use the session concurrently, but cannot close its scopes.
+        """
+        try:
+            _ensure_mcp_package()
+            from mcp import ClientSession
+
+            async with AsyncExitStack() as stack:
+                streams = await stack.enter_async_context(self._transport())
+                self.session = await stack.enter_async_context(ClientSession(*streams[:2]))
+                await self.session.initialize()
+                await self.refresh_tools()
+                self._connected = True
+                self._ready.set()
+                logger.info(
+                    "mcp_server_connected", server_id=str(self.server_id),
+                    name=self.config.get("name"), transport=self.config["transport_type"],
+                )
+                await self._stop.wait()
+        except BaseException as error:
+            self._owner_error = error
+            # All SDK scopes have exited here, so cancellation cannot escape
+            # this task into whichever request originally called connect().
+            if not isinstance(error, asyncio.CancelledError):
+                logger.exception(
+                    "mcp_connection_stopped", server_id=str(self.server_id),
+                    name=self.config.get("name"), error=str(error),
+                )
+        finally:
+            self._connected = False
+            self.session = None
+            self._ready.set()
+
+    def _transport(self):
+        """Create a transport context; only the owner task may enter it."""
         url = self.config["url"]
         headers = self.config.get("headers") or None
-        timeout = self.config.get("timeout", 60)
+        timeout = float(self.config.get("timeout", 60))
+        if self.config["transport_type"] == "sse":
+            from mcp.client.sse import sse_client
 
-        # timeout 同时约束 SSE 建连与 endpoint 事件等待，避免服务器不可达时无限挂起
-        self._transport_cm = sse_client(
-            url=url, headers=headers, timeout=float(timeout), sse_read_timeout=float(timeout)
-        )
-        read_stream, write_stream = await self._transport_cm.__aenter__()
+            return sse_client(
+                url=url, headers=headers, timeout=timeout, sse_read_timeout=timeout
+            )
+        if self.config["transport_type"] == "streamable-http":
+            from mcp.client.streamable_http import streamablehttp_client
 
-        self._session_cm = ClientSession(read_stream, write_stream)
-        self.session = await self._session_cm.__aenter__()
-
-        await self.session.initialize()
-
-    async def _connect_streamable_http(self) -> None:
-        """Connect via Streamable HTTP (HTTP POST + optional SSE streaming)."""
-        _ensure_mcp_package()
-        from mcp import ClientSession
-        from mcp.client.streamable_http import streamablehttp_client
-
-        url = self.config["url"]
-        headers = self.config.get("headers") or None
-        timeout = self.config.get("timeout", 60)
-
-        self._transport_cm = streamablehttp_client(
-            url=url, headers=headers, timeout=float(timeout)
-        )
-        # streamablehttp_client yields (read_stream, write_stream, get_session_id_callback)
-        read_stream, write_stream, _get_session_id = await self._transport_cm.__aenter__()
-
-        self._session_cm = ClientSession(read_stream, write_stream)
-        self.session = await self._session_cm.__aenter__()
-
-        await self.session.initialize()
+            return streamablehttp_client(url=url, headers=headers, timeout=timeout)
+        raise ValueError(f"Unknown transport type: {self.config['transport_type']}")
 
     async def disconnect(self) -> None:
         """Close the connection and clean up resources."""
-        await self._cleanup()
-        self._connected = False
-        self.tools = []
+        self._closed = True
+        # Cancellation while waiting for a reconnect's lock must not orphan
+        # the owner after the manager has already removed this connection.
+        task = asyncio.create_task(self._disconnect(), name=f"mcp-close-{self.server_id}")
+        if await _join_task(task):
+            raise asyncio.CancelledError
+
+    async def _disconnect(self) -> None:
+        async with self._lifecycle_lock:
+            try:
+                await self._cleanup()
+            finally:
+                self.tools = []
         logger.info(
             "mcp_server_disconnected",
             server_id=str(self.server_id),
@@ -172,21 +212,21 @@ class MCPServerConnection:
         )
 
     async def _cleanup(self) -> None:
-        """Clean up session and transport context managers."""
-        if self._session_cm is not None:
-            try:
-                await self._session_cm.__aexit__(None, None, None)
-            except Exception as e:
-                logger.warning("mcp_session_cleanup_error", error=str(e))
-            self._session_cm = None
-            self.session = None
-
-        if self._transport_cm is not None:
-            try:
-                await self._transport_cm.__aexit__(None, None, None)
-            except Exception as e:
-                logger.warning("mcp_transport_cleanup_error", error=str(e))
-            self._transport_cm = None
+        """Signal the owner and join it without transferring context ownership."""
+        task = self._owner_task
+        if task is None:
+            return
+        self._stop.set()
+        if not self._ready.is_set() and not task.done():
+            task.cancel()  # Abort an incomplete initialize/list_tools request.
+        # AnyIO callers may already be in a cancelled scope. Shield that scope
+        # and shield the owner from direct asyncio cancellation while joining.
+        cancelled = await _join_task(task)
+        self._owner_task = None
+        self._connected = False
+        self.session = None
+        if cancelled:
+            raise asyncio.CancelledError
 
     async def refresh_tools(self) -> list[MCPToolInfo]:
         """Refresh the list of tools from the MCP Server."""
@@ -242,6 +282,7 @@ class MCPServerConnection:
         if not self.session:
             raise RuntimeError(f"MCP Server not connected: {self.config.get('name')}")
 
+        failed_session = self.session
         try:
             return await self._call_tool_once(tool_name, arguments)
         except Exception as e:
@@ -262,7 +303,7 @@ class MCPServerConnection:
                 error=str(e),
             )
             try:
-                await self._reconnect()
+                await self._reconnect(failed_session)
             except Exception:
                 logger.exception(
                     "mcp_reconnect_failed",
@@ -327,8 +368,11 @@ class MCPServerConnection:
             return True
         return False
 
-    async def _reconnect(self) -> None:
+    async def _reconnect(self, failed_session=None) -> None:
         """Tear down the stale connection and establish a fresh session."""
-        await self._cleanup()
-        self._connected = False
-        await self.connect()
+        async with self._lifecycle_lock:
+            if self._closed:
+                raise RuntimeError("MCP connection was disconnected")
+            if failed_session is not None and self.connected and self.session is not failed_session:
+                return  # A concurrent call already replaced the stale session.
+            await self._start_owner()

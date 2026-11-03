@@ -29,6 +29,7 @@ class MCPManager:
     """
 
     def __init__(self) -> None:
+        self._server_locks: dict[UUID, asyncio.Lock] = {}
         self._refresh_locks: dict[UUID, asyncio.Lock] = {}
         self._retry_after: dict[UUID, float] = {}
         self._connections: dict[UUID, MCPServerConnection] = {}
@@ -48,9 +49,14 @@ class MCPManager:
         Raises:
             Exception: If connection fails
         """
-        # Remove existing connection if any
+        lock = self._server_locks.setdefault(server_id, asyncio.Lock())
+        async with lock:
+            return await self._add_server(server_id, config)
+
+    async def _add_server(self, server_id: UUID, config: dict) -> list[MCPToolInfo]:
+        # Serialize replacement so concurrent requests cannot orphan an owner.
         if server_id in self._connections:
-            await self.remove_server(server_id)
+            await self._remove_server(server_id)
 
         conn = MCPServerConnection(server_id, config)
         try:
@@ -82,6 +88,11 @@ class MCPManager:
 
     async def remove_server(self, server_id: UUID) -> None:
         """Disconnect and remove an MCP Server."""
+        lock = self._server_locks.setdefault(server_id, asyncio.Lock())
+        async with lock:
+            await self._remove_server(server_id)
+
+    async def _remove_server(self, server_id: UUID) -> None:
         conn = self._connections.pop(server_id, None)
         if conn:
             # Clean up tool mappings
@@ -98,7 +109,6 @@ class MCPManager:
 
     async def refresh_server(self, server_id: UUID, config: dict) -> list[MCPToolInfo]:
         """Refresh an MCP Server connection (reconnect and rediscover tools)."""
-        await self.remove_server(server_id)
         return await self.add_server(server_id, config)
 
     def _sync_tool_mappings(self, server_id: UUID, conn: MCPServerConnection) -> None:
