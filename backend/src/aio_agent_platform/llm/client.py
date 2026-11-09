@@ -14,6 +14,11 @@ import openai
 import structlog
 from langfuse import Langfuse
 
+from aio_agent_platform.llm.tool_schema import (
+    call_with_schema_fallback,
+    prepare_tools,
+    stream_with_schema_fallback,
+)
 from aio_agent_platform.observation.recorder import get_recorder
 
 logger = structlog.get_logger()
@@ -241,6 +246,7 @@ class OpenAIProvider(LLMProvider):
         max_tokens: int | None = None,
     ) -> LLMResponse:
         openai_messages = self._to_openai_messages(messages)
+        tools = prepare_tools(tools, provider=self.provider_type, model=self.model)
         temp = temperature if temperature is not None else self.default_temperature
         mt = max_tokens if max_tokens is not None else self.default_max_tokens
         t_start = time.monotonic()
@@ -249,13 +255,16 @@ class OpenAIProvider(LLMProvider):
         async def _call():
             nonlocal retries
             try:
-                return await self.client.chat.completions.create(
-                    model=self.model,
-                    messages=openai_messages,
-                    tools=tools,
-                    max_tokens=mt,
-                    stream=False,
-                    **({"temperature": temp} if temp is not None else {}),
+                return await call_with_schema_fallback(
+                    lambda current_tools: self.client.chat.completions.create(
+                        model=self.model,
+                        messages=openai_messages,
+                        tools=current_tools,
+                        max_tokens=mt,
+                        stream=False,
+                        **({"temperature": temp} if temp is not None else {}),
+                    ),
+                    tools, provider=self.provider_type, model=self.model,
                 )
             except Exception:
                 retries += 1
@@ -317,6 +326,7 @@ class OpenAIProvider(LLMProvider):
         max_tokens: int | None = None,
     ) -> AsyncGenerator[LLMChunk]:
         openai_messages = self._to_openai_messages(messages)
+        tools = prepare_tools(tools, provider=self.provider_type, model=self.model)
         temp = temperature if temperature is not None else self.default_temperature
         mt = max_tokens or self.default_max_tokens
 
@@ -354,14 +364,17 @@ class OpenAIProvider(LLMProvider):
             async def _open_stream():
                 nonlocal retries
                 try:
-                    return await self.client.chat.completions.create(
-                        model=self.model,
-                        messages=openai_messages,
-                        tools=tools,
-                        max_tokens=mt,
-                        stream=True,
-                        stream_options={"include_usage": True},
-                        **({"temperature": temp} if temp is not None else {}),
+                    return await call_with_schema_fallback(
+                        lambda current_tools: self.client.chat.completions.create(
+                            model=self.model,
+                            messages=openai_messages,
+                            tools=current_tools,
+                            max_tokens=mt,
+                            stream=True,
+                            stream_options={"include_usage": True},
+                            **({"temperature": temp} if temp is not None else {}),
+                        ),
+                        tools, provider=self.provider_type, model=self.model,
                     )
                 except Exception:
                     retries += 1
@@ -612,7 +625,7 @@ class AnthropicProvider(LLMProvider):
         max_tokens: int | None = None,
     ) -> LLMResponse:
         system_content, anthropic_messages = self._to_anthropic_format(messages)
-        anthropic_tools = self._convert_tools(tools) if tools else None
+        tools = prepare_tools(tools, provider=self.provider_type, model=self.model)
         temp = temperature if temperature is not None else self.default_temperature
         mt = max_tokens if max_tokens is not None else self.default_max_tokens
         t_start = time.monotonic()
@@ -621,13 +634,16 @@ class AnthropicProvider(LLMProvider):
         async def _call():
             nonlocal retries
             try:
-                return await self.client.messages.create(
-                    model=self.model,
-                    system=system_content,
-                    messages=anthropic_messages,
-                    tools=anthropic_tools,
-                    max_tokens=mt,
-                    **({"temperature": temp} if temp is not None else {}),
+                return await call_with_schema_fallback(
+                    lambda current_tools: self.client.messages.create(
+                        model=self.model,
+                        system=system_content,
+                        messages=anthropic_messages,
+                        tools=self._convert_tools(current_tools) if current_tools else None,
+                        max_tokens=mt,
+                        **({"temperature": temp} if temp is not None else {}),
+                    ),
+                    tools, provider=self.provider_type, model=self.model,
                 )
             except Exception:
                 retries += 1
@@ -683,7 +699,7 @@ class AnthropicProvider(LLMProvider):
         max_tokens: int | None = None,
     ) -> AsyncGenerator[LLMChunk]:
         system_content, anthropic_messages = self._to_anthropic_format(messages)
-        anthropic_tools = self._convert_tools(tools) if tools else None
+        tools = prepare_tools(tools, provider=self.provider_type, model=self.model)
         temp = temperature if temperature is not None else self.default_temperature
         mt = max_tokens or self.default_max_tokens
 
@@ -722,13 +738,16 @@ class AnthropicProvider(LLMProvider):
         async def _open_stream():
             nonlocal retries
             try:
-                return self.client.messages.stream(
-                    model=self.model,
-                    system=system_content,
-                    messages=anthropic_messages,
-                    tools=anthropic_tools,
-                    max_tokens=mt,
-                    **({"temperature": temp} if temp is not None else {}),
+                return stream_with_schema_fallback(
+                    lambda current_tools: self.client.messages.stream(
+                        model=self.model,
+                        system=system_content,
+                        messages=anthropic_messages,
+                        tools=self._convert_tools(current_tools) if current_tools else None,
+                        max_tokens=mt,
+                        **({"temperature": temp} if temp is not None else {}),
+                    ),
+                    tools, provider=self.provider_type, model=self.model,
                 )
             except Exception:
                 retries += 1
