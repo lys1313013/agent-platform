@@ -15,6 +15,11 @@ import uvicorn
 from aio_agent_platform.tools.mcp.adapter import MCPServerConnection
 from aio_agent_platform.tools.mcp.manager import MCPManager
 
+# Real TCP/SDK handshakes need headroom on shared CI runners with coverage.
+# The lifecycle test checks ownership/cancellation, not network latency; keep
+# the short cancellation deadline below separate from this I/O budget.
+_REAL_IO_TIMEOUT = 15
+
 
 @pytest.fixture(params=["sse", "streamable-http"])
 def sdk(request, monkeypatch):
@@ -238,18 +243,18 @@ async def real_server(request):
         server = uvicorn.Server(uvicorn.Config(app, log_level="error", lifespan="on"))
         task = asyncio.create_task(server.serve(sockets=[sock]))
         try:
-            async with asyncio.timeout(3):
+            async with asyncio.timeout(_REAL_IO_TIMEOUT):
                 while not server.started:
                     await asyncio.sleep(0.01)
             path = "/sse" if request.param == "sse" else "/mcp"
             yield {
                 "transport_type": request.param, "url": f"http://127.0.0.1:{port}{path}",
-                "timeout": 2,
+                "timeout": _REAL_IO_TIMEOUT,
             }, entered
         finally:
             release.set()
             server.should_exit = True
-            await asyncio.wait_for(task, timeout=5)
+            await asyncio.wait_for(task, timeout=_REAL_IO_TIMEOUT)
 
 
 async def test_real_sdk_cross_task_cancel_reconnect_and_shutdown(real_server, monkeypatch):
@@ -268,12 +273,12 @@ async def test_real_sdk_cross_task_cancel_reconnect_and_shutdown(real_server, mo
     manager = MCPManager()
     sid = uuid4()
     try:
-        await asyncio.wait_for(manager.add_server(sid, config), timeout=3)
+        await asyncio.wait_for(manager.add_server(sid, config), timeout=_REAL_IO_TIMEOUT)
         conn = manager._connections[sid]
         owner = conn._owner_task
         assert await manager.call_tool("echo", {"text": "first"}) == "first"
         call = asyncio.create_task(manager.call_tool("echo", {"text": "blocked", "block": True}))
-        await asyncio.wait_for(entered.wait(), timeout=1)
+        await asyncio.wait_for(entered.wait(), timeout=_REAL_IO_TIMEOUT)
         call.cancel()
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(call, timeout=1)
@@ -283,11 +288,13 @@ async def test_real_sdk_cross_task_cancel_reconnect_and_shutdown(real_server, mo
             raise httpx.ConnectError("stale session")
 
         conn.session.call_tool = stale
-        assert await asyncio.wait_for(manager.call_tool("echo", {"text": "reconnected"}), 3) == "reconnected"
+        assert await asyncio.wait_for(
+            manager.call_tool("echo", {"text": "reconnected"}), _REAL_IO_TIMEOUT
+        ) == "reconnected"
         assert owner.done()
         assert conn._owner_task is not owner
     finally:
-        await asyncio.wait_for(manager.shutdown(), timeout=3)
+        await asyncio.wait_for(manager.shutdown(), timeout=_REAL_IO_TIMEOUT)
     # There must be no cancellation callback rescheduling itself after closure.
     await asyncio.sleep(0.02)
     settled = deliveries
