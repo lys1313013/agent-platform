@@ -1,9 +1,10 @@
 name: aio-agent-platform
 
-# Application deployment (external PostgreSQL and object storage):
+# Application deployment (independently managed PostgreSQL, Redis and object storage):
 #   1. Create a .env file with DATABASE_URL, JWT_SECRET and STORAGE_* settings.
 #   2. Optionally override BACKEND_IMAGE / FRONTEND_IMAGE / SANDBOX_IMAGE.
-#   3. Run: docker compose pull && docker compose up -d
+#   3. Start infrastructure: docker compose -f docker-compose-base.yml up -d
+#   4. Run: docker compose pull && docker compose up -d
 
 services:
   # Pre-pull the image into the host Docker daemon. The backend later creates
@@ -60,8 +61,6 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - sandbox-locks:/var/lib/aio-sandbox-locks
     depends_on:
-      redis:
-        condition: service_healthy
       sandbox-image:
         condition: service_completed_successfully
     healthcheck:
@@ -72,17 +71,7 @@ services:
       start_period: 20s
     networks:
       - app-network
-
-  redis:
-    image: redis:7-alpine
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
-    networks:
-      - app-network
+      - infra-network
 
   frontend:
     image: ${FRONTEND_IMAGE:-crpi-yvha9coypdedaafa.cn-beijing.personal.cr.aliyuncs.com/lys1313013/aio-agent-platform-frontend:latest}
@@ -107,3 +96,6 @@ volumes:
 networks:
   app-network:
     driver: bridge
+  infra-network:
+    external: true
+    name: ${INFRA_NETWORK_NAME:-aio-agent-platform-infra}

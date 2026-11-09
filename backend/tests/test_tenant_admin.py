@@ -1,18 +1,21 @@
 """Super administrator and tenant-management tests."""
 
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from aio_agent_platform.auth.dependencies import require_admin, require_superadmin
+from aio_agent_platform.db.models import Base, TenantMembership, User, UserProfile
 from aio_agent_platform.interface.routes.tenants import (
     TenantCreate,
     TenantMemberAssign,
     _normalize_slug,
 )
-from aio_agent_platform.interface.routes.users import UserAdminCreate, UserAdminUpdate
+from aio_agent_platform.interface.routes.users import UserAdminCreate, UserAdminUpdate, list_users
 
 
 @pytest.mark.asyncio
@@ -64,3 +67,43 @@ def test_tenant_user_update_supports_profile_and_password_changes() -> None:
 def test_tenant_member_assignment_requires_users() -> None:
     with pytest.raises(ValidationError):
         TenantMemberAssign(user_ids=[])
+
+
+@pytest.mark.parametrize("has_active_profile", [True, False])
+async def test_user_list_uses_only_active_tenant_profile(has_active_profile):
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(
+                lambda sync: Base.metadata.create_all(
+                    sync, tables=[User.__table__, UserProfile.__table__, TenantMembership.__table__],
+                )
+            )
+        async with async_sessionmaker(engine, expire_on_commit=False)() as db:
+            active_tenant, other_tenant = uuid4(), uuid4()
+            user = User(
+                id=uuid4(), username="alice", email="alice@example.com",
+                password_hash="test-only", tenant_id=active_tenant,
+            )
+            db.add(user)
+            db.add_all([
+                TenantMembership(user_id=user.id, tenant_id=tenant)
+                for tenant in [active_tenant, other_tenant]
+            ])
+            db.add(UserProfile(
+                user_id=user.id, tenant_id=other_tenant, display_name="Other tenant",
+            ))
+            if has_active_profile:
+                db.add(UserProfile(
+                    user_id=user.id, tenant_id=active_tenant, display_name="Active tenant",
+                ))
+            await db.commit()
+
+            users = await list_users(SimpleNamespace(role="superadmin"), db)
+
+            assert len(users) == 1
+            assert users[0]["id"] == user.id
+            assert users[0]["display_name"] == ("Active tenant" if has_active_profile else None)
+            assert set(users[0]["tenant_ids"]) == {active_tenant, other_tenant}
+    finally:
+        await engine.dispose()

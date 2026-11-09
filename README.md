@@ -55,7 +55,8 @@ aio-agent-platform/
 │   │   └── lib/            # API 客户端、类型定义、工具函数
 │   └── vite.config.ts
 ├── docs/                   # 项目文档
-├── docker-compose.yml      # 基础设施服务
+├── docker-compose.yml      # 应用服务
+├── docker-compose-base.yml # 独立管理的 PostgreSQL、Redis、MinIO
 └── README.md
 ```
 
@@ -67,10 +68,27 @@ git clone <repo-url> && cd aio-agent-platform
 cp backend/.env.example backend/.env
 
 # 2. 启动基础设施 + 装依赖 + 数据库迁移
-docker compose up -d postgres minio
+docker compose -f docker-compose-base.yml up -d
 cd backend && uv sync && uv run alembic upgrade head && cd ..
 cd frontend && corepack enable && pnpm install --frozen-lockfile && cd ..
 ```
+
+### Docker 部署
+
+基础服务和应用属于两个独立的 Compose 项目。先启动基础服务，再启动应用：
+
+```bash
+docker compose -f docker-compose-base.yml up -d --wait
+# 在仓库根目录的 .env 中配置 DATABASE_URL、JWT_SECRET 和 STORAGE_* 等应用参数。
+# 使用上述基础服务时，数据库主机为 postgres，REDIS_HOST=redis；
+# STORAGE_ENDPOINT 应为浏览器和后端都可访问的对象存储地址。
+docker compose pull
+docker compose up -d --wait
+```
+
+两者通过 `aio-agent-platform-infra` 网络连接；自定义网络时，在根目录 `.env` 中统一设置 `INFRA_NETWORK_NAME`。应用执行 `docker compose down` 只停止应用，不会停止 PostgreSQL、Redis、MinIO 或删除基础服务网络。
+
+基础服务保留原默认数据卷名 `aio-agent-platform_pgdata` 和 `aio-agent-platform_minio_data`。已有部署若使用过自定义项目名，请先用 `docker volume ls` 核对，并通过 `POSTGRES_VOLUME_NAME`、`MINIO_VOLUME_NAME` 指定原数据卷，再切换基础服务项目；不要同时运行新旧基础服务容器。
 
 ### 启动后端（终端 1）
 

@@ -23,7 +23,7 @@ from aio_agent_platform.tools.registry import ToolRegistry
 
 if TYPE_CHECKING:
     from aio_agent_platform.core.agent import DelegationContext
-    from aio_agent_platform.sandbox import SandboxManager
+    from aio_agent_platform.sandbox import ExecResult, SandboxManager
     from aio_agent_platform.tools.mcp.manager import MCPManager
     from aio_agent_platform.tools.remote.executor import RemoteToolExecutor
     from aio_agent_platform.tools.remote.manager import RemoteToolManager
@@ -61,6 +61,8 @@ class SandboxToolOutput:
     text: str
     file_changes: list[dict] = field(default_factory=list)
     image_data: str | None = field(default=None, repr=False)
+    success: bool = True
+    error: str | None = None
 
 
 class ToolExecutor:
@@ -165,7 +167,7 @@ class ToolExecutor:
         if tool_name in {"run_shell", "run_code"}:
             self.skill_execution_evidence[(user_id, session_id, tool_call_id)] = {
                 "tool": tool_name, "arguments": arguments,
-                "success": result.success and "[exit code:" not in result.output,
+                "success": result.success,
                 "output": (result.output if result.success else result.error or "")[:16000],
             }
             while len(self.skill_execution_evidence) > 100:
@@ -324,6 +326,8 @@ class ToolExecutor:
                 sandbox_output = await self._execute_in_sandbox(
                     tool_name, arguments, user_id, session_id, workspace_id, workspace_slug
                 )
+                success = getattr(sandbox_output, "success", True)
+                error = getattr(sandbox_output, "error", None)
                 if isinstance(sandbox_output, SandboxToolOutput):
                     output = sandbox_output.text
                     file_changes = sandbox_output.file_changes
@@ -339,6 +343,8 @@ class ToolExecutor:
                     workspace_slug=workspace_slug,
                     allowed_tools=allowed_tools,
                 )
+                success = getattr(output, "success", True)
+                error = getattr(output, "error", None)
                 file_changes = []
 
             return ToolResult(
@@ -346,8 +352,8 @@ class ToolExecutor:
                 name=tool_name,
                 arguments=arguments,
                 output=output,
-                success=getattr(output, "success", True),
-                error=getattr(output, "error", None),
+                success=success,
+                error=error,
                 file_changes=file_changes,
                 image_data=image_data,
                 duration_ms=(time.monotonic() - t_start) * 1000,
@@ -525,10 +531,14 @@ class ToolExecutor:
         tracked = tool_name in {"run_shell", "run_code", "write_file", "edit_file"}
         before = await self._workspace_manifest(sandbox, ws_slug) if tracked else {}
 
-        async def finish(text: str) -> SandboxToolOutput:
+        async def finish(
+            text: str, *, success: bool = True, error: str | None = None,
+        ) -> SandboxToolOutput:
             after = await self._workspace_manifest(sandbox, ws_slug)
             return SandboxToolOutput(
                 text=text,
+                success=success,
+                error=error,
                 file_changes=(
                     self._diff_workspace_files(before, after, ws_id)
                     if before is not None and after is not None
@@ -536,13 +546,15 @@ class ToolExecutor:
                 ),
             )
 
-        if tool_name == "run_shell":
-            command = args.get("command", "")
-            result = await self.sandbox_mgr.execute(sandbox, f"bash -c {command!r}")
-            return await finish(self._format_exec_result(result))
-
-        elif tool_name == "run_code":
-            return await finish(await self._run_code(sandbox, args))
+        if tool_name in {"run_shell", "run_code"}:
+            if tool_name == "run_shell":
+                # SandboxManager already passes this command to bash -c.
+                result = await self.sandbox_mgr.execute(sandbox, args.get("command", ""))
+            else:
+                result = await self._run_code(sandbox, args)
+            output = self._format_exec_result(result)
+            success = result.exit_code == 0
+            return await finish(output, success=success, error=None if success else output)
 
         elif tool_name == "read_file":
             path = self._sandbox_path(args["path"], ws_slug)
@@ -1237,7 +1249,7 @@ elif isinstance(data, list):
 
         return "\n".join(lines)
 
-    async def _run_code(self, sandbox, args: dict) -> str:
+    async def _run_code(self, sandbox, args: dict) -> ExecResult:
         """Write code to a temp file and execute it in the sandbox."""
         import base64
 
@@ -1252,7 +1264,7 @@ elif isinstance(data, list):
         save_cmd = f"echo '{b64_code}' | base64 -d > {filename}"
         result = await self.sandbox_mgr.execute(sandbox, save_cmd)
         if result.exit_code != 0:
-            return self._format_exec_result(result)
+            return result
 
         # Execute
         run_cmd = {
@@ -1261,8 +1273,7 @@ elif isinstance(data, list):
             "bash": f"bash {filename}",
         }.get(language, f"cat {filename}")
 
-        result = await self.sandbox_mgr.execute(sandbox, run_cmd)
-        return self._format_exec_result(result)
+        return await self.sandbox_mgr.execute(sandbox, run_cmd)
 
     async def _edit_file_in_sandbox(self, sandbox, path: str, old_str: str, new_str: str, workspace_slug: str | None = None) -> str:
         """

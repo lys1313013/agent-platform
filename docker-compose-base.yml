@@ -1,8 +1,9 @@
-version: "3.9"
+name: aio-agent-platform-base
 
 services:
   postgres:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_DB: aio_agent_platform
       POSTGRES_USER: agent_user
@@ -16,9 +17,12 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    networks:
+      - infra-network
 
   minio:
     image: minio/minio:latest
+    restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
@@ -33,9 +37,12 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    networks:
+      - infra-network
 
   redis:
     image: redis:7-alpine
+    restart: unless-stopped
     ports:
       - "6379:6379"
     healthcheck:
@@ -43,6 +50,8 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+    networks:
+      - infra-network
 
   sandbox-build:
     build:
@@ -53,4 +62,12 @@ services:
 
 volumes:
   pgdata:
+    # Preserve the volume name used before the infrastructure project was split.
+    name: ${POSTGRES_VOLUME_NAME:-aio-agent-platform_pgdata}
   minio_data:
+    name: ${MINIO_VOLUME_NAME:-aio-agent-platform_minio_data}
+
+networks:
+  infra-network:
+    name: ${INFRA_NETWORK_NAME:-aio-agent-platform-infra}
+    driver: bridge

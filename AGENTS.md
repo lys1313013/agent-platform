@@ -31,8 +31,8 @@ npm run build                            # 生产构建
 npm run lint                             # ESLint
 
 # 基础设施
-docker compose up -d postgres minio      # 启动数据库和对象存储
-docker compose --profile build up sandbox-build  # 构建沙箱镜像
+docker compose -f docker-compose-base.yml up -d  # 独立启动 PostgreSQL、Redis 和 MinIO
+docker compose -f docker-compose-base.yml --profile build build sandbox-build  # 构建沙箱镜像
 ```
 
 ## 架构核心
