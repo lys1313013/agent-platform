@@ -726,7 +726,7 @@ for current, dirs, names in os.walk(root):
         files[os.path.relpath(full, root)] = [stat.st_size, stat.st_mtime_ns]
 print(json.dumps(files, ensure_ascii=False))
 """
-        result = await self.sandbox_mgr.execute(sandbox, f"python3 -c {script!r} {root!r}")
+        result = await self.sandbox_mgr.execute(sandbox, f"python3 -c {shlex.quote(script)} {shlex.quote(root)}")
         if result.exit_code != 0:
             logger.warning("workspace_manifest_failed", error=result.stderr[:500])
             return None
@@ -1303,7 +1303,7 @@ except Exception as e:
     print(f'ERROR: {{e}}', file=sys.stderr)
     sys.exit(1)
 """
-        result = await self.sandbox_mgr.execute(sandbox, f"python3 -c {python_code!r}")
+        result = await self.sandbox_mgr.execute(sandbox, f"python3 -c {shlex.quote(python_code)}")
         return self._format_exec_result(result)
 
     async def _execute_direct(
