@@ -1,0 +1,35 @@
+# Opt-in overlay: docker compose -f docker-compose.yml -f docker-compose.browser.yml up -d
+# Terminate TLS at your reverse proxy; publish only /extension and /extension/authorize.
+services:
+  backend:
+    environment:
+      BROWSER_ENABLED: "true"
+      BROWSER_SECRET_KEY: ${BROWSER_SECRET_KEY:?Set an independent random browser key of at least 32 characters}
+      BROWSER_PUBLIC_WSS_URL: ${BROWSER_PUBLIC_WSS_URL:?Set wss://browser.example.com/extension}
+  browser-gateway:
+    image: ${BACKEND_IMAGE:-crpi-yvha9coypdedaafa.cn-beijing.personal.cr.aliyuncs.com/lys1313013/aio-agent-platform-backend:latest}
+    restart: unless-stopped
+    command: ["uv", "run", "uvicorn", "aio_agent_platform.browser.app:app", "--host", "0.0.0.0", "--port", "8101", "--workers", "1", "--ws-max-size", "8388608", "--no-access-log"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL}
+      BROWSER_ENABLED: "true"
+      BROWSER_SECRET_KEY: ${BROWSER_SECRET_KEY:?Set BROWSER_SECRET_KEY}
+      BROWSER_PUBLIC_WSS_URL: ${BROWSER_PUBLIC_WSS_URL:?Set BROWSER_PUBLIC_WSS_URL}
+      # Shared root settings require a JWT key. Gateway has no JWT endpoints.
+      # Keep this bootstrap key independent of both platform JWT and browser encryption.
+      JWT_SECRET: ${BROWSER_GATEWAY_SETTINGS_KEY:?Set a separate random gateway settings key}
+      STORAGE_ACCESS_KEY: browser-gateway-unused
+      STORAGE_SECRET_KEY: browser-gateway-unused
+      LOG_LEVEL: INFO
+    ports:
+      - "127.0.0.1:${BROWSER_GATEWAY_PORT:-8101}:8101"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8101/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    networks:
+      - app-network
