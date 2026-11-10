@@ -1,15 +1,15 @@
 """Add the tenant dimension to audit logs.
 
-Revision ID: b2c3d4e5f6a7
-Revises: a1b2c3d4e5f6
+Revision ID: 8c57d2e6a940
+Revises: 4f82a6b9c013
 """
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 from alembic import op
 
-revision = "b2c3d4e5f6a7"
-down_revision = "a1b2c3d4e5f6"
+revision = "8c57d2e6a940"
+down_revision = "4f82a6b9c013"
 branch_labels = None
 depends_on = None
 

@@ -1,12 +1,14 @@
 """Trigram GIN indexes for similarity search.
 
 Revision ID: c3d4e5f6a7b8
-Revises: b2c3d4e5f6a7
+Revises: 8c57d2e6a940
 """
+import sqlalchemy as sa
+
 from alembic import op
 
 revision = "c3d4e5f6a7b8"
-down_revision = "b2c3d4e5f6a7"
+down_revision = "8c57d2e6a940"
 branch_labels = None
 depends_on = None
 
@@ -20,10 +22,18 @@ _INDEXES = (
 
 def upgrade():
     op.execute('CREATE EXTENSION IF NOT EXISTS "pg_trgm"')
+    connection = op.get_bind()
+    extension_schema = connection.execute(sa.text(
+        "SELECT n.nspname FROM pg_catalog.pg_extension e "
+        "JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace "
+        "WHERE e.extname = 'pg_trgm'"
+    )).scalar_one()
+    # The extension may already live outside the application's search_path.
+    extension_schema = connection.dialect.identifier_preparer.quote_schema(extension_schema)
     for name, table, column in _INDEXES:
         op.execute(
             f'CREATE INDEX IF NOT EXISTS {name} ON "{table}" '
-            f"USING gin ({column} gin_trgm_ops)"
+            f"USING gin ({column} {extension_schema}.gin_trgm_ops)"
         )
 
 

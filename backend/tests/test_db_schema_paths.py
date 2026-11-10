@@ -83,7 +83,8 @@ async def snapshot(conn, schema):
     return result
 
 
-async def test_fresh_upgrade_and_bootstrap_repair_have_identical_schema(engine):
+@pytest.mark.parametrize("previous_head", [PREVIOUS_HEAD, "e7a8192b4c5d"])
+async def test_fresh_upgrade_and_bootstrap_repair_have_identical_schema(engine, previous_head):
     async with engine.connect() as conn:
         transaction = await conn.begin()
         try:
@@ -91,7 +92,7 @@ async def test_fresh_upgrade_and_bootstrap_repair_have_identical_schema(engine):
             for mode in ("fresh", "upgrade", "bootstrap"):
                 schema = await create_schema(conn, mode)
                 if mode == "upgrade":
-                    await conn.run_sync(migrate, PREVIOUS_HEAD)
+                    await conn.run_sync(migrate, previous_head)
                 elif mode == "bootstrap":
                     await bootstrap_snapshot(conn)
                 await conn.run_sync(migrate)

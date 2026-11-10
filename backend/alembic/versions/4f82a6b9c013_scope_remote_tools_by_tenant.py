@@ -1,6 +1,6 @@
 """Scope remote HTTP tools to their owning tenant.
 
-Revision ID: a1b2c3d4e5f6
+Revision ID: 4f82a6b9c013
 Revises: e7a8192b4c5d
 """
 import sqlalchemy as sa
@@ -8,7 +8,7 @@ from sqlalchemy.dialects import postgresql
 
 from alembic import op
 
-revision = "a1b2c3d4e5f6"
+revision = "4f82a6b9c013"
 down_revision = "e7a8192b4c5d"
 branch_labels = None
 depends_on = None
