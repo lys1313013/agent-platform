@@ -108,8 +108,11 @@ export const petsApi = {
     });
   },
   /** 开启/复用宠物闲聊会话，返回 conversation_id；forceNew 时强制新建（旧会话保留） */
-  petChat(userPetId: string, opts?: { forceNew?: boolean }) {
-    const qs = opts?.forceNew ? '?force_new=true' : '';
+  petChat(userPetId: string, opts?: { forceNew?: boolean; workspaceId?: string | null }) {
+    const params = new URLSearchParams();
+    if (opts?.forceNew) params.set('force_new', 'true');
+    if (opts?.workspaceId) params.set('workspace_id', opts.workspaceId);
+    const qs = params.toString() ? `?${params.toString()}` : '';
     return request<{ conversation_id: string; agent_id: string | null }>(
       `/pets/${userPetId}/chat${qs}`,
       { method: 'POST' },
@@ -156,9 +159,13 @@ export const petsApi = {
     return () => controller.abort();
   },
   /** Refresh the pet task snapshot without reserving an HTTP streaming connection. */
-  watchActiveTasks(onEvent: (event: Record<string, unknown>) => void): () => void {
+  watchActiveTasks(
+    onEvent: (event: Record<string, unknown>) => void,
+    workspaceId?: string | null,
+  ): () => void {
+    const qs = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : '';
     return pollTaskSnapshots(
-      (signal) => request<unknown[]>('/pets/active-tasks', { signal }),
+      (signal) => request<unknown[]>(`/pets/active-tasks${qs}`, { signal }),
       scopeAuthCallback(onEvent),
     );
   },

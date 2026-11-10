@@ -111,6 +111,7 @@ class PetErrorBoundary extends Component<{ children: ReactNode }, { failed: bool
 function PetWidgetInner() {
   const { activePet, enabled, mood, actionRow, actionFps, size, loaded, tasks, loadActive, setEnabled, setSize, playRow, removeTask } = usePetStore();
   const navigate = useNavigate();
+  const selectedWorkspaceId = useChatStore((s) => s.selectedWorkspaceId);
 
   // 点击任务条进入对应会话：有 agentId 走 Agent 会话路由，否则通用聊天页 + 激活会话
   const openSession = useCallback(
@@ -205,6 +206,11 @@ function PetWidgetInner() {
     petsApi.myPets().then(setMyPets).catch(() => {});
   }, []);
 
+  // 切换工作区时清空任务条，避免跨空间残留。
+  useEffect(() => {
+    usePetStore.getState().clearTasks();
+  }, [selectedWorkspaceId]);
+
   // 渠道任务通过短请求刷新；后台暂停，避免多页面长连接耗尽同源连接。
   useEffect(() => {
     if (!enabled || !activePet) return;
@@ -228,7 +234,7 @@ function PetWidgetInner() {
           return;
         }
         usePetStore.getState().applyRemoteTaskEvent(ev);
-      });
+      }, selectedWorkspaceId);
     };
     // 返回前台立即获取快照，补齐后台期间的任务状态。
     const onVisibilityChange = () => {
@@ -242,7 +248,7 @@ function PetWidgetInner() {
       document.removeEventListener('visibilitychange', onVisibilityChange);
       disconnect();
     };
-  }, [enabled, activePet]);
+  }, [enabled, activePet, selectedWorkspaceId]);
 
   const showBubble = useCallback((text: string) => {
     if (bubbleTimer.current) clearTimeout(bubbleTimer.current);
@@ -700,7 +706,7 @@ function PetWidgetInner() {
       // 开启/复用宠物闲聊会话并打开弹窗；未绑定智能体时后端返回 400 提示
       void (async () => {
         try {
-          const r = await petsApi.petChat(activePet.id);
+          const r = await petsApi.petChat(activePet.id, { workspaceId: selectedWorkspaceId });
           setChatDlg({ open: true, sessionId: r.conversation_id, agentId: r.agent_id ?? null });
         } catch (err) {
           message.warning(err instanceof Error ? err.message : '请先为该宠物绑定智能体');

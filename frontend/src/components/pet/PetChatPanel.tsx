@@ -48,6 +48,7 @@ function defaultPos() {
 export default function PetChatPanel({ open, pet, sessionId, agentId, onClose, onSessionChange }: Props) {
   const { message, modal } = App.useApp();
   const addMessage = useChatStore((s) => s.addMessage);
+  const selectedWorkspaceId = useChatStore((s) => s.selectedWorkspaceId);
   const deleteSession = useChatStore((s) => s.deleteSession);
   const messages = useChatStore((s) => (sessionId ? s.messages[sessionId] : undefined)) ?? [];
   const flushNextRef = useRef<() => void>(() => {});
@@ -126,7 +127,7 @@ export default function PetChatPanel({ open, pet, sessionId, agentId, onClose, o
     setNewSessionLoading(true);
     void (async () => {
       try {
-        const r = await petsApi.petChat(pet.id, { forceNew: true });
+        const r = await petsApi.petChat(pet.id, { forceNew: true, workspaceId: selectedWorkspaceId });
         setError(null);
         onSessionChange?.(r.conversation_id, r.agent_id ?? null);
       } catch (err) {

@@ -87,6 +87,8 @@ interface PetState {
   startTask: (sessionId: string, label: string, agentId?: string) => void;
   /** 手动关闭任务条（用户点 × 移除，不走超时） */
   removeTask: (sessionId: string) => void;
+  /** 清空任务条（切换工作区时避免跨空间残留） */
+  clearTasks: () => void;
   /** SSE 事件驱动的状态机入口（ChatPage / AgentChatPage 每个事件调用一次） */
   reportEvent: (eventType: string, opts?: {
     sessionId?: string;
@@ -249,6 +251,8 @@ export const usePetStore = create<PetState>((set, get) => ({
       return { tasks: next };
     });
   },
+
+  clearTasks: () => set({ tasks: {} }),
 
   reportEvent: (eventType, opts) => {
     if (!get().activePet) return;
