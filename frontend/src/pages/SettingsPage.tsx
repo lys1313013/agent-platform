@@ -231,7 +231,7 @@ function SecuritySettings() {
 
   return (
     <Card title="信任级别" extra={<Text type="secondary">控制 Agent 在执行工具前何时请求确认。</Text>}>
-      <Form form={form} layout="vertical" onFinish={handleSave} initialValues={{ trust: 'ask_dangerous' }}>
+      <Form form={form} layout="vertical" onFinish={handleSave} initialValues={{ trust: 'auto_all' }}>
         <Form.Item name="trust">
           <Radio.Group className="space-y-3">
             <Radio value="ask_always" className="block">

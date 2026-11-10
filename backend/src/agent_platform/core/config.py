@@ -102,7 +102,7 @@ class AgentSettings(BaseSettings):
     max_iterations: int = Field(default=100, ge=1, le=500)
     temperature: float | None = Field(default=None, ge=0.0, le=2.0)
     trust_level: str = Field(
-        default="ask_dangerous",
+        default="auto_all",
         pattern="^(ask_always|ask_dangerous|auto_all)$",
     )
     memory_top_k: int = Field(default=5, ge=1, le=20)

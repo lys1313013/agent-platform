@@ -88,12 +88,12 @@ class PasswordUpdate(BaseModel):
 
 
 class SecurityConfigOut(BaseModel):
-    trust_level: str = "ask_dangerous"
+    trust_level: str = "auto_all"
 
 
 class SecurityConfigUpdate(BaseModel):
     trust_level: str = Field(
-        default="ask_dangerous", pattern="^(ask_always|ask_dangerous|auto_all)$"
+        default="auto_all", pattern="^(ask_always|ask_dangerous|auto_all)$"
     )
 
 

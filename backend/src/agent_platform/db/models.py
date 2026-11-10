@@ -326,7 +326,7 @@ class UserConfig(Base):
         primary_key=True,
         comment="关联用户ID",
     )
-    trust_level: Mapped[str] = mapped_column(String(32), default="ask_dangerous", comment="信任级别")
+    trust_level: Mapped[str] = mapped_column(String(32), default="auto_all", comment="信任级别")
     memory_top_k: Mapped[int] = mapped_column(Integer, default=5, comment="记忆检索数量")
     extra: Mapped[dict] = mapped_column(JSONB, default=dict, comment="扩展配置(JSON)")
     updated_at: Mapped[datetime] = mapped_column(
