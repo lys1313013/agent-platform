@@ -1,5 +1,6 @@
 """Provider-to-agent regressions for indexed, interleaved tool-call streams."""
 
+import asyncio
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
@@ -9,6 +10,7 @@ import pytest
 from aio_agent_platform.core.agent import AgentLoop
 from aio_agent_platform.llm.client import AnthropicProvider, LLMChunk, OpenAIProvider, ToolCall
 from aio_agent_platform.tools.executor import ToolResult
+from aio_agent_platform.tools.registry import Tool
 
 
 def call(index, name=None, arguments=None):
@@ -41,7 +43,7 @@ def make_loop(chunks):
     provider.stream = stream
     executor = Mock()
     executor.registry.get.return_value = None
-    loop = AgentLoop(provider=provider, tool_executor=executor, execution_tenant_id=uuid4())
+    loop = AgentLoop(provider=provider, tool_executor=executor, execution_tenant_id=uuid4(), trust_level="auto_all")
     loop.execution_agent_id = uuid4()
 
     async def execute(tc, ctx):
@@ -127,6 +129,32 @@ async def test_unindexed_sequential_provider_stays_compatible(quiet_observers):
     ])
     await collect(loop)
     assert loop._execute_tool_traced.await_args.args[0].arguments == {"path": "legacy"}
+
+
+async def test_read_only_tools_in_one_batch_run_concurrently(quiet_observers):
+    loop, _ = make_loop([
+        LLMChunk(type="tool_call_start", tool_call=ToolCall("r1", "read_file", {}), tool_call_index=0),
+        LLMChunk(type="tool_call_delta", argument_delta='{"path":"a"}', tool_call_index=0),
+        LLMChunk(type="tool_call_start", tool_call=ToolCall("r2", "read_file", {}), tool_call_index=1),
+        LLMChunk(type="tool_call_delta", argument_delta='{"path":"b"}', tool_call_index=1),
+    ])
+    loop.tool_executor.registry.get.return_value = Tool(
+        "read_file", "", {}, requires_sandbox=False, permission_level="read",
+    )
+    order = []
+
+    async def execute(tc, ctx):
+        order.append(f"start:{tc.id}")
+        await asyncio.sleep(0.05)
+        order.append(f"end:{tc.id}")
+        return ToolResult(tool_call_id=tc.id, name=tc.name, arguments=tc.arguments,
+                          output="ok", success=True)
+
+    loop._execute_tool_traced = AsyncMock(side_effect=execute)
+    items = await collect(loop)
+
+    assert order.index("start:r2") < order.index("end:r1"), "reads must overlap"
+    assert [item.split(":")[1] for item in items if isinstance(item, str) and item.startswith("tool_result:")] == ["r1", "r2"]
 
 
 async def test_anthropic_input_json_deltas_use_content_block_indices(quiet_observers):

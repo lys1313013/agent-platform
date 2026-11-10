@@ -14,7 +14,7 @@ from aio_agent_platform.core.execution_scope import resolve_execution_tenant
 from aio_agent_platform.db.connection import get_session_factory
 from aio_agent_platform.tools.web.cache import TTLCache
 from aio_agent_platform.tools.web.config import WebConfigService
-from aio_agent_platform.tools.web.ssrf import PinnedAsyncTransport, SSRFError, assert_public_url
+from aio_agent_platform.tools.web.ssrf import PinnedAsyncTransport, SSRFError
 
 _USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -32,6 +32,33 @@ class WebFetcher:
     def __init__(self, config: WebConfigService) -> None:
         self._config = config
         self._cache = TTLCache()
+        self._client: httpx.AsyncClient | None = None
+        self._client_key: tuple[int, ...] | None = None
+
+    async def aclose(self) -> None:
+        client, self._client = self._client, None
+        if client is not None:
+            await client.aclose()
+
+    async def _client_for(self, s: WebSettings) -> httpx.AsyncClient:
+        """Reuse one pooled client; redirect policy is client-level in httpx."""
+        key = (s.fetch_max_redirects,)
+        if self._client is None or self._client.is_closed or self._client_key != key:
+            previous = self._client
+            self._client = httpx.AsyncClient(
+                follow_redirects=True,
+                max_redirects=s.fetch_max_redirects,
+                headers={
+                    "User-Agent": _USER_AGENT,
+                    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                },
+                transport=PinnedAsyncTransport(),
+                trust_env=False,
+            )
+            self._client_key = key
+            if previous is not None:
+                await previous.aclose()
+        return self._client
 
     async def handle(self, args: dict, user_id: str | None = None, *_unused, **_kwargs) -> str:
         s = await self._config.get()
@@ -45,11 +72,7 @@ class WebFetcher:
         if not url:
             return "Error: missing required parameter 'url'."
 
-        try:
-            await assert_public_url(url)
-        except SSRFError as e:
-            return f"Error: {e}"
-
+        # PinnedAsyncTransport validates and pins every hop, including this one.
         cache_key = f"fetch:{url}"
         cached = self._cache.get(cache_key)
         if cached is not None:
@@ -80,20 +103,9 @@ class WebFetcher:
         return f"# Content from {url}\n\n{body}"
 
     async def _fetch(self, url: str, s: WebSettings) -> str:
-        timeout = httpx.Timeout(s.fetch_timeout_seconds, connect=10.0)
         try:
-            async with httpx.AsyncClient(
-                timeout=timeout,
-                follow_redirects=True,
-                max_redirects=s.fetch_max_redirects,
-                headers={
-                    "User-Agent": _USER_AGENT,
-                    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-                },
-                transport=PinnedAsyncTransport(),
-                trust_env=False,
-            ) as client:
-                html, content_type = await self._get_with_size_limit(client, url, s)
+            client = await self._client_for(s)
+            html, content_type = await self._get_with_size_limit(client, url, s)
         except SSRFError as e:
             return f"Error: {e}"
         except _HTTPStatusError as e:
@@ -123,10 +135,11 @@ class WebFetcher:
         return text
 
     async def _get_with_size_limit(
-        self, client: httpx.AsyncClient, url: str, s: WebSettings
+        self, client: httpx.AsyncClient, url: str, s: WebSettings,
     ) -> tuple[str, str]:
         limit = s.fetch_max_response_bytes
-        async with client.stream("GET", url) as resp:
+        timeout = httpx.Timeout(s.fetch_timeout_seconds, connect=10.0)
+        async with client.stream("GET", url, timeout=timeout) as resp:
             if resp.status_code >= 400:
                 hint = " (site may block automated access)" if resp.status_code == 403 else ""
                 raise _HTTPStatusError(
@@ -148,17 +161,18 @@ class WebFetcher:
     async def _fetch_via_firecrawl(self, url: str, s: WebSettings) -> str | None:
         """Scrape via Firecrawl API (real browser rendering + bot circumvention)."""
         try:
-            async with httpx.AsyncClient(timeout=s.fetch_timeout_seconds) as client:
-                resp = await client.post(
-                    "https://api.firecrawl.dev/v1/scrape",
-                    json={"url": url, "formats": ["markdown"]},
-                    headers={
-                        "Authorization": f"Bearer {s.firecrawl_api_key}",
-                        "Content-Type": "application/json",
-                    },
-                )
-                resp.raise_for_status()
-                data = resp.json()
+            client = await self._client_for(s)
+            resp = await client.post(
+                "https://api.firecrawl.dev/v1/scrape",
+                json={"url": url, "formats": ["markdown"]},
+                headers={
+                    "Authorization": f"Bearer {s.firecrawl_api_key}",
+                    "Content-Type": "application/json",
+                },
+                timeout=s.fetch_timeout_seconds,
+            )
+            resp.raise_for_status()
+            data = resp.json()
             markdown = (data.get("data") or {}).get("markdown") or ""
             return markdown.strip() or None
         except Exception:

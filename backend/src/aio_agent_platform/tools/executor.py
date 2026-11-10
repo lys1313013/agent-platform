@@ -12,10 +12,11 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import structlog
 
+from aio_agent_platform.core.config import settings
 from aio_agent_platform.db.sanitize import sanitize_pg_text
 from aio_agent_platform.hooks import get_hook_manager
 from aio_agent_platform.observation.recorder import get_recorder
@@ -33,6 +34,24 @@ logger = structlog.get_logger(__name__)
 
 class SecurityError(Exception):
     """Raised when a tool call violates security policy."""
+
+
+def visible_registry_tools(tool_executor, tenant_id: UUID | None) -> list:
+    """Registry tools minus remote tools owned by another tenant.
+
+    Only a real RemoteToolManager participates: tests and callers may pass a
+    mock executor whose registry is the only meaningful attribute.
+    """
+    from aio_agent_platform.tools.remote.manager import RemoteToolManager
+
+    tools = tool_executor.registry.list_tools()
+    manager = getattr(tool_executor, "remote_manager", None)
+    if not isinstance(manager, RemoteToolManager) or not isinstance(tenant_id, UUID):
+        return tools
+    return [
+        tool for tool in tools
+        if not manager.is_remote_tool(tool.name) or manager.is_visible(tool.name, tenant_id)
+    ]
 
 
 @dataclass
@@ -77,7 +96,11 @@ class ToolExecutor:
     """
 
     MAX_OUTPUT_SIZE = 50_000
+    # Ceiling for direct-handler tools that have no registry metadata.
+    DEFAULT_DIRECT_TOOL_TIMEOUT = 300.0
 
+    # Known-destructive shell patterns. A convenience guard, never a security
+    # boundary: the sandbox is, and commands can be rewritten to evade this list.
     DANGEROUS_COMMANDS = (
         "rm -rf /",
         "mkfs",
@@ -104,6 +127,7 @@ class ToolExecutor:
         self.registry = registry
         self.sandbox_mgr = sandbox_mgr
         self.direct_handlers: dict[str, Callable] = direct_handlers or {}
+        self.direct_handler_permissions: dict[str, str] = {}
         self.mcp_manager: MCPManager | None = mcp_manager
         self.remote_manager: RemoteToolManager | None = remote_manager
         self.remote_executor: RemoteToolExecutor | None = remote_executor
@@ -112,9 +136,12 @@ class ToolExecutor:
         # Bounded evidence for explicitly requested skill sample validation.
         self.skill_execution_evidence: dict[tuple[str, str, str], dict] = {}
 
-    def register_direct_handler(self, name: str, handler: Callable) -> None:
+    def register_direct_handler(self, name: str, handler: Callable, *, permission_level: str = "dangerous") -> None:
         """Register a handler for a non-sandbox tool."""
+        if permission_level not in {"read", "write", "dangerous"}:
+            raise ValueError("Unknown tool permission level")
         self.direct_handlers[name] = handler
+        self.direct_handler_permissions[name] = permission_level
 
     async def execute(
         self,
@@ -128,6 +155,8 @@ class ToolExecutor:
         workspace_id: str | None = None,
         workspace_slug: str | None = None,
         allowed_tools: set[str] | None = None,
+        trust_level: str = "ask_dangerous",
+        approved: bool = False,
     ) -> ToolResult:
         """Execute a tool with security checks and sandbox dispatch.
 
@@ -138,6 +167,17 @@ class ToolExecutor:
                 None means all tools are allowed (default for parent agents).
         """
         t_start = time.monotonic()
+        from aio_agent_platform.tools.policy import requires_approval
+
+        # A denied direct dispatch must not fire side-effecting pre-tool hooks.
+        if (allowed_tools is not None and tool_name not in allowed_tools) or (
+            requires_approval(self, tool_name, trust_level) and not approved
+        ):
+            return await self._execute_impl(
+                tool_name, arguments, tool_call_id, user_id, session_id,
+                allowed_tools=allowed_tools, trust_level=trust_level, approved=approved,
+                t_start=t_start,
+            )
         get_hook_manager().fire_nowait(
             "PreToolUse",
             user_id=user_id,
@@ -151,19 +191,34 @@ class ToolExecutor:
                 "is_delegation": delegation is not None,
             },
         )
-        result = await self._execute_impl(
-            tool_name=tool_name,
-            arguments=arguments,
-            tool_call_id=tool_call_id,
-            user_id=user_id,
-            session_id=session_id,
-            delegation=delegation,
-            event_queue=event_queue,
-            workspace_id=workspace_id,
-            workspace_slug=workspace_slug,
-            allowed_tools=allowed_tools,
-            t_start=t_start,
-        )
+        timeout_s = self.tool_timeout(tool_name)
+        try:
+            async with asyncio.timeout(timeout_s):
+                result = await self._execute_impl(
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    tool_call_id=tool_call_id,
+                    user_id=user_id,
+                    session_id=session_id,
+                    delegation=delegation,
+                    event_queue=event_queue,
+                    workspace_id=workspace_id,
+                    workspace_slug=workspace_slug,
+                    allowed_tools=allowed_tools,
+                    t_start=t_start,
+                    trust_level=trust_level,
+                    approved=approved,
+                )
+        except TimeoutError:
+            result = ToolResult(
+                tool_call_id=tool_call_id,
+                name=tool_name,
+                arguments=arguments,
+                output="",
+                success=False,
+                error=f"Tool '{tool_name}' timed out after {timeout_s:g}s",
+                duration_ms=(time.monotonic() - t_start) * 1000,
+            )
         if tool_name in {"run_shell", "run_code"}:
             self.skill_execution_evidence[(user_id, session_id, tool_call_id)] = {
                 "tool": tool_name, "arguments": arguments,
@@ -172,7 +227,9 @@ class ToolExecutor:
             }
             while len(self.skill_execution_evidence) > 100:
                 self.skill_execution_evidence.pop(next(iter(self.skill_execution_evidence)))
-        if result.success:
+        if result.success and tool_name in {"write_file", "edit_file", "run_shell", "run_code"}:
+            self._invalidate_file_meta(str(workspace_id or user_id))
+        if result.success and not tool_name.startswith("local_browser_"):
             await self._prepare_output(result, user_id, session_id, workspace_id, workspace_slug)
         result.duration_ms = (time.monotonic() - t_start) * 1000
         self._record_tool_call(result, user_id, session_id)
@@ -208,8 +265,17 @@ class ToolExecutor:
         workspace_slug: str | None = None,
         allowed_tools: set[str] | None = None,
         t_start: float = 0.0,
+        trust_level: str = "ask_dangerous",
+        approved: bool = False,
     ) -> ToolResult:
         """Original dispatch body (wrapped by ``execute`` for observation)."""
+        from aio_agent_platform.tools.builtin import BUILTIN_TOOL_NAMES
+        from aio_agent_platform.tools.policy import requires_approval
+
+        # Built-in names always resolve to the built-in implementation, even
+        # if a stored MCP/remote definition claims the same name.
+        reserved = tool_name in BUILTIN_TOOL_NAMES
+
         # ---- Tool permission check (runtime safety net) ----
         if allowed_tools is not None and tool_name not in allowed_tools:
             return ToolResult(
@@ -222,9 +288,14 @@ class ToolExecutor:
                 duration_ms=(time.monotonic() - t_start) * 1000,
             )
 
+        if requires_approval(self, tool_name, trust_level) and not approved:
+            return ToolResult(tool_call_id, tool_name, arguments, "", False,
+                              error="Approval required: this tool was not authorized by the user")
+
         # ---- MCP tool routing ----
-        if self.mcp_manager and self.mcp_manager.is_mcp_tool(tool_name):
+        if not reserved and self.mcp_manager and self.mcp_manager.is_mcp_tool(tool_name):
             try:
+                await self._authorize_mcp_tool(tool_name, user_id)
                 output = await self.mcp_manager.call_tool(tool_name, arguments)
                 return ToolResult(
                     tool_call_id=tool_call_id,
@@ -246,8 +317,9 @@ class ToolExecutor:
                 )
 
         # ---- Remote tool routing ----
-        if self.remote_manager and self.remote_manager.is_remote_tool(tool_name):
+        if not reserved and self.remote_manager and self.remote_manager.is_remote_tool(tool_name):
             try:
+                await self._authorize_remote_tool(tool_name, user_id)
                 output = await self.remote_executor.call(tool_name, arguments)
                 return ToolResult(
                     tool_call_id=tool_call_id,
@@ -346,6 +418,9 @@ class ToolExecutor:
                 success = getattr(output, "success", True)
                 error = getattr(output, "error", None)
                 file_changes = []
+                if isinstance(output, SandboxToolOutput):
+                    image_data = output.image_data
+                    output = output.text
 
             return ToolResult(
                 tool_call_id=tool_call_id,
@@ -379,6 +454,76 @@ class ToolExecutor:
                 error=str(e),
                 duration_ms=(time.monotonic() - t_start) * 1000,
             )
+
+    async def _authorize_mcp_tool(self, tool_name: str, user_id: str) -> None:
+        """Recheck live tenant membership and service ownership at dispatch."""
+        from uuid import UUID
+
+        from sqlalchemy import select
+
+        from aio_agent_platform.core.execution_scope import (
+            execution_tenant_id,
+            require_execution_user,
+        )
+        from aio_agent_platform.db.connection import get_session_factory
+        from aio_agent_platform.db.models import MCPServer
+
+        uid = UUID(user_id)
+        tenant = execution_tenant_id(uid)
+        if tenant is None:
+            raise SecurityError("MCP execution requires an authorized tenant context")
+        server_id = self.mcp_manager._tool_to_server.get(tool_name)
+        async with get_session_factory()() as db:
+            await require_execution_user(db, uid, tenant)
+            server = await db.scalar(select(MCPServer.id).where(
+                MCPServer.id == server_id, MCPServer.tenant_id == tenant, MCPServer.is_active,
+            ))
+            if server is None:
+                raise SecurityError("MCP service is not available in the execution tenant")
+
+    async def _authorize_remote_tool(self, tool_name: str, user_id: str) -> None:
+        """A remote tool may only run in the tenant that owns its configuration."""
+        from uuid import UUID
+
+        from aio_agent_platform.core.execution_scope import (
+            execution_tenant_id,
+            require_execution_user,
+        )
+        from aio_agent_platform.db.connection import get_session_factory
+
+        uid = UUID(user_id)
+        tenant = execution_tenant_id(uid)
+        if tenant is None:
+            raise SecurityError("Remote tool execution requires an authorized tenant context")
+        config = self.remote_manager.get_config(tool_name) if self.remote_manager else None
+        if config is None or config.tenant_id != tenant:
+            raise SecurityError("Remote tool is not available in the execution tenant")
+        async with get_session_factory()() as db:
+            await require_execution_user(db, uid, tenant)
+
+    def visible_tools(self, tenant_id: UUID | None) -> list:
+        return visible_registry_tools(self, tenant_id)
+
+    def tool_timeout(self, tool_name: str) -> float:
+        """Outer dispatch ceiling. The tool's own timeout normally fires first."""
+        if self.mcp_manager and self.mcp_manager.is_mcp_tool(tool_name):
+            resolver = getattr(self.mcp_manager, "timeout_for", None)
+            if callable(resolver):
+                try:
+                    return float(resolver(tool_name))
+                except (TypeError, ValueError):
+                    pass
+            return 60.0
+        tool = self.registry.get(tool_name)
+        if tool_name in {"run_shell", "run_code"}:
+            # The sandbox enforces command_timeout; that ceiling must win.
+            return float(max(tool.timeout if tool else 0, settings.sandbox.command_timeout)) + 5
+        if tool is None:
+            return self.DEFAULT_DIRECT_TOOL_TIMEOUT
+        if self.remote_manager and self.remote_manager.is_remote_tool(tool_name):
+            # The HTTP client reports its own timeout; leave it a beat to do so.
+            return float(tool.timeout) + 5
+        return float(tool.timeout)
 
     # ---- Observation recording ----
 
@@ -510,6 +655,17 @@ class ToolExecutor:
 
     # Max file size (bytes) for unrestricted read_file (no offset/limit)
     SAFE_READ_LIMIT = 1_000_000  # 1 MB
+    FILE_META_CACHE_MAX = 256
+
+    def _cache_file_meta(self, cache_key: str, meta: dict) -> None:
+        if len(self._file_meta_cache) >= self.FILE_META_CACHE_MAX:
+            self._file_meta_cache.pop(next(iter(self._file_meta_cache)))
+        self._file_meta_cache[cache_key] = meta
+
+    def _invalidate_file_meta(self, workspace_id: str) -> None:
+        prefix = f"{workspace_id}:"
+        for key in [key for key in self._file_meta_cache if key.startswith(prefix)]:
+            self._file_meta_cache.pop(key, None)
 
     async def _execute_in_sandbox(
         self,
@@ -528,7 +684,9 @@ class ToolExecutor:
         sandbox = await self.sandbox_mgr.get_or_create(user_id, session_id, ws_id, ws_slug)
         if tool_name in {"read_document", "document_search", "render_document", "view_image"}:
             return await self._execute_document_tool(sandbox, tool_name, args, ws_id, ws_slug)
-        tracked = tool_name in {"run_shell", "run_code", "write_file", "edit_file"}
+        # Only arbitrary code needs a before/after scan; direct file writes
+        # report their own change instead of walking the whole workspace twice.
+        tracked = tool_name in {"run_shell", "run_code"}
         before = await self._workspace_manifest(sandbox, ws_slug) if tracked else {}
 
         async def finish(
@@ -549,7 +707,10 @@ class ToolExecutor:
         if tool_name in {"run_shell", "run_code"}:
             if tool_name == "run_shell":
                 # SandboxManager already passes this command to bash -c.
-                result = await self.sandbox_mgr.execute(sandbox, args.get("command", ""))
+                result = await self.sandbox_mgr.execute(
+                    sandbox, args.get("command", ""),
+                    timeout=settings.sandbox.command_timeout,
+                )
             else:
                 result = await self._run_code(sandbox, args)
             output = self._format_exec_result(result)
@@ -578,7 +739,7 @@ class ToolExecutor:
                         f"⚠️ 文件 {path} 大小为 {file_size:,} 字节 ({file_size / (1024*1024):.1f} MB)，"
                         f"超过安全读取上限 ({self.SAFE_READ_LIMIT:,} 字节)。\n\n"
                         f"请使用以下方式访问：\n"
-                        f"- file_read 指定 offset 和 limit 参数读取特定行范围\n"
+                        f"- read_file 指定 offset 和 limit 参数读取特定行范围\n"
                         f"- file_grep 搜索特定内容\n"
                         f"- file_query 执行 SQL 查询（结构化文件）\n"
                         f"- file_info 获取文件结构概览\n\n"
@@ -596,21 +757,49 @@ class ToolExecutor:
             b64_content = base64.b64encode(content.encode()).decode()
             qp = self._qpath(path, ws_slug)
             cmd = (
+                f"if [ -e {qp} ]; then printf '__AIO_EXISTING__\\n'; fi; "
                 f"mkdir -p $(dirname {qp}) && "
                 f"echo '{b64_content}' | base64 -d > {qp}"
             )
             result = await self.sandbox_mgr.execute(sandbox, cmd)
-            output = (
-                self._format_exec_result(result) if result.exit_code != 0 else f"Written to {path}"
+            if result.exit_code != 0:
+                output = self._format_exec_result(result)
+                return SandboxToolOutput(text=output, success=False, error=output)
+            return SandboxToolOutput(
+                text=f"Written to {path}",
+                file_changes=[{
+                    "action": (
+                        "modified" if "__AIO_EXISTING__" in result.stdout else "created"
+                    ),
+                    "workspace_id": str(ws_id),
+                    "path": path,
+                    "filename": posixpath.basename(path),
+                    "mime_type": mimetypes.guess_type(path)[0] or "application/octet-stream",
+                    "size": len(content.encode()),
+                }],
             )
-            return await finish(output)
 
         elif tool_name == "edit_file":
             path = self._sandbox_path(args["path"], ws_slug)
             old_str = args["old_str"]
             new_str = args["new_str"]
-            output = await self._edit_file_in_sandbox(sandbox, path, old_str, new_str, ws_slug)
-            return await finish(output)
+            output, edited = await self._edit_file_in_sandbox(
+                sandbox, path, old_str, new_str, ws_slug
+            )
+            if not edited:
+                return SandboxToolOutput(text=output, success=False, error=output)
+            size = await self._get_file_size(sandbox, path, ws_slug)
+            return SandboxToolOutput(
+                text=output,
+                file_changes=[{
+                    "action": "modified",
+                    "workspace_id": str(ws_id),
+                    "path": path,
+                    "filename": posixpath.basename(path),
+                    "mime_type": mimetypes.guess_type(path)[0] or "application/octet-stream",
+                    "size": size or 0,
+                }],
+            )
 
         elif tool_name == "list_directory":
             path = self._sandbox_path(args.get("path", "."), ws_slug)
@@ -619,11 +808,12 @@ class ToolExecutor:
 
         elif tool_name == "file_info":
             path = self._sandbox_path(args["path"], ws_slug)
-            cache_key = f"{ws_id}:{path}"
-            if cache_key in self._file_meta_cache:
-                return self._format_file_meta(self._file_meta_cache[cache_key])
+            cache_key = f"{ws_id}:{ws_slug}:{path}"
+            cached = self._file_meta_cache.get(cache_key)
+            if cached is not None:
+                return self._format_file_meta(cached)
             meta = await self._analyze_file(sandbox, path, ws_slug)
-            self._file_meta_cache[cache_key] = meta
+            self._cache_file_meta(cache_key, meta)
             return self._format_file_meta(meta)
 
         elif tool_name == "file_grep":
@@ -638,7 +828,7 @@ class ToolExecutor:
             path = self._sandbox_path(args["path"], ws_slug)
             query = args["query"]
             self._validate_sql(query)
-            return await self._file_query(sandbox, path, query)
+            return await self._file_query(sandbox, path, query, ws_slug)
 
         elif tool_name == "read_pdf":
             path = self._sandbox_path(args.get("path") or args.get("file_path") or "", ws_slug)
@@ -819,21 +1009,29 @@ print(json.dumps(files, ensure_ascii=False))
     async def _read_file_range(
         self, sandbox, path: str, offset: int, limit: int, workspace_slug: str | None = None,
     ) -> str:
-        """Read a line range from a file using sed."""
+        """Read a line range from a file using sed, with its total line count."""
         limit = min(limit, 500)
         # sed -n 'start,endp' — line numbers are 1-based in sed
         start = offset + 1
         end = offset + limit
+        qp = self._qpath(path, workspace_slug)
         result = await self.sandbox_mgr.execute(
-            sandbox, f"sed -n '{start},{end}p' {self._qpath(path, workspace_slug)}"
+            sandbox,
+            f"sed -n '{start},{end}p' {qp}; printf '\\n---AIO-LINES---\\n'; wc -l < {qp} 2>/dev/null || echo 0",
         )
-        output = self._format_exec_result(result)
-        # Get total line count for context
-        wc_result = await self.sandbox_mgr.execute(
-            sandbox, f"wc -l < {self._qpath(path, workspace_slug)}"
-        )
+        body, marker, count_text = result.stdout.rpartition("\n---AIO-LINES---\n")
+        if not marker:
+            body = result.stdout
+        parts = []
+        if body:
+            parts.append(body)
+        if result.stderr:
+            parts.append(f"[stderr]\n{result.stderr}")
+        if result.exit_code != 0:
+            parts.append(f"[exit code: {result.exit_code}]")
+        output = "\n".join(parts) if parts else "(no output)"
         try:
-            total_lines = int(wc_result.stdout.strip())
+            total_lines = int(count_text.strip())
         except (ValueError, TypeError):
             total_lines = 0
         position = f"\n[第 {offset + 1}-{offset + limit} 行 / 共 {total_lines:,} 行]"
@@ -886,17 +1084,61 @@ sys.stdout.write('\\n[Characters %d-%d; %s]' % (
             return f"No matches found for pattern: {pattern}"
         return output
 
-    async def _file_query(self, sandbox, path: str, query: str) -> str:
-        """Execute a DuckDB SQL query against a file."""
-        import base64
+    MAX_QUERY_ROWS = 10_000
 
-        # Write query to temp file to avoid shell escaping issues
-        b64_q = base64.b64encode(query.encode()).decode()
-        script = (
-            f"echo '{b64_q}' | base64 -d > /tmp/_fq.sql && "
-            f"duckdb -csv -c \"$(cat /tmp/_fq.sql)\" 2>&1"
+    async def _file_query(
+        self, sandbox, path: str, query: str, workspace_slug: str | None = None,
+    ) -> str:
+        """Execute a read-only DuckDB query with the file exposed as table `data`."""
+        lower = path.lower()
+        if lower.endswith(".tsv"):
+            kind = "tsv"
+        elif lower.endswith(".csv"):
+            kind = "csv"
+        elif lower.endswith((".json", ".jsonl", ".ndjson")):
+            kind = "json"
+        else:
+            return (
+                f"file_query supports CSV/TSV and JSON/JSONL files; '{path}' has an "
+                "unsupported extension. Use file_grep or read_file instead."
+            )
+
+        ws_path = f"/workspace/{workspace_slug}/{path}" if workspace_slug else f"/workspace/{path}"
+        if kind == "json":
+            reader = f"read_json_auto({ws_path!r})"
+        elif kind == "tsv":
+            reader = f"read_csv_auto({ws_path!r}, delim='\\t')"
+        else:
+            reader = f"read_csv_auto({ws_path!r})"
+
+        # Query is passed as argv so it never gets interpolated into shell syntax.
+        script = f"""
+import csv, sys
+import duckdb
+
+query, max_rows = sys.argv[1], int(sys.argv[2])
+try:
+    con = duckdb.connect()
+    con.execute("CREATE VIEW data AS SELECT * FROM {reader}")
+    result = con.execute(query)
+    columns = [d[0] for d in (result.description or ())]
+    rows = result.fetchmany(max_rows + 1)
+except Exception as exc:
+    print(f'Query failed: {{exc}}', file=sys.stderr)
+    sys.exit(1)
+
+writer = csv.writer(sys.stdout)
+if columns:
+    writer.writerow(columns)
+writer.writerows(rows[:max_rows])
+if len(rows) > max_rows:
+    print(f'\\n[showing first {{max_rows}} rows]')
+"""
+        result = await self.sandbox_mgr.execute(
+            sandbox,
+            f"python3 -c {shlex.quote(script)} "
+            f"{shlex.quote(query)} {self.MAX_QUERY_ROWS}",
         )
-        result = await self.sandbox_mgr.execute(sandbox, script)
         output = self._format_exec_result(result)
         if not output.strip():
             return "(empty result)"
@@ -929,43 +1171,40 @@ sys.stdout.write('\\n[Characters %d-%d; %s]' % (
             "preview": "",
         }
 
-        # Get file size
-        file_size = await self._get_file_size(sandbox, path, workspace_slug)
-        if file_size is not None:
-            meta["byte_size"] = file_size
-
-        # Detect file type via 'file' command (fall back to extension)
-        file_result = await self.sandbox_mgr.execute(
-            sandbox, f"file -b --mime-type {self._qpath(path, workspace_slug)} 2>/dev/null || echo ''"
+        # One probe instead of five separate sandbox round trips.
+        qp = self._qpath(path, workspace_slug)
+        probe = await self.sandbox_mgr.execute(
+            sandbox,
+            f"stat -c%s {qp} 2>/dev/null || echo ''; printf '\\n---AIO-META---\\n'; "
+            f"file -b --mime-type {qp} 2>/dev/null || echo ''; printf '\\n---AIO-META---\\n'; "
+            f"file -b --mime-encoding {qp} 2>/dev/null || echo ''; printf '\\n---AIO-META---\\n'; "
+            f"wc -l < {qp} 2>/dev/null || echo 0; printf '\\n---AIO-META---\\n'; "
+            f"head -30 {qp} 2>/dev/null | cut -c1-2000",
         )
-        mime = file_result.stdout.strip()
+        raw_size, mime, encoding, line_count, preview = (
+            probe.stdout.split("\n---AIO-META---\n", 4) + [""] * 4
+        )[:5]
+
+        try:
+            meta["byte_size"] = int(raw_size.strip())
+        except (TypeError, ValueError):
+            pass
+
+        mime = mime.strip()
         if not mime:
-            import mimetypes
             mime, _ = mimetypes.guess_type(path)
             mime = mime or "application/octet-stream"
         meta["mime"] = mime
 
-        # Detect line count for text files
-        wc_result = await self.sandbox_mgr.execute(
-            sandbox, f"wc -l < {self._qpath(path, workspace_slug)} 2>/dev/null || echo '0'"
-        )
         try:
-            meta["line_count"] = int(wc_result.stdout.strip())
-        except (ValueError, TypeError):
+            meta["line_count"] = int(line_count.strip())
+        except (TypeError, ValueError):
             pass
 
-        # Get encoding
-        enc_result = await self.sandbox_mgr.execute(
-            sandbox, f"file -b --mime-encoding {self._qpath(path, workspace_slug)}"
-        )
-        if enc_result.stdout.strip():
-            meta["encoding"] = enc_result.stdout.strip()
+        if encoding.strip():
+            meta["encoding"] = encoding.strip()
 
-        # Get preview (first 30 lines / 2000 chars)
-        preview_result = await self.sandbox_mgr.execute(
-            sandbox, f"head -30 {self._qpath(path, workspace_slug)} | cut -c1-2000"
-        )
-        meta["preview"] = self._format_exec_result(preview_result)
+        meta["preview"] = preview.rstrip()
 
         # Type-specific analysis
         if mime == "text/csv" or path.lower().endswith((".csv", ".tsv")):
@@ -1275,7 +1514,7 @@ elif isinstance(data, list):
 
         return await self.sandbox_mgr.execute(sandbox, run_cmd)
 
-    async def _edit_file_in_sandbox(self, sandbox, path: str, old_str: str, new_str: str, workspace_slug: str | None = None) -> str:
+    async def _edit_file_in_sandbox(self, sandbox, path: str, old_str: str, new_str: str, workspace_slug: str | None = None) -> tuple[str, bool]:
         """
         Edit a file by reading, replacing, and writing back.
 
@@ -1304,7 +1543,7 @@ except Exception as e:
     sys.exit(1)
 """
         result = await self.sandbox_mgr.execute(sandbox, f"python3 -c {shlex.quote(python_code)}")
-        return self._format_exec_result(result)
+        return self._format_exec_result(result), result.exit_code == 0
 
     async def _execute_direct(
         self,

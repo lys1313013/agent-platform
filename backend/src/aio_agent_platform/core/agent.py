@@ -253,7 +253,12 @@ class AgentLoop:
         self.workspace_id = workspace_id
         self.workspace_slug = workspace_slug
         self._last_ask_user_output: str = ""
+        self._last_ask_user_response: dict = {}
+        self._approved_tool_calls: set[int] = set()
         self._last_ui_action_output: str = ""
+        # Untrusted external content (web/MCP/remote/local browser) was read in
+        # this turn; subsequent page writes require explicit approval.
+        self._external_content_seen = False
         # ui_screenshot 捕获的 data URI（M4）：Step 5 写入，工具结果注入后
         # 作为 user 角色图片消息追加，绝不进 tool result 文本 / DB / Langfuse
         self._pending_ui_images: list[str] = []
@@ -512,7 +517,7 @@ class AgentLoop:
             )
 
             for tc in step.tool_calls:
-                yield ToolCallEvent(tc.id, tc.name, tc.arguments)
+                yield ToolCallEvent(tc.id, tc.name, {"private": True} if tc.name.startswith("local_browser_") else tc.arguments)
 
             # Append assistant message with tool calls (required by both OpenAI and Anthropic)
             messages.append(
@@ -688,7 +693,11 @@ class AgentLoop:
                 # its system prompt instead of the conversation tail.
                 request_messages = [
                     *messages,
-                    LLMMessage(role="system", content=build_current_time_context()),
+                    LLMMessage(
+                        role="system",
+                        content=build_current_time_context(),
+                        transient=True,
+                    ),
                 ]
                 async with aclosing(self.provider.stream(request_messages, tools=tools)) as model_stream:
                     async for chunk in model_stream:
@@ -798,7 +807,7 @@ class AgentLoop:
         executable_calls = []
         for tc in step.tool_calls:
             previous = cached.get(call_key(tc.name, tc.arguments))
-            if (previous and tc.name != "view_image"
+            if (previous and tc.name != "view_image" and not tc.name.startswith("local_browser_")
                     and (self.allowed_tools is None or tc.name in self.allowed_tools)):
                 # Continue from a recorded result, never re-submit the same
                 # completed external operation just because the worker restarted.
@@ -811,6 +820,39 @@ class AgentLoop:
                 yield ToolResultEvent(tc.id, tc.name, "ok", output)
             else:
                 executable_calls.append(tc)
+        # Approval happens before any side effect or parallel delegation starts.
+        from aio_agent_platform.tools.policy import requires_approval
+        admitted = []
+        self._approved_tool_calls.clear()
+        for tc in executable_calls:
+            if self.allowed_tools is not None and tc.name not in self.allowed_tools:
+                result = ToolResult(tc.id, tc.name, tc.arguments, "", False,
+                                    error=f"Permission denied: tool '{tc.name}' is not available to this agent.")
+                step.tool_results.append(result)
+                yield ToolResultEvent(tc.id, tc.name, "err", result.error)
+                continue
+            if requires_approval(self.tool_executor, tc.name, ctx.trust_level):
+                if self.event_queue is not None:
+                    question = ToolCall(tc.id, "AskUserQuestion", {
+                        "question": f"是否批准执行工具 {tc.name}？",
+                        "mode": "approve",
+                        "options": [{"id": "execute", "label": f"执行 {tc.name}"}],
+                        "context": {"risk_level": "high", "tool_name": tc.name,
+                                    "tool_arguments": tc.arguments if not tc.name.startswith("local_browser_") else {"private": True}},
+                    })
+                    async with aclosing(self._run_ask_user_flow(question, ctx)) as approvals:
+                        async for event in approvals:
+                            yield event
+                    if self._last_ask_user_response.get("status") == "approved":
+                        self._approved_tool_calls.add(id(tc))
+                if id(tc) not in self._approved_tool_calls:
+                    result = ToolResult(tc.id, tc.name, tc.arguments, "", False,
+                                        error="Approval required or denied: use an interactive confirmation channel; no operation was executed.")
+                    step.tool_results.append(result)
+                    yield ToolResultEvent(tc.id, tc.name, "err", result.error)
+                    continue
+            admitted.append(tc)
+        executable_calls = admitted
         delegation_calls = [tc for tc in executable_calls if tc.name == "delegate_task"]
         regular_calls = [tc for tc in executable_calls if tc.name != "delegate_task"]
 
@@ -831,6 +873,8 @@ class AgentLoop:
                     workspace_id=str(ctx.workspace_id) if ctx.workspace_id else None,
                     workspace_slug=ctx.workspace_slug,
                     allowed_tools=self.allowed_tools,
+                    trust_level=ctx.trust_level,
+                    approved=id(tc) in self._approved_tool_calls,
                 )
             )
 
@@ -842,143 +886,175 @@ class AgentLoop:
                 delegation_count=len(delegation_calls),
             )
 
+        # --- Start read-only tools early (they never share mutable state) ---
+        parallel_tasks: dict[int, asyncio.Task] = {}
+        if regular_calls and not self._batch_has_sandbox_write(regular_calls):
+            for tc in regular_calls:
+                if self._is_parallel_read(tc):
+                    parallel_tasks[id(tc)] = asyncio.create_task(
+                        self._execute_tool_traced(tc, ctx)
+                    )
+
         # --- Execute regular tools sequentially ---
-        for tc in regular_calls:
-            # ============================================================
-            # Tool permission check (enforces allowed_tools whitelist)
-            # ============================================================
-            if self.allowed_tools is not None and tc.name not in self.allowed_tools:
-                logger.warning(
-                    "tool_permission_denied",
+        try:
+            for tc in regular_calls:
+                # ============================================================
+                # Tool permission check (enforces allowed_tools whitelist)
+                # ============================================================
+                if self.allowed_tools is not None and tc.name not in self.allowed_tools:
+                    logger.warning(
+                        "tool_permission_denied",
+                        tool_name=tc.name,
+                        allowed_tools=sorted(self.allowed_tools),
+                    )
+                    get_hook_manager().fire_nowait(
+                        "Notification",
+                        user_id=str(ctx.user_id),
+                        session_id=str(ctx.session_id),
+                        workspace_id=str(ctx.workspace_id) if ctx.workspace_id else None,
+                        workspace_slug=ctx.workspace_slug,
+                        data={
+                            "level": "permission",
+                            "category": "permission_denied",
+                            "message": (
+                                f"Permission denied: tool '{tc.name}' is not available "
+                                "to this agent."
+                            ),
+                        },
+                    )
+                    result = ToolResult(
+                        tool_call_id=tc.id,
+                        name=tc.name,
+                        arguments=tc.arguments,
+                        output="",
+                        success=False,
+                        error=f"Permission denied: tool '{tc.name}' is not available to this agent.",
+                    )
+                    step.tool_results.append(result)
+                    yield ToolResultEvent(tc.id, tc.name, "err", result.error)
+                    continue
+
+                # ============================================================
+                # AskUserQuestion: 特殊处理，避免死锁
+                # ============================================================
+                if tc.name == "AskUserQuestion":
+                    ask_t_start = time.monotonic()
+                    async with aclosing(self._run_ask_user_flow(tc, ctx)) as interactive_events:
+                        async for evt in interactive_events:
+                            yield evt
+
+                    ask_output = self._last_ask_user_output or ""
+                    result = ToolResult(
+                        tool_call_id=tc.id,
+                        name=tc.name,
+                        arguments=tc.arguments,
+                        output=ask_output,
+                        success=True,
+                        duration_ms=(time.monotonic() - ask_t_start) * 1000,
+                    )
+                    step.tool_results.append(result)
+                    get_recorder().record_tool_call(
+                        tool_name="AskUserQuestion",
+                        exec_type="direct",
+                        duration_ms=result.duration_ms,
+                        is_error=ask_output.startswith("Error:"),
+                        user_id=str(ctx.user_id),
+                        session_id=str(ctx.session_id),
+                    )
+
+                    output_preview = ask_output[:500]
+                    yield ToolResultEvent(tc.id, tc.name, "ok", output_preview)
+                    continue
+
+                # ============================================================
+                # Frontend UI tools (ui_*): 拦截下发浏览器执行，避免死锁
+                # （与 AskUserQuestion 同理，不能进 tool_executor 阻塞）
+                # ============================================================
+                tool_def = self.tool_executor.registry.get(tc.name)
+                if tool_def is not None and tool_def.execution_location == "frontend":
+                    ui_t_start = time.monotonic()
+                    async with aclosing(self._run_ui_action_flow(tc, ctx)) as interactive_events:
+                        async for evt in interactive_events:
+                            yield evt
+
+                    ui_output = self._last_ui_action_output or ""
+                    ui_ok = not ui_output.startswith("Error")
+                    result = ToolResult(
+                        tool_call_id=tc.id,
+                        name=tc.name,
+                        arguments=tc.arguments,
+                        output=ui_output if ui_ok else "",
+                        success=ui_ok,
+                        error=None if ui_ok else ui_output,
+                        duration_ms=(time.monotonic() - ui_t_start) * 1000,
+                    )
+                    step.tool_results.append(result)
+                    get_recorder().record_tool_call(
+                        tool_name=tc.name,
+                        exec_type="direct",
+                        duration_ms=result.duration_ms,
+                        is_error=not ui_ok,
+                        user_id=str(ctx.user_id),
+                        session_id=str(ctx.session_id),
+                    )
+
+                    output_preview = ui_output[:500]
+                    status = "ok" if ui_ok else "err"
+                    yield ToolResultEvent(tc.id, tc.name, status, output_preview)
+                    continue
+
+                logger.debug(
+                    "agent_loop_execute_tool",
+                    session_id=str(session_id),
+                    iteration=step_num,
                     tool_name=tc.name,
-                    allowed_tools=sorted(self.allowed_tools),
-                )
-                get_hook_manager().fire_nowait(
-                    "Notification",
-                    user_id=str(ctx.user_id),
-                    session_id=str(ctx.session_id),
-                    workspace_id=str(ctx.workspace_id) if ctx.workspace_id else None,
-                    workspace_slug=ctx.workspace_slug,
-                    data={
-                        "level": "permission",
-                        "category": "permission_denied",
-                        "message": (
-                            f"Permission denied: tool '{tc.name}' is not available "
-                            "to this agent."
-                        ),
-                    },
-                )
-                result = ToolResult(
                     tool_call_id=tc.id,
-                    name=tc.name,
-                    arguments=tc.arguments,
-                    output="",
-                    success=False,
-                    error=f"Permission denied: tool '{tc.name}' is not available to this agent.",
                 )
+                if tc.name.startswith("local_browser_"):
+                    task = asyncio.create_task(self._execute_tool_traced(tc, ctx))
+                    try:
+                        while not task.done():
+                            await asyncio.wait({task}, timeout=0.5)
+                            yield ControlEvent("browser_flow", tc.id, "waiting")
+                        result = task.result()
+                    finally:
+                        if not task.done():
+                            task.cancel()
+                        await asyncio.gather(task, return_exceptions=True)
+                elif (pending := parallel_tasks.pop(id(tc), None)) is not None:
+                    result = await pending
+                else:
+                    result = await self._execute_tool_traced(tc, ctx)
                 step.tool_results.append(result)
-                yield ToolResultEvent(tc.id, tc.name, "err", result.error)
-                continue
 
-            # ============================================================
-            # AskUserQuestion: 特殊处理，避免死锁
-            # ============================================================
-            if tc.name == "AskUserQuestion":
-                ask_t_start = time.monotonic()
-                async with aclosing(self._run_ask_user_flow(tc, ctx)) as interactive_events:
-                    async for evt in interactive_events:
-                        yield evt
-
-                ask_output = self._last_ask_user_output or ""
-                result = ToolResult(
-                    tool_call_id=tc.id,
-                    name=tc.name,
-                    arguments=tc.arguments,
-                    output=ask_output,
-                    success=True,
-                    duration_ms=(time.monotonic() - ask_t_start) * 1000,
-                )
-                step.tool_results.append(result)
-                get_recorder().record_tool_call(
-                    tool_name="AskUserQuestion",
-                    exec_type="direct",
-                    duration_ms=result.duration_ms,
-                    is_error=ask_output.startswith("Error:"),
-                    user_id=str(ctx.user_id),
-                    session_id=str(ctx.session_id),
-                )
-
-                output_preview = ask_output[:500]
-                yield ToolResultEvent(tc.id, tc.name, "ok", output_preview)
-                continue
-
-            # ============================================================
-            # Frontend UI tools (ui_*): 拦截下发浏览器执行，避免死锁
-            # （与 AskUserQuestion 同理，不能进 tool_executor 阻塞）
-            # ============================================================
-            tool_def = self.tool_executor.registry.get(tc.name)
-            if tool_def is not None and tool_def.execution_location == "frontend":
-                ui_t_start = time.monotonic()
-                async with aclosing(self._run_ui_action_flow(tc, ctx)) as interactive_events:
-                    async for evt in interactive_events:
-                        yield evt
-
-                ui_output = self._last_ui_action_output or ""
-                ui_ok = not ui_output.startswith("Error")
-                result = ToolResult(
-                    tool_call_id=tc.id,
-                    name=tc.name,
-                    arguments=tc.arguments,
-                    output=ui_output if ui_ok else "",
-                    success=ui_ok,
-                    error=None if ui_ok else ui_output,
-                    duration_ms=(time.monotonic() - ui_t_start) * 1000,
-                )
-                step.tool_results.append(result)
-                get_recorder().record_tool_call(
+                status = "ok" if result.success else "err"
+                output_preview = result.output if result.success else (result.error or "")[:50000]
+                if tc.name.startswith("local_browser_"):
+                    output_preview = "本地浏览器操作完成" if result.success else "本地浏览器操作未完成，请检查授权和任务状态"
+                logger.debug(
+                    "agent_loop_tool_result",
+                    session_id=str(session_id),
+                    iteration=step_num,
                     tool_name=tc.name,
-                    exec_type="direct",
-                    duration_ms=result.duration_ms,
-                    is_error=not ui_ok,
-                    user_id=str(ctx.user_id),
-                    session_id=str(ctx.session_id),
+                    tool_call_id=tc.id,
+                    status=status,
+                    duration_ms=round(result.duration_ms, 2),
+                    output_length=len(result.output) if result.output else 0,
                 )
-
-                output_preview = ui_output[:500]
-                status = "ok" if ui_ok else "err"
                 yield ToolResultEvent(tc.id, tc.name, status, output_preview)
-                continue
+                if result.file_changes:
+                    yield FileChangesEvent(result.file_changes)
 
-            logger.debug(
-                "agent_loop_execute_tool",
-                session_id=str(session_id),
-                iteration=step_num,
-                tool_name=tc.name,
-                tool_call_id=tc.id,
-            )
-            result = await self._execute_tool_traced(tc, ctx)
-            step.tool_results.append(result)
+                # Yield control to event loop so delegation handler and
+                # event_queue drain can run between tool executions.
+                await asyncio.sleep(0)
 
-            status = "ok" if result.success else "err"
-            output_preview = result.output if result.success else (result.error or "")[:50000]
-            logger.debug(
-                "agent_loop_tool_result",
-                session_id=str(session_id),
-                iteration=step_num,
-                tool_name=tc.name,
-                tool_call_id=tc.id,
-                status=status,
-                duration_ms=round(result.duration_ms, 2),
-                output_length=len(result.output) if result.output else 0,
-            )
-            yield ToolResultEvent(tc.id, tc.name, status, output_preview)
-            if result.file_changes:
-                yield FileChangesEvent(result.file_changes)
-
-            # Yield control to event loop so delegation handler and
-            # event_queue drain can run between tool executions.
-            await asyncio.sleep(0)
-
+        finally:
+            for pending in parallel_tasks.values():
+                pending.cancel()
+            if parallel_tasks:
+                await asyncio.gather(*parallel_tasks.values(), return_exceptions=True)
+                parallel_tasks.clear()
         # --- Collect delegation results ---
         # Delegation tasks were started early and have been running in
         # the background.  Wait for them and yield results.
@@ -1117,13 +1193,32 @@ class AgentLoop:
     # Tool execution with tracing
     # ------------------------------------------------------------------
 
+    def _is_parallel_read(self, tc: ToolCall) -> bool:
+        """Read-only tools with no interactive channel can run concurrently."""
+        if tc.name == "AskUserQuestion" or tc.name.startswith("local_browser_"):
+            return False
+        tool = self.tool_executor.registry.get(tc.name)
+        return (
+            tool is not None
+            and tool.execution_location != "frontend"
+            and tool.permission_level == "read"
+        )
+
+    def _batch_has_sandbox_write(self, calls: list[ToolCall]) -> bool:
+        """A sandbox write in the same batch may be the target of a read."""
+        for tc in calls:
+            tool = self.tool_executor.registry.get(tc.name)
+            if tool is not None and tool.requires_sandbox and tool.permission_level != "read":
+                return True
+        return False
+
     async def _execute_tool_traced(
         self,
         tc: ToolCall,
         ctx: ToolContext,
     ):
         """Execute a tool with Langfuse tracing."""
-        if tc.name == "view_image" and not getattr(self.provider, "supports_vision", False):
+        if tc.name in {"view_image", "local_browser_screenshot"} and not getattr(self.provider, "supports_vision", False):
             return ToolResult(
                 tool_call_id=tc.id, name=tc.name, arguments=tc.arguments, output="",
                 success=False,
@@ -1143,18 +1238,38 @@ class AgentLoop:
                 },
             )
 
+        tool_timeout = 60.0
+        resolver = getattr(self.tool_executor, "tool_timeout", None)
+        if callable(resolver):
+            try:
+                tool_timeout = float(resolver(tc.name))
+            except (TypeError, ValueError):
+                pass
+        tool_timeout = max(5.0, min(tool_timeout, 3600.0))
         try:
-            result = await self.tool_executor.execute(
-                tool_name=tc.name,
-                arguments=tc.arguments,
+            async with asyncio.timeout(tool_timeout):
+                result = await self.tool_executor.execute(
+                    tool_name=tc.name,
+                    arguments=tc.arguments,
+                    tool_call_id=tc.id,
+                    user_id=str(ctx.user_id),
+                    session_id=str(ctx.session_id),
+                    delegation=ctx.delegation,
+                    event_queue=self.event_queue,
+                    workspace_id=str(ctx.workspace_id) if ctx.workspace_id else None,
+                    workspace_slug=ctx.workspace_slug,
+                    allowed_tools=self.allowed_tools,
+                    trust_level=ctx.trust_level,
+                    approved=id(tc) in self._approved_tool_calls,
+                )
+        except TimeoutError:
+            return ToolResult(
                 tool_call_id=tc.id,
-                user_id=str(ctx.user_id),
-                session_id=str(ctx.session_id),
-                delegation=ctx.delegation,
-                event_queue=self.event_queue,
-                workspace_id=str(ctx.workspace_id) if ctx.workspace_id else None,
-                workspace_slug=ctx.workspace_slug,
-                allowed_tools=self.allowed_tools,
+                name=tc.name,
+                arguments=tc.arguments,
+                output="",
+                success=False,
+                error=f"Tool timed out after {tool_timeout}s",
             )
         except Exception as e:
             if tool_obs:
@@ -1177,11 +1292,25 @@ class AgentLoop:
             )
             tool_obs.end()
 
+        if result.success and self._is_untrusted_source(tc.name):
+            self._external_content_seen = True
         return result
 
     # ------------------------------------------------------------------
     # AskUserQuestion handling
     # ------------------------------------------------------------------
+
+    def _is_untrusted_source(self, tool_name: str) -> bool:
+        """Whether a tool result may carry attacker-controlled instructions."""
+        if tool_name in {"web_fetch", "web_search", "ui_read_screen", "ui_screenshot"}:
+            return True
+        if tool_name.startswith("local_browser_"):
+            return True
+        mcp = getattr(self.tool_executor, "mcp_manager", None)
+        if mcp is not None and mcp.is_mcp_tool(tool_name) is True:
+            return True
+        remote = getattr(self.tool_executor, "remote_manager", None)
+        return remote is not None and remote.is_remote_tool(tool_name) is True
 
     async def _run_ask_user_flow(
         self,
@@ -1204,6 +1333,7 @@ class AgentLoop:
         from datetime import datetime
 
         args = tc.arguments or {}
+        self._last_ask_user_response = {}
         question = (args.get("question", "") or "").strip()
         mode = args.get("mode", "single_select")
         raw_options = args.get("options", [])
@@ -1237,6 +1367,7 @@ class AgentLoop:
         confirmation = confirmation_manager.create_confirmation(
             session_id=str(ctx.session_id),
             user_id=str(ctx.user_id),
+            execution_tenant_id=self.execution_tenant_id or execution_tenant_id(ctx.user_id),
             question=question,
             mode=mode,
             options=options,
@@ -1257,6 +1388,7 @@ class AgentLoop:
         if self.event_queue:
             await self.event_queue.put({
                 "type": "confirmation_required",
+                "tool_call_id": tc.id,
                 "confirmation_id": confirmation.id,
                 "question": question,
                 "mode": mode,
@@ -1273,18 +1405,16 @@ class AgentLoop:
         # 它让控制权从 _run_ask_user_flow → agent_loop.run() → SSE generator
         # SSE generator 收到这个事件后，会先 drain event_queue（发送 confirmation_required）
         # 然后再调用 agent_loop 的 __anext__() 恢复执行
-        yield ControlEvent("confirmation_flow", tc.id, "waiting")
+        try:
+            yield ControlEvent("confirmation_flow", tc.id, "waiting")
 
-        # ---- Step 3: 阻塞等待用户响应 ----
-        # 此时 SSE generator 已经 drain 了 event_queue，前端已收到确认卡片
-        logger.info(
-            "ask_user_waiting",
-            session_id=str(ctx.session_id),
-            confirmation_id=confirmation.id,
-            timeout_seconds=confirmation.timeout_seconds,
-        )
-
-        confirmation = await confirmation_manager.wait_for_response(confirmation.id)
+            # Bounded waits keep streaming transports responsive to cancellation.
+            async with asyncio.timeout(confirmation.timeout_seconds):
+                confirmation = await confirmation_manager.wait_for_response(confirmation.id)
+        except TimeoutError:
+            confirmation.response = {"status": "timeout"}
+        finally:
+            confirmation_manager.discard(confirmation.id if confirmation else "")
 
         if not confirmation:
             self._last_ask_user_output = "Error: confirmation not found"
@@ -1292,6 +1422,7 @@ class AgentLoop:
             return
 
         response = confirmation.response or {}
+        self._last_ask_user_response = response
         status = response.get("status", "timeout")
         elapsed_ms = round((time.monotonic() - t_start) * 1000, 2)
 
@@ -1387,12 +1518,18 @@ class AgentLoop:
         if write_tool:
             cached = ui_action_manager.get_session_context(session_key) or {}
             dangerous_refs = cached.get("dangerous_refs")
-            # 清单缺失时保守按危险处理；清单存在但未命中则放行
-            need_confirm = dangerous_refs is None or ref in dangerous_refs
+            # 清单缺失时保守按危险处理；清单存在但未命中则放行。本轮读过
+            # 外部不可信内容时，任何页面写操作都必须再次确认。
+            need_confirm = (
+                self._external_content_seen
+                or dangerous_refs is None
+                or ref in dangerous_refs
+            )
             if need_confirm:
                 confirmation = confirmation_manager.create_confirmation(
                     session_id=session_key,
                     user_id=str(ctx.user_id),
+                    execution_tenant_id=self.execution_tenant_id or execution_tenant_id(ctx.user_id),
                     question="智能体请求执行页面写操作，请在确认卡片中核对目标元素后批准",
                     mode="approve",
                     options=[
@@ -1419,9 +1556,17 @@ class AgentLoop:
                 })
                 yield ControlEvent("confirmation_flow", tc.id, "waiting")
 
-                confirmation = await confirmation_manager.wait_for_response(
-                    confirmation.id
-                )
+                try:
+                    async with asyncio.timeout(confirmation.timeout_seconds):
+                        confirmation = await confirmation_manager.wait_for_response(
+                            confirmation.id
+                        )
+                except TimeoutError:
+                    self._last_ui_action_output = (
+                        "Error(timeout): the user did not answer the page "
+                        "operation confirmation in time. Do not retry it."
+                    )
+                    return
                 if not confirmation:
                     self._last_ui_action_output = "Error: confirmation not found"
                     return

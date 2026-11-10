@@ -14,7 +14,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from aio_agent_platform.auth.dependencies import AdminUser
 from aio_agent_platform.db.connection import get_db
-from aio_agent_platform.db.models import Agent, RemoteTool
+from aio_agent_platform.db.models import Agent, RemoteTool, User
+from aio_agent_platform.tools.builtin import BUILTIN_TOOL_NAMES
 from aio_agent_platform.tools.remote.manager import RemoteToolConfig
 
 logger = structlog.get_logger()
@@ -25,14 +26,12 @@ VALID_METHODS = {"GET", "POST", "PUT", "DELETE", "PATCH"}
 VALID_AUTH_TYPES = {"none", "bearer", "api_key", "basic", "custom_header"}
 NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 
-# Names reserved by built-in tools
-BUILTIN_TOOL_NAMES = {
-    "run_shell", "run_code", "read_file", "write_file", "edit_file", "list_directory",
-    "memory_read", "memory_write", "memory_update", "memory_delete",
-    "search_skills", "view_skill", "create_skill", "update_skill", "read_skill_file",
-    "delegate_task", "AskUserQuestion",
-    "knowledge_retrieval",
-}
+
+def _tenant_filter(user: User) -> list:
+    """Superadmins manage every tenant; tenant admins only their own tools."""
+    if user.role == "superadmin":
+        return []
+    return [RemoteTool.tenant_id == user.tenant_id]
 
 
 # ---- Schemas ----
@@ -175,11 +174,13 @@ async def _check_name_conflict(
 
 @router.get("", response_model=list[RemoteToolOut])
 async def list_remote_tools(
-    _admin: AdminUser,
+    user: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> list[dict]:
-    """List all remote tools."""
-    result = await db.execute(select(RemoteTool).order_by(RemoteTool.created_at))
+    """List the caller's remote tools."""
+    result = await db.execute(
+        select(RemoteTool).where(*_tenant_filter(user)).order_by(RemoteTool.created_at)
+    )
     tools = result.scalars().all()
     return [_tool_to_dict(t) for t in tools]
 
@@ -188,13 +189,14 @@ async def list_remote_tools(
 async def create_remote_tool(
     req: RemoteToolCreate,
     request: Request,
-    _admin: AdminUser,
+    user: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict:
-    """Create a new remote tool."""
+    """Create a new remote tool owned by the caller's tenant."""
     await _check_name_conflict(db, req.name, request)
 
     tool = RemoteTool(
+        tenant_id=user.tenant_id,
         name=req.name,
         label=req.label,
         description=req.description,
@@ -226,11 +228,13 @@ async def create_remote_tool(
 @router.get("/{tool_id}", response_model=RemoteToolOut)
 async def get_remote_tool(
     tool_id: UUID,
-    _admin: AdminUser,
+    user: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict:
     """Get a specific remote tool."""
-    result = await db.execute(select(RemoteTool).where(RemoteTool.id == tool_id))
+    result = await db.execute(
+        select(RemoteTool).where(RemoteTool.id == tool_id, *_tenant_filter(user))
+    )
     tool = result.scalar_one_or_none()
     if not tool:
         raise HTTPException(status_code=404, detail="远程工具不存在")
@@ -242,11 +246,13 @@ async def update_remote_tool(
     tool_id: UUID,
     req: RemoteToolUpdate,
     request: Request,
-    _admin: AdminUser,
+    user: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict:
     """Update a remote tool configuration."""
-    result = await db.execute(select(RemoteTool).where(RemoteTool.id == tool_id))
+    result = await db.execute(
+        select(RemoteTool).where(RemoteTool.id == tool_id, *_tenant_filter(user))
+    )
     tool = result.scalar_one_or_none()
     if not tool:
         raise HTTPException(status_code=404, detail="远程工具不存在")
@@ -320,11 +326,13 @@ async def update_remote_tool(
 async def delete_remote_tool(
     tool_id: UUID,
     request: Request,
-    _admin: AdminUser,
+    user: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict:
     """Delete a remote tool."""
-    result = await db.execute(select(RemoteTool).where(RemoteTool.id == tool_id))
+    result = await db.execute(
+        select(RemoteTool).where(RemoteTool.id == tool_id, *_tenant_filter(user))
+    )
     tool = result.scalar_one_or_none()
     if not tool:
         raise HTTPException(status_code=404, detail="远程工具不存在")
@@ -345,11 +353,13 @@ async def delete_remote_tool(
 async def toggle_remote_tool(
     tool_id: UUID,
     request: Request,
-    _admin: AdminUser,
+    user: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict:
     """Toggle a remote tool's active status."""
-    result = await db.execute(select(RemoteTool).where(RemoteTool.id == tool_id))
+    result = await db.execute(
+        select(RemoteTool).where(RemoteTool.id == tool_id, *_tenant_filter(user))
+    )
     tool = result.scalar_one_or_none()
     if not tool:
         raise HTTPException(status_code=404, detail="远程工具不存在")
@@ -372,11 +382,13 @@ async def test_remote_tool(
     tool_id: UUID,
     req: RemoteToolTestRequest,
     request: Request,
-    _admin: AdminUser,
+    user: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict:
     """Test a remote tool by sending an actual HTTP request."""
-    result = await db.execute(select(RemoteTool).where(RemoteTool.id == tool_id))
+    result = await db.execute(
+        select(RemoteTool).where(RemoteTool.id == tool_id, *_tenant_filter(user))
+    )
     tool = result.scalar_one_or_none()
     if not tool:
         raise HTTPException(status_code=404, detail="远程工具不存在")
@@ -390,6 +402,7 @@ async def test_remote_tool(
     if not remote_manager.is_remote_tool(tool.name):
         await remote_manager.add_tool(config)
 
+    executor = None
     try:
         from aio_agent_platform.tools.remote.executor import RemoteToolExecutor
 
@@ -416,6 +429,8 @@ async def test_remote_tool(
             "error": str(e),
         }
     finally:
+        if executor is not None:
+            await executor.aclose()
         # Clean up temp registration if tool is not active
         if not tool.is_active:
             await remote_manager.remove_tool(tool.name)

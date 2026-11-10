@@ -75,6 +75,11 @@ class MCPManager:
         discovered_tools = []
         for tool in conn.tools:
             full_name = f"{prefix}{tool.name}" if prefix else tool.name
+            if self._reserved_name(full_name, server_id):
+                logger.warning(
+                    "mcp_tool_name_conflict", server_id=str(server_id), tool=full_name,
+                )
+                continue
             self._tool_to_server[full_name] = server_id
             discovered_tools.append(tool)
 
@@ -85,6 +90,15 @@ class MCPManager:
             tools_count=len(discovered_tools),
         )
         return discovered_tools
+
+    def _reserved_name(self, full_name: str, server_id: UUID) -> bool:
+        """Reject names owned by built-ins or by another server."""
+        owner = self._tool_to_server.get(full_name)
+        if owner is not None and owner != server_id:
+            return True
+        from aio_agent_platform.tools.builtin import BUILTIN_TOOL_NAMES
+
+        return full_name in BUILTIN_TOOL_NAMES
 
     async def remove_server(self, server_id: UUID) -> None:
         """Disconnect and remove an MCP Server."""
@@ -186,12 +200,20 @@ class MCPManager:
             prefix = conn.config.get("tool_prefix") or ""
             for tool in conn.tools:
                 full_name = f"{prefix}{tool.name}" if prefix else tool.name
+                if self._tool_to_server.get(full_name) != _server_id:
+                    continue
                 result.append((full_name, tool))
         return result
 
     def is_mcp_tool(self, tool_name: str) -> bool:
         """Check if a tool name is an MCP tool."""
         return tool_name in self._tool_to_server
+
+    def timeout_for(self, tool_name: str) -> float:
+        """Dispatch ceiling for one tool, taken from its server's configured timeout."""
+        server_id = self._tool_to_server.get(tool_name)
+        conn = self._connections.get(server_id) if server_id else None
+        return float(conn.config.get("timeout") or 60) if conn else 60.0
 
     async def call_tool(self, tool_name: str, arguments: dict) -> str:
         """

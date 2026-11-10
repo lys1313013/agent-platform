@@ -11,6 +11,7 @@ import structlog
 
 from aio_agent_platform.tools.remote.manager import RemoteToolConfig, RemoteToolManager
 from aio_agent_platform.tools.remote.template import render_body, render_url
+from aio_agent_platform.tools.web.ssrf import MetadataGuardTransport
 
 logger = structlog.get_logger()
 
@@ -24,6 +25,21 @@ class RemoteToolExecutor:
 
     def __init__(self, manager: RemoteToolManager) -> None:
         self._manager = manager
+        # One pooled client for all remote tools; the per-tool timeout is
+        # applied per request instead of rebuilding the connection pool.
+        self._client: httpx.AsyncClient | None = None
+
+    def _http_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(
+                timeout=None, max_redirects=3, transport=MetadataGuardTransport(),
+            )
+        return self._client
+
+    async def aclose(self) -> None:
+        client, self._client = self._client, None
+        if client is not None:
+            await client.aclose()
 
     async def call(self, tool_name: str, arguments: dict) -> str:
         """Execute a remote tool call and return the response as a string.
@@ -63,15 +79,15 @@ class RemoteToolExecutor:
         )
 
         try:
-            async with httpx.AsyncClient(timeout=config.timeout, max_redirects=3) as client:
-                response = await client.request(
-                    method=config.method,
-                    url=url,
-                    params=query_params or None,
-                    headers=headers,
-                    json=body if body is not None else None,
-                    follow_redirects=True,
-                )
+            response = await self._http_client().request(
+                method=config.method,
+                url=url,
+                params=query_params or None,
+                headers=headers,
+                json=body if body is not None else None,
+                follow_redirects=True,
+                timeout=config.timeout,
+            )
         except httpx.TimeoutException:
             raise RemoteToolError(
                 f"Remote tool '{tool_name}' timed out after {config.timeout}s"

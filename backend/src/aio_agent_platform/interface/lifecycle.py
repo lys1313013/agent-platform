@@ -9,6 +9,7 @@ from contextlib import AsyncExitStack, asynccontextmanager
 
 import structlog
 from fastapi import FastAPI
+from sqlalchemy import text
 
 from aio_agent_platform.channels.connection_manager import (
     ChannelConnectionManager,
@@ -132,6 +133,28 @@ async def start_channels(app: FastAPI, factory, executor, stack: AsyncExitStack)
         app.state.channel_webhooks_mounted = True
 
 
+async def warn_if_rls_bypassed(factory) -> None:
+    """Surface the common deployment where PostgreSQL never enforces RLS."""
+    try:
+        async with factory() as db:
+            row = (await db.execute(text(
+                "SELECT r.rolsuper, r.rolbypassrls, "
+                "EXISTS(SELECT 1 FROM pg_tables "
+                "WHERE schemaname = 'public' AND tableowner = current_user) "
+                "FROM pg_roles r WHERE r.rolname = current_user"
+            ))).one()
+    except Exception:
+        return
+    if row[0] or row[1] or row[2]:
+        logger.warning(
+            "database_rls_not_enforced",
+            superuser=bool(row[0]),
+            bypassrls=bool(row[1]),
+            owns_tables=bool(row[2]),
+            hint="使用非 owner、非 BYPASSRLS 的专用应用角色，并对用户级表启用 FORCE ROW LEVEL SECURITY",
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # The stacks encode dependency order, independent of startup order:
@@ -165,6 +188,7 @@ async def lifespan(app: FastAPI):
             raise RuntimeError("数据库初始化或自动迁移超时，服务停止启动") from error
         mark("init_db")
         factory = get_session_factory()
+        await warn_if_rls_bypassed(factory)
         workspace_storage = None
         try:
             workspace_storage = WorkspaceStorage(ObjectStorage())
@@ -187,7 +211,9 @@ async def lifespan(app: FastAPI):
         except Exception as error:
             logger.warning("remote_manager_init_failed", error=str(error))
         executor.remote_manager = remote
-        executor.remote_executor = RemoteToolExecutor(remote)
+        remote_executor = RemoteToolExecutor(remote)
+        executor.remote_executor = remote_executor
+        own(infrastructure, "remote_tools", remote_executor.aclose)
         for name, resource in (
             ("sandbox_mgr", sandbox), ("tool_executor", executor),
             ("mcp_manager", mcp), ("remote_manager", remote),

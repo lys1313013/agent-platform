@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
-import subprocess
-import sys
 import time
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
@@ -43,23 +41,10 @@ async def _join_task(task: asyncio.Task) -> bool:
 
 
 def _ensure_mcp_package() -> None:
-    """Check for MCP package and auto-install if missing."""
-    if importlib.util.find_spec(_MCP_PACKAGE_NAME) is not None:
-        return
-
-    logger.warning("mcp_package_missing", hint="attempting auto-install")
-    try:
-        subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", "mcp>=1.0.0"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        # Invalidate import cache so the fresh install is visible
-        importlib.invalidate_caches()
-        logger.info("mcp_package_auto_installed")
-    except Exception as e:
-        logger.error("mcp_package_auto_install_failed", error=str(e))
-        raise ImportError(_MCP_INSTALL_HINT) from e
+    """Fail with an actionable hint; dependencies are installed at build time."""
+    if importlib.util.find_spec(_MCP_PACKAGE_NAME) is None:
+        logger.error("mcp_package_missing", hint=_MCP_INSTALL_HINT)
+        raise ImportError(_MCP_INSTALL_HINT)
 
 
 @dataclass

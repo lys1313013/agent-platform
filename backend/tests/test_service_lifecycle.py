@@ -56,7 +56,10 @@ def services(monkeypatch):
     monkeypatch.setattr(lifecycle, "MCPManager", lambda: mcp)
     monkeypatch.setattr(lifecycle, "connect_mcp_servers", asynchronous("mcp.start"))
     monkeypatch.setattr(lifecycle, "RemoteToolManager", lambda registry: remote)
-    monkeypatch.setattr(lifecycle, "RemoteToolExecutor", Mock())
+    monkeypatch.setattr(
+        lifecycle, "RemoteToolExecutor",
+        lambda manager: SimpleNamespace(aclose=asynchronous("remote_tools.close")),
+    )
     monkeypatch.setattr(lifecycle, "init_langfuse", sync("langfuse.start"))
     monkeypatch.setattr(lifecycle, "shutdown_langfuse", asynchronous("langfuse.close"))
     monkeypatch.setattr(lifecycle, "get_recorder", lambda: recorder)
@@ -83,8 +86,8 @@ async def test_normal_shutdown_follows_dependencies_and_clears_globals(services)
         assert services.app.state.tool_executor is not None
     assert closed(services) == [
         "channels.close", "scheduler.close", "broker.close", "chat.close",
-        "rooms.close", "background.close", "hooks.close", "mcp.close",
-        "sandbox.close", "recorder.close", "langfuse.close", "database.close",
+        "rooms.close", "background.close", "hooks.close", "remote_tools.close",
+        "mcp.close", "sandbox.close", "recorder.close", "langfuse.close", "database.close",
     ]
     assert scheduler_module.get_global_scheduler() is None
     assert connection_manager.get_global_channel_manager() is None
@@ -98,7 +101,7 @@ async def test_partial_startup_releases_already_created_services(services):
     with pytest.raises(RuntimeError, match="hook start failed"):
         async with lifecycle.lifespan(services.app):
             pytest.fail("startup must fail")
-    assert closed(services) == ["hooks.close", "mcp.close", "sandbox.close", "recorder.close", "langfuse.close", "database.close"]
+    assert closed(services) == ["hooks.close", "remote_tools.close", "mcp.close", "sandbox.close", "recorder.close", "langfuse.close", "database.close"]
     assert not hasattr(services.app.state, "sandbox_mgr")
 
 
@@ -120,7 +123,7 @@ async def test_shutdown_error_does_not_skip_other_cleanup(services):
     with pytest.raises(RuntimeError, match="hook shutdown failed"):
         async with lifecycle.lifespan(services.app):
             pass
-    assert closed(services)[-6:] == ["hooks.close", "mcp.close", "sandbox.close", "recorder.close", "langfuse.close", "database.close"]
+    assert closed(services)[-7:] == ["hooks.close", "remote_tools.close", "mcp.close", "sandbox.close", "recorder.close", "langfuse.close", "database.close"]
     assert not hasattr(services.app.state, "tool_executor")
 
 
@@ -170,7 +173,7 @@ async def test_running_application_cancellation_still_closes_every_resource(serv
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert len(closed(services)) == 12
+    assert len(closed(services)) == 13
     assert closed(services)[-1] == "database.close"
 
 
@@ -193,7 +196,7 @@ async def test_cancellation_during_shutdown_does_not_skip_remaining_resources(se
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert len(closed(services)) == 12
+    assert len(closed(services)) == 13
     assert scheduler_module.get_global_scheduler() is None
     assert connection_manager.get_global_channel_manager() is None
 
