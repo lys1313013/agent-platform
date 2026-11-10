@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { GlobalOutlined, LinkOutlined, SaveOutlined } from '@ant-design/icons';
+import { Navigate } from 'react-router-dom';
 import {
   Form,
   Input,
@@ -17,6 +18,7 @@ import {
 } from 'antd';
 import { webToolSettingsApi } from '@/lib/api';
 import type { WebToolConfig } from '@/lib/api';
+import { useAuthStore } from '@/stores/authStore';
 
 const { Text, Link } = Typography;
 
@@ -35,6 +37,11 @@ const SECRET_LINKS: Record<SecretField, string> = {
 };
 
 export default function WebToolSettingsPage() {
+  const role = useAuthStore((s) => s.role);
+  return role === 'superadmin' ? <WebToolSettingsPageContent /> : <Navigate to="/" replace />;
+}
+
+function WebToolSettingsPageContent() {
   const { message } = App.useApp();
   const [form] = Form.useForm();
   const [loading, setLoading] = useState(true);

@@ -1,3 +1,4 @@
+import { invalidateAuthSession } from '@/lib/authSession';
 import { act, createElement, useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -13,6 +14,7 @@ import { roomMessageStreaming, type RoomMessage } from '@/lib/rooms';
 let root: Root;
 let container: HTMLDivElement;
 beforeEach(() => {
+  invalidateAuthSession();
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   container = document.createElement('div');
   document.body.appendChild(container);
@@ -93,7 +95,7 @@ describe('shared conversation composer', () => {
     await key('Enter', { shiftKey: true });
     expect(onSend).not.toHaveBeenCalled();
     await key('Enter');
-    expect(onSend).toHaveBeenCalledWith('@全能 VV', [], undefined);
+    expect(onSend).toHaveBeenCalledWith('@全能 VV', [], undefined, undefined);
   });
 
   it('uploads to the room workspace, blocks partial sends, and retains files after rejection', async () => {
@@ -115,7 +117,7 @@ describe('shared conversation composer', () => {
     await submit();
     expect(container.textContent).toContain('notes.txt');
     await submit();
-    expect(onSend).toHaveBeenLastCalledWith('', [], [uploaded]);
+    expect(onSend).toHaveBeenLastCalledWith('', [], [uploaded], undefined);
     expect(container.textContent).not.toContain('notes.txt');
   });
 

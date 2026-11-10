@@ -1,3 +1,4 @@
+import { useUnsavedChanges, confirmDiscardChanges } from '@/hooks/useUnsavedChanges';
 import { useState, useEffect, useCallback } from 'react';
 import {
   SaveOutlined,
@@ -63,6 +64,7 @@ export default function PortraitPage() {
   };
 
   const dirty = content !== savedContent;
+  useUnsavedChanges(dirty, "/portrait");
 
   const handleSave = useCallback(async () => {
     setSaving(true);
@@ -82,9 +84,10 @@ export default function PortraitPage() {
   }, [content]);
 
   const handleCancel = useCallback(() => {
+    if (!confirmDiscardChanges(content !== savedContent)) return;
     setContent(savedContent);
     setEditing(false);
-  }, [savedContent]);
+  }, [content, savedContent]);
 
   const handleChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setContent(e.target.value);

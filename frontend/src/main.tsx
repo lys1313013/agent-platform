@@ -6,16 +6,14 @@ initTheme();
 
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import { BrowserRouter } from 'react-router-dom';
+import { createBrowserRouter, RouterProvider } from 'react-router-dom';
+import UnsavedChangesGuard from '@/components/UnsavedChangesGuard';
 import App from './App';
 import './styles/globals.css';
 
+const router = createBrowserRouter([{ path: '*', element: (
+  <AntdProvider><UnsavedChangesGuard /><App /></AntdProvider>
+) }]);
 ReactDOM.createRoot(document.getElementById('root')!).render(
-  <React.StrictMode>
-    <BrowserRouter>
-      <AntdProvider>
-        <App />
-      </AntdProvider>
-    </BrowserRouter>
-  </React.StrictMode>,
+  <React.StrictMode><RouterProvider router={router} /></React.StrictMode>,
 );

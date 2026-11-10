@@ -1,3 +1,4 @@
+import { usePageQuery, queryPage, queryChoice } from '@/hooks/usePageQuery';
 import { getAuthGeneration, assertAuthGeneration } from '@/lib/authSession';
 import { useCallback, useEffect, useState } from 'react';
 import { LinkOutlined, ReloadOutlined } from '@ant-design/icons';
@@ -40,9 +41,13 @@ export default function CronJobRunsPage() {
   const [runs, setRuns] = useState<CronJobRun[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
-  const [page, setPage] = useState(1);
-  const [jobId, setJobId] = useState<string | undefined>(undefined);
-  const [status, setStatus] = useState<string>('all');
+  const [params, updateQuery] = usePageQuery();
+  const page = queryPage(params.get('page'));
+  const jobId = params.get('job') || undefined;
+  const status = queryChoice(params.get('status'), ['all', 'success', 'failed', 'running'], 'all');
+  const setPage = (value: number) => updateQuery({ page: value === 1 ? null : value });
+  const setJobId = (value?: string) => updateQuery({ job: value, page: null });
+  const setStatus = (value: string) => updateQuery({ status: value === 'all' ? null : value, page: null });
   const [detail, setDetail] = useState<CronJobRun | null>(null);
   const [openingSessionId, setOpeningSessionId] = useState<string | null>(null);
 
@@ -238,6 +243,7 @@ export default function CronJobRunsPage() {
           rowKey="id"
           loading={loading}
           columns={columns}
+          scroll={{ x: 860 }}
           dataSource={runs}
           size="middle"
           pagination={{

@@ -1,3 +1,4 @@
+import type { BrowserAuthorization } from '@/lib/api/localBrowser';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useChatStore } from '@/stores/chatStore';
@@ -124,8 +125,8 @@ export default function AgentChatPage() {
   }, [agentId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleSend = useCallback(
-    async (content: string, attachments: ChatAttachment[] = [], fileAttachments?: FileAttachmentRef[]) => {
-      let sessionId = activeSessionId;
+    async (content: string, attachments: ChatAttachment[] = [], fileAttachments?: FileAttachmentRef[], browser?: BrowserAuthorization) => {
+      let sessionId = browser?.sessionId || activeSessionId;
 
       // Create a new session if none is active
       if (!sessionId) {
@@ -164,7 +165,7 @@ export default function AgentChatPage() {
       // Start SSE stream
       const controller = chatApi.stream(
         {
-          session_id: sessionId,
+          session_id: sessionId, browser_grant_id: browser?.grantId,
           agent_id: agentId,
           message: content,
           attachments: attachments.length > 0 ? attachments : null,
@@ -266,26 +267,26 @@ export default function AgentChatPage() {
   );
 
   return (
-    <div className="flex flex-1 flex-col overflow-hidden">
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
       {/* Agent header */}
       {agentLoading && (
-        <div className="flex items-center gap-2 px-4 py-2 border-b border-border bg-card/50">
+        <div className="flex shrink-0 items-center gap-2 px-3 sm:px-4 py-2 border-b border-border bg-card/50">
           <Skeleton.Input active size="small" style={{ width: 180 }} />
         </div>
       )}
       {!agentLoading && agent && (
-        <div className="flex items-center gap-2 px-4 py-2 border-b border-border bg-card/50">
-          <span className="text-xl">{getAgentIcon(agent.icon)}</span>
-          <Text strong>{agent.name}</Text>
+        <div className="flex shrink-0 items-center gap-2 px-3 sm:px-4 py-2 border-b border-border bg-card/50">
+          <span className="shrink-0 text-xl">{getAgentIcon(agent.icon)}</span>
+          <Text strong className="min-w-0 flex-1 truncate" title={agent.name}>{agent.name}</Text>
           {agent.description && (
-            <Text type="secondary" className="text-sm ml-2">
+            <Text type="secondary" className="hidden lg:block min-w-0 max-w-sm truncate text-sm ml-2">
               {agent.description}
             </Text>
           )}
           {agent.model_name ? (
-            <Tag color="blue" className="text-xs">{agent.model_name}</Tag>
+            <Tag color="blue" className="hidden sm:inline-block shrink-0 text-xs">{agent.model_name}</Tag>
           ) : (
-            <Tag className="text-xs">默认模型</Tag>
+            <Tag className="hidden sm:inline-block shrink-0 text-xs">默认模型</Tag>
           )}
           <Tooltip title="删除对话">
             <Button
@@ -293,7 +294,7 @@ export default function AgentChatPage() {
               icon={<DeleteOutlined />}
               onClick={handleDeleteChat}
               disabled={!activeSessionId}
-              className="ml-auto"
+              className="ml-auto shrink-0 !h-10 !w-10 sm:!h-8 sm:!w-8"
               aria-label="删除对话"
             />
           </Tooltip>
@@ -303,6 +304,7 @@ export default function AgentChatPage() {
               icon={<PlusOutlined />}
               onClick={handleNewChat}
               loading={creatingSession}
+              className="shrink-0 !h-10 !w-10 sm:!h-8 sm:!w-8"
               aria-label="新对话"
             />
           </Tooltip>
@@ -310,7 +312,7 @@ export default function AgentChatPage() {
       )}
 
       {/* Main content: sidebar + chat area */}
-      <div className="flex flex-1 overflow-hidden relative">
+      <div className="flex min-h-0 flex-1 overflow-hidden relative">
         {/* Config sidebar (history for all, admin config for admins) */}
         {agentId && (
           <AgentConfigSidebar agentId={agentId} onAgentUpdated={() => loadAgent(true)} />
@@ -355,6 +357,8 @@ export default function AgentChatPage() {
             )}
           </>}
           input={{
+            draftScope: `agent:${agentId}`,
+            browserAvailable: agent?.enabled_tools?.includes("local_browser_open") || activeSession?.browser_private,
             onSend: handleSend, onStop: handleStop, isStreaming: streaming.isStreaming, sessionId: activeSessionId, onEnsureSession: handleEnsureSession, starterPrompts: agent?.starter_prompts ?? undefined, onStarterPromptClick: handleStarterPrompt,
             queue, onQueue: enqueue, onQueueSendNow: sendQueuedNow, onQueueRemove: removeQueued,
           }}

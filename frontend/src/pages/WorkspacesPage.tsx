@@ -244,7 +244,7 @@ export default function WorkspacesPage() {
 
   return (
     <div className="flex flex-1 flex-col overflow-hidden bg-muted/15">
-      <div className="flex w-full flex-1 flex-col overflow-hidden px-6 py-5">
+      <div className="flex w-full flex-1 flex-col overflow-hidden px-3 py-4 sm:px-6 sm:py-5">
         {/* Header */}
         <div className="mb-4 flex flex-shrink-0 items-center justify-between">
           <h1 className="flex items-center gap-2 text-xl font-semibold">
@@ -258,9 +258,9 @@ export default function WorkspacesPage() {
           </Button>
         </div>
 
-        <div className="flex flex-1 gap-3 overflow-hidden">
+        <div className="flex min-h-0 flex-1 flex-col lg:flex-row gap-3 overflow-hidden">
           {/* Workspace list */}
-          <div className="w-64 flex-shrink-0 overflow-y-auto rounded-xl border border-border/70 bg-card p-2 shadow-sm">
+          <div className="max-h-40 lg:max-h-none lg:w-64 flex-shrink-0 overflow-y-auto rounded-xl border border-border/70 bg-card p-2 shadow-sm">
             {loadingWs ? (
               <div className="flex justify-center py-10">
                 <Spin />
@@ -271,6 +271,8 @@ export default function WorkspacesPage() {
               workspaces.map((ws) => (
                 <div
                   key={ws.id}
+                  role="button" tabIndex={0} aria-label={`打开工作区 ${ws.name}`}
+                  onKeyDown={event => { if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); handleSelectWorkspace(ws.id); } }}
                   onClick={() => handleSelectWorkspace(ws.id)}
                   className={cn(
                     'group mb-1 flex cursor-pointer items-center justify-between rounded-lg px-3 py-2.5 transition last:mb-0',

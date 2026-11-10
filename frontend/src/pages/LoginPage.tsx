@@ -20,11 +20,6 @@ export default function LoginPage() {
     if (ok) navigate('/', { replace: true });
   };
 
-  const handleClick = (e: React.MouseEvent<HTMLButtonElement>) => {
-    e.preventDefault();
-    form.submit();
-  };
-
   return (
     <div className="flex min-h-screen items-center justify-center bg-background px-4">
       <div className="w-full max-w-sm space-y-6">
@@ -42,6 +37,7 @@ export default function LoginPage() {
           form={form}
           layout="vertical"
           onFinish={handleSubmit}
+          scrollToFirstError={{ focus: true }}
           className="space-y-2"
         >
           {error && (
@@ -60,7 +56,7 @@ export default function LoginPage() {
             label="用户名或邮箱"
             rules={[{ required: true, message: '请输入用户名或邮箱' }]}
           >
-            <Input placeholder="alice" size="large" autoFocus />
+            <Input placeholder="alice" size="large" autoComplete="username" spellCheck={false} />
           </Form.Item>
 
           <Form.Item
@@ -68,16 +64,15 @@ export default function LoginPage() {
             label="密码"
             rules={[{ required: true, message: '请输入密码' }]}
           >
-            <Input.Password placeholder="••••••••" size="large" />
+            <Input.Password placeholder="••••••••" size="large" autoComplete="current-password" />
           </Form.Item>
 
           <Form.Item>
             <Button
               type="primary"
-              htmlType="button"
+              htmlType="submit"
               size="large"
               loading={isLoading}
-              onClick={handleClick}
               block
             >
               登录

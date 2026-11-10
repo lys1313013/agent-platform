@@ -18,6 +18,7 @@ const TOOL_CATEGORY_LABELS: Record<string, string> = {
   remote: '远程工具',
   automation: '自动化',
   ui_automation: '页面自动化',
+  local_browser: '本地浏览器',
   other: '其他',
 };
 
@@ -31,6 +32,7 @@ const TOOL_CATEGORY_ORDER = [
   'interaction',
   'automation',
   'ui_automation',
+  'local_browser',
   'remote',
   'other',
 ];

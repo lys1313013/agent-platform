@@ -1,3 +1,4 @@
+import { useUnsavedChanges, confirmDiscardChanges } from '@/hooks/useUnsavedChanges';
 import { useCallback, useEffect, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -143,6 +144,18 @@ export default function SkillEditorDrawer({ open, mode: initialMode, skill, onCl
   const [submitting, setSubmitting] = useState(false);
   const [removedFiles, setRemovedFiles] = useState<string[]>([]);
 
+  const dirty = open && mode !== 'view' && (
+    formName !== (skill?.name ?? '') || formDescription !== (skill?.description ?? '')
+    || formContent !== (skill?.content ?? '') || formCategory !== (skill?.category ?? 'general')
+    || formTrigger !== (skill?.trigger_condition ?? '')
+    || JSON.stringify(formTags) !== JSON.stringify(skill?.tags ?? [])
+    || formFiles.length > 0 || removedFiles.length > 0
+  );
+  useUnsavedChanges(dirty);
+  const closeEditor = () => {
+    if (!submitting && confirmDiscardChanges(dirty)) onClose();
+  };
+
   const existingFiles: { path: string; type: string }[] = skill?.files?.filter(f => !removedFiles.includes(f.path)).map((f) => ({ path: f.path, type: f.type })) || [];
   const pendingFiles: { path: string; type: string }[] = formFiles.map((f) => ({
     path: `${f.type === 'script' ? 'scripts' : f.type === 'reference' ? 'references' : 'assets'}/${f.file.name}`,
@@ -279,6 +292,7 @@ export default function SkillEditorDrawer({ open, mode: initialMode, skill, onCl
             {titleIcon}
           </span>
           <span className="font-semibold text-base">{titleText}</span>
+          {dirty && <Tag color="orange">未保存</Tag>}
           {skill && (
             <Tag className="ml-1" color="blue">v{skill.version}</Tag>
           )}
@@ -290,13 +304,13 @@ export default function SkillEditorDrawer({ open, mode: initialMode, skill, onCl
         </div>
       }
       open={open}
-      onCancel={onClose}
-      width={Math.min(1100, window.innerWidth - 80)}
+      onCancel={closeEditor}
+      width="min(1100px, calc(100vw - 24px))"
       footer={null}
       closable
       closeIcon={<CloseOutlined className="text-muted-foreground hover:text-foreground transition-colors" />}
       styles={{
-        body: { padding: 0, height: 'calc(85vh - 110px)', overflow: 'hidden' },
+        body: { padding: 0, height: 'calc(85dvh - 110px)', overflow: 'hidden', display: 'flex', flexDirection: 'column' },
         header: { padding: '14px 20px', borderBottom: '1px solid hsl(var(--border))' },
       }}
       destroyOnHidden
@@ -304,7 +318,7 @@ export default function SkillEditorDrawer({ open, mode: initialMode, skill, onCl
     >
       {/* ── Top status bar (view mode) ── */}
       {mode === 'view' && skill && (
-        <div className="flex items-center gap-4 px-5 py-2.5 bg-gray-50/80 dark:bg-gray-900/50 border-b border-border/60 text-xs">
+        <div className="flex shrink-0 flex-wrap items-center gap-4 px-5 py-2.5 bg-gray-50/80 dark:bg-gray-900/50 border-b border-border/60 text-xs">
           <div className="flex items-center gap-1.5 text-muted-foreground">
             <BarChartOutlined className="text-blue-500" />
             <span>使用 <Text strong className="text-xs">{skill.use_count}</Text> 次</span>
@@ -328,9 +342,9 @@ export default function SkillEditorDrawer({ open, mode: initialMode, skill, onCl
       )}
 
       {/* ── Main content ── */}
-      <div className="flex h-full" style={{ height: mode === 'view' && skill ? 'calc(100% - 40px)' : '100%' }}>
+      <div className="flex flex-1 min-h-0 flex-col sm:flex-row">
         {/* ── Left: File sidebar ── */}
-        <div className="w-64 border-r border-border flex flex-col bg-gray-50/40 dark:bg-gray-950/40 shrink-0">
+        <div className="max-h-36 sm:max-h-none sm:w-64 border-b sm:border-b-0 sm:border-r border-border flex flex-col bg-muted/40 shrink-0">
           {/* Sidebar header */}
           <div className="px-3 py-2.5 border-b border-border/60 flex items-center gap-2">
             <FolderOpenOutlined className="text-xs text-muted-foreground" />
@@ -466,7 +480,7 @@ export default function SkillEditorDrawer({ open, mode: initialMode, skill, onCl
         </div>
 
         {/* ── Right: Content area ── */}
-        <div className="flex-1 flex flex-col min-w-0 bg-white dark:bg-gray-950">
+        <div className="flex-1 flex flex-col min-h-0 min-w-0 bg-white dark:bg-gray-950">
           {/* File header bar */}
           <div className="flex items-center gap-2 px-4 py-2 border-b border-border/60 bg-gray-50/50 dark:bg-gray-900/50 shrink-0">
             {selectedFile ? (
@@ -497,34 +511,34 @@ export default function SkillEditorDrawer({ open, mode: initialMode, skill, onCl
             {selectedPath === 'SKILL.md' && isEditing ? (
               <div className="flex h-full">
                 {/* Left: editor + metadata */}
-                <div className="w-1/2 border-r border-border/60 flex flex-col overflow-hidden">
+                <div className="w-full xl:w-1/2 border-r border-border/60 flex flex-col overflow-hidden">
                   <div className="p-4 space-y-3 overflow-auto flex-1">
                     <div>
                       <Text className="mb-1 block text-xs font-semibold text-muted-foreground">名称 <Text type="danger" className="text-xs">*</Text></Text>
-                      <Input size="small" value={formName} onChange={(e) => setFormName(e.target.value)} placeholder="例如：部署 Docker 应用到 ECS" maxLength={256} className="rounded-md" />
+                      <Input aria-label="技能名称" size="small" value={formName} onChange={(e) => setFormName(e.target.value)} placeholder="例如：部署 Docker 应用到 ECS" maxLength={256} className="rounded-md" />
                     </div>
                     <div>
                       <Text className="mb-1 block text-xs font-semibold text-muted-foreground">描述</Text>
-                      <Input size="small" value={formDescription} onChange={(e) => setFormDescription(e.target.value)} placeholder="一句话描述技能用途" maxLength={2000} className="rounded-md" />
+                      <Input aria-label="技能描述" size="small" value={formDescription} onChange={(e) => setFormDescription(e.target.value)} placeholder="一句话描述技能用途" maxLength={2000} className="rounded-md" />
                     </div>
                     <div className="flex gap-3">
                       <div className="flex-1">
                         <Text className="mb-1 block text-xs font-semibold text-muted-foreground">类别</Text>
-                        <Select size="small" value={formCategory} onChange={setFormCategory} className="w-full"
+                        <Select aria-label="技能分类" size="small" value={formCategory} onChange={setFormCategory} className="w-full"
                           options={CATEGORIES.map((c) => ({ value: CATEGORY_MAP[c], label: c }))} />
                       </div>
                       <div className="flex-1">
                         <Text className="mb-1 block text-xs font-semibold text-muted-foreground">标签</Text>
-                        <Select size="small" mode="tags" value={formTags} onChange={setFormTags} placeholder="回车添加" className="w-full" />
+                        <Select aria-label="技能标签" size="small" mode="tags" value={formTags} onChange={setFormTags} placeholder="回车添加" className="w-full" />
                       </div>
                     </div>
                     <div>
                       <Text className="mb-1 block text-xs font-semibold text-muted-foreground">触发条件</Text>
-                      <Input size="small" value={formTrigger} onChange={(e) => setFormTrigger(e.target.value)} placeholder="什么时候使用这个技能" className="rounded-md" />
+                      <Input aria-label="触发条件" size="small" value={formTrigger} onChange={(e) => setFormTrigger(e.target.value)} placeholder="什么时候使用这个技能" className="rounded-md" />
                     </div>
                     <div className="flex-1 flex flex-col min-h-0">
                       <Text className="mb-1 block text-xs font-semibold text-muted-foreground">SKILL.md 内容 <Text type="danger" className="text-xs">*</Text></Text>
-                      <TextArea
+                      <TextArea aria-label="技能内容"
                         value={formContent}
                         onChange={(e) => setFormContent(e.target.value)}
                         placeholder="完整的方法论：步骤、注意事项、工具依赖等..."
@@ -535,7 +549,7 @@ export default function SkillEditorDrawer({ open, mode: initialMode, skill, onCl
                   </div>
                 </div>
                 {/* Right: live preview */}
-                <div className="w-1/2 flex flex-col overflow-hidden bg-gray-50/30 dark:bg-gray-950/50">
+                <div className="hidden xl:flex w-1/2 flex-col overflow-hidden bg-muted/30">
                   <div className="px-4 py-1.5 border-b border-border/60 bg-gray-50 dark:bg-gray-900/50 shrink-0 flex items-center gap-1.5">
                     <EyeOutlined className="text-[10px] text-muted-foreground" />
                     <Text type="secondary" className="text-[11px] font-medium">实时预览</Text>
@@ -554,8 +568,8 @@ export default function SkillEditorDrawer({ open, mode: initialMode, skill, onCl
 
       {/* ── Bottom action bar (edit/create mode) ── */}
       {isEditing && (
-        <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-border bg-gray-50/80 dark:bg-gray-950/80">
-          <Button onClick={onClose} size="middle">取消</Button>
+        <div className="flex shrink-0 items-center justify-end gap-2 px-5 py-3 border-t border-border bg-gray-50/80 dark:bg-gray-950/80">
+          <Button onClick={closeEditor} size="middle">取消</Button>
           <Button type="primary" size="middle" icon={<SaveOutlined />} loading={submitting} onClick={handleSubmit}>
             {mode === 'edit' ? '保存更改' : '创建技能'}
           </Button>

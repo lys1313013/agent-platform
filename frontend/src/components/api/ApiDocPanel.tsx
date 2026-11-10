@@ -631,7 +631,7 @@ function SessionManagementTab() {
   const endpoints = [
     { method: 'GET', path: '/api/sessions/{session_id}/messages', desc: '获取会话历史消息' },
     { method: 'POST', path: '/api/sessions/{session_id}/clear', desc: '清空会话（保留会话）' },
-    { method: 'DELETE', path: '/api/sessions/{session_id}', desc: '删除会话' },
+    { method: 'DELETE', path: '/api/sessions/{session_id}', desc: '删除会话，成功返回 204，无响应体' },
     { method: 'POST', path: '/api/sessions/{session_id}/messages/{message_id}/feedback', desc: '提交消息反馈 (up/down)' },
   ];
 

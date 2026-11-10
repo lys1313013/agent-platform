@@ -1,3 +1,4 @@
+import type { BrowserAuthorization } from '@/lib/api/localBrowser';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useChatStore } from '@/stores/chatStore';
@@ -74,8 +75,8 @@ export default function ChatPage() {
   flushNextRef.current = flushNext;
 
   const handleSend = useCallback(
-    async (content: string, attachments: ChatAttachment[] = [], fileAttachments: FileAttachmentRef[] = []) => {
-      let sessionId = activeSessionId;
+    async (content: string, attachments: ChatAttachment[] = [], fileAttachments: FileAttachmentRef[] = [], browser?: BrowserAuthorization) => {
+      let sessionId = browser?.sessionId || activeSessionId;
 
       // Create a new session if none is active
       if (!sessionId) {
@@ -106,7 +107,7 @@ export default function ChatPage() {
 
       // Start SSE stream
       const controller = chatApi.stream(
-        { session_id: sessionId, message: content, attachments, file_attachments: fileAttachments, page_context: buildPageContext() },
+        { session_id: sessionId, browser_grant_id: browser?.grantId, message: content, attachments, file_attachments: fileAttachments, page_context: buildPageContext() },
         consume,
       );
 
@@ -215,6 +216,7 @@ export default function ChatPage() {
             )}
           </>}
           input={{
+            browserAvailable: !!activeSession?.agent_id,
             onSend: handleSend, onStop: handleStop, isStreaming: streaming.isStreaming, sessionId: activeSessionId, onEnsureSession: async () => {
               if (activeSessionId) return activeSessionId;
               const sid = await createSession('新对话');

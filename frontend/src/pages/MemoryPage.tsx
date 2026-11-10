@@ -1,3 +1,4 @@
+import { usePageQuery, queryPage, queryChoice } from '@/hooks/usePageQuery';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
@@ -87,18 +88,23 @@ function formatRelativeTime(iso: string): string {
 export default function MemoryPage() {
   const { message } = App.useApp();
   const [agents, setAgents] = useState<Agent[]>([]);
-  const [scopeAgent, setScopeAgent] = useState('');
+  const [params, updateQuery] = usePageQuery();
+  const scopeAgent = params.get('agent') ?? '';
+  const setScopeAgent = (value: string) => updateQuery({ agent: value, page: null });
   const [formAgent, setFormAgent] = useState('');
   useEffect(() => { agentsApi.list().then(setAgents).catch(() => message.error('加载智能体失败')); }, [message]);
   const scopeOptions = [
     { value: '', label: '用户共享记忆' },
     ...agents.map((agent) => ({ value: agent.id, label: `${agent.name} · 专属记忆` })),
   ];
-  const [page, setPage] = useState(1);
+  const page = queryPage(params.get('page'));
+  const setPage = useCallback((value: number) => updateQuery({ page: value === 1 ? null : value }), [updateQuery]);
   const [organizing, setOrganizing] = useState<{ layer: 'L1' | 'L2'; agentId: string; ids?: string[] } | null>(null);
   const [historyView, setHistoryView] = useState<{ memoryId?: string; agentId: string; layer?: string } | null>(null);
-  const [activeLayer, setActiveLayer] = useState<MemoryTab>('L1');
-  const [searchQuery, setSearchQuery] = useState('');
+  const activeLayer = queryChoice<MemoryTab>(params.get('layer'), ['L1', 'L2', 'L3', 'daily'], 'L1');
+  const setActiveLayer = (value: MemoryTab) => updateQuery({ layer: value, page: null });
+  const searchQuery = params.get('q') ?? '';
+  const setSearchQuery = (value: string) => updateQuery({ q: value, page: null });
   const [memories, setMemories] = useState<Memory[]>([]);
   const [scores, setScores] = useState<Record<string, number>>({});
   const [total, setTotal] = useState(0);
@@ -151,7 +157,7 @@ export default function MemoryPage() {
     } finally {
       if (request === listRequest.current) setLoading(false);
     }
-  }, [activeLayer, searchQuery, message, scopeAgent, page]);
+  }, [activeLayer, searchQuery, message, scopeAgent, page, setPage]);
 
   const fetchCounts = useCallback(async () => {
     try {

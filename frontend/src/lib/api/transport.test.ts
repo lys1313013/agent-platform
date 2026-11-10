@@ -2,12 +2,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { apiFetch, chatApi, graphKnowledgeApi, petsApi, skillsApi, workspacesApi } from '../api';
 import { tokenStorage } from '../auth';
 
-const access = (name: string) => `x.${btoa(JSON.stringify({ sub: 'same-user', name, exp: Math.floor(Date.now() / 1000) + 3600 }))}.x`;
+let tokenExpiry: number;
+const access = (name: string) => `x.${btoa(JSON.stringify({ sub: 'same-user', name, exp: tokenExpiry }))}.x`;
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
   status, headers: { 'Content-Type': 'application/json' },
 });
 
 beforeEach(() => {
+  tokenExpiry = Math.floor(Date.now() / 1000) + 3600;
   tokenStorage.clear();
   tokenStorage.set(access('old'), 'refresh-old');
   vi.stubGlobal('fetch', vi.fn());

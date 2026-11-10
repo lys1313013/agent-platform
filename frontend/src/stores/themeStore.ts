@@ -70,6 +70,7 @@ export function initTheme() {
   window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
     if (useThemeStore.getState().theme === 'system') {
       applyTheme('system');
+      useThemeStore.setState({});
     }
   });
 }

@@ -1,5 +1,6 @@
+import { usePageQuery, queryChoice } from '@/hooks/usePageQuery';
 import { useState, useEffect, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import {
   RobotOutlined,
   PlusOutlined,
@@ -10,6 +11,7 @@ import {
   CommentOutlined,
 } from '@ant-design/icons';
 import {
+  Alert,
   Form,
   Input,
   Select,
@@ -37,6 +39,10 @@ export default function AgentsPage() {
   const { message } = App.useApp();
   const navigate = useNavigate();
 
+  const [params, updateQuery] = usePageQuery();
+  const search = params.get('q') ?? '';
+  const status = queryChoice(params.get('status'), ['all', 'active', 'inactive'], 'all');
+  const [loadError, setLoadError] = useState('');
   const [agents, setAgents] = useState<Agent[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -44,6 +50,7 @@ export default function AgentsPage() {
 
   const fetchData = useCallback(async () => {
     setLoading(true);
+    setLoadError('');
     try {
       const [a, t] = await Promise.all([
         agentsApi.adminList(),
@@ -52,12 +59,12 @@ export default function AgentsPage() {
       ]);
       setAgents(a);
       setAllTools(t);
-    } catch (err: any) {
-      message.error(`加载智能体失败：${err.message}`);
+    } catch (err: unknown) {
+      setLoadError(err instanceof Error ? `加载智能体失败：${err.message}` : '加载智能体失败，请重试');
     } finally {
       setLoading(false);
     }
-  }, [message]);
+  }, []);
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
@@ -140,7 +147,10 @@ export default function AgentsPage() {
     }
   };
 
-  const displayAgents = agents;
+  const displayAgents = agents.filter(agent =>
+    (!search.trim() || `${agent.name} ${agent.description ?? ''}`.toLowerCase().includes(search.trim().toLowerCase()))
+    && (status === 'all' || agent.is_active === (status === 'active')),
+  );
 
   // Build set of built-in tool names to exclude MCP tools from count
   const builtinToolNames = new Set(
@@ -151,24 +161,32 @@ export default function AgentsPage() {
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="w-full px-6 py-8">
-        <div className="mb-8">
-          <h1 className="text-2xl font-bold flex items-center gap-2">
+      <div className="page-content">
+        <div className="mb-6 flex flex-wrap items-start justify-between gap-4">
+          <div><h1 className="text-2xl font-bold flex items-center gap-2">
             <RobotOutlined className="text-primary" />
             智能体
           </h1>
           <Text type="secondary">
             选择一个智能体开始对话，或创建新的智能体
-          </Text>
+          </Text></div>
+          <Button type="primary" icon={<PlusOutlined />} onClick={() => openModal()} data-ui-action="agents.open_create_modal">添加智能体</Button>
         </div>
+        <div className="mb-5 flex flex-wrap items-center gap-3">
+          <Input aria-label="搜索智能体" placeholder="搜索名称或描述…" value={search} allowClear onChange={e => updateQuery({ q: e.target.value })} className="w-full sm:max-w-sm" />
+          <Select aria-label="智能体状态" value={status} onChange={value => updateQuery({ status: value === 'all' ? null : value })} className="w-32" options={[{ value: 'all', label: '全部状态' }, { value: 'active', label: '启用' }, { value: 'inactive', label: '禁用' }]} />
+          <Text type="secondary">{displayAgents.length} / {agents.length} 个智能体</Text>
+        </div>
+        {loadError && <Alert className="mb-4" type="error" showIcon title={loadError} action={<Button onClick={fetchData}>重试</Button>} />}
 
         {loading ? (
           <div className="flex items-center justify-center py-24">
             <Spin size="large" />
           </div>
-        ) : displayAgents.length === 0 ? (
+        ) : loadError ? null : displayAgents.length === 0 ? (
           <div className="flex flex-col items-center gap-4">
-            <Empty description="还没有智能体" />
+            <Empty description={agents.length ? "没有匹配的智能体" : "还没有智能体"} />
+            {agents.length > 0 && <Button onClick={() => updateQuery({ q: null, status: null })}>清除筛选</Button>}
             <Button type="primary" icon={<PlusOutlined />} onClick={() => openModal()}>
               添加智能体
             </Button>
@@ -192,15 +210,15 @@ export default function AgentsPage() {
                 </div>
 
                 {/* Card content — clickable area */}
-                <div
-                  className="flex flex-col items-center text-center gap-3 py-2 cursor-pointer"
-                  onClick={() => navigate(`/agents/${agent.id}/chat`)}
+                <Link
+                  className="flex flex-col items-center text-center gap-3 py-2 text-foreground rounded-lg"
+                  to={`/agents/${agent.id}/chat`}
                 >
                   <div className="text-4xl">
                     {getAgentIcon(agent.icon || DEFAULT_ICON)}
                   </div>
                   <div>
-                    <div className="font-semibold text-base">{agent.name}</div>
+                    <div className="font-semibold text-base break-words">{agent.name}</div>
                     {agent.description && (
                       <Text type="secondary" className="text-sm line-clamp-2">
                         {agent.description}
@@ -233,7 +251,7 @@ export default function AgentsPage() {
                       </Tag>
                     )}
                   </div>
-                </div>
+                </Link>
 
                 {/* Action menu (3-dot dropdown) */}
                 <div className="absolute bottom-2 right-2">
@@ -285,6 +303,7 @@ export default function AgentsPage() {
                       <Button
                         type="text"
                         size="small"
+                        aria-label={`${agent.name} 的操作`}
                         icon={<EllipsisOutlined />}
                         onClick={(e) => e.stopPropagation()}
                         className="opacity-60 hover:opacity-100 transition-opacity"
@@ -294,27 +313,7 @@ export default function AgentsPage() {
               </Card>
             ))}
 
-            {/* Add agent card */}
-            <Card
-              hoverable
-              className="cursor-pointer transition-all hover:shadow-lg border-dashed"
-              onClick={() => openModal()}
-              data-ui-action="agents.open_create_modal"
-            >
-              <div className="flex flex-col items-center text-center gap-3 py-2">
-                <div className="text-4xl text-muted-foreground">
-                  <PlusOutlined />
-                </div>
-                <div>
-                  <div className="font-semibold text-base text-muted-foreground">
-                    添加智能体
-                  </div>
-                  <Text type="secondary" className="text-sm">
-                    创建新的智能体
-                  </Text>
-                </div>
-              </div>
-            </Card>
+
           </div>
         )}
       </div>

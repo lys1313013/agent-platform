@@ -13,7 +13,7 @@ import { ChildrenPanel } from './ChildrenPanel';
 const { Text } = Typography;
 
 export function AdminPanel({ activeSection, closePanel }: { activeSection: AdminSectionKey; closePanel: () => void; }) {
-  const { loading, agent, error, retryLoad } = useAgentConfig();
+  const { loading, agent, error, retryLoad, dirty } = useAgentConfig();
   if (loading) return <div className="flex items-center justify-center py-16"><Spin /></div>;
   if (!agent) return <div className="space-y-3 p-4 text-center"><Text type="secondary">{error || '智能体未找到'}</Text><Button onClick={retryLoad}>重新加载</Button></div>;
   const sectionLabels: Record<AdminSectionKey, { icon: React.ReactNode; label: string; description: string; }> = {
@@ -38,10 +38,11 @@ export function AdminPanel({ activeSection, closePanel }: { activeSection: Admin
           </span>
           <div>
             <Text strong className="block text-sm">{sectionInfo.label}</Text>
-            <Text type="secondary" className="block text-[10px]">{sectionInfo.description}</Text>
+            <Text type="secondary" className="block text-[10px]">{sectionInfo.description}{dirty && <span className="ml-2 text-amber-600 dark:text-amber-400">· 有未保存修改</span>}</Text>
           </div>
         </div>
         <button
+          aria-label="关闭配置面板"
           onClick={closePanel}
           className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground transition hover:bg-muted hover:text-foreground"
         >

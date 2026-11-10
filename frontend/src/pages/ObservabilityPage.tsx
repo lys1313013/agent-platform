@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { usePageQuery, queryChoice, queryPage } from '@/hooks/usePageQuery';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Bar, Line } from '@ant-design/plots';
 import { ReloadOutlined } from '@ant-design/icons';
 import {
@@ -233,31 +234,37 @@ function OverviewTab({ range }: { range: ObsRangeQuery }) {
 function TracesTab({ range }: { range: ObsRangeQuery }) {
   const [items, setItems] = useState<ObsTraceItem[]>([]);
   const [total, setTotal] = useState(0);
-  const [page, setPage] = useState(1);
-  const [status, setStatus] = useState('all');
+  const [params, updateQuery] = usePageQuery();
+  const page = queryPage(params.get('page'));
+  const status = queryChoice(params.get('status'), ['all', 'completed', 'error', 'interrupted', 'timeout'], 'all');
+  const setPage = (value: number) => updateQuery({ page: value === 1 ? null : value });
+  const setStatus = (value: string) => updateQuery({ status: value === 'all' ? null : value, page: null });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [detail, setDetail] = useState<ObsTraceDetail | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
+  const listRequest = useRef(0);
+  const detailRequest = useRef(0);
 
   const load = useCallback(() => {
-    setLoading(true);
-    setError('');
+    const request = ++listRequest.current;
+    setLoading(true); setError(''); setItems([]); setTotal(0);
     observabilityApi.traces({ ...range, page, page_size: 20, status: status === 'all' ? undefined : status })
-      .then((result) => { setItems(result.items); setTotal(result.total); })
-      .catch(() => setError('Trace 列表加载失败'))
-      .finally(() => setLoading(false));
+      .then(result => { if (request === listRequest.current) { setItems(result.items); setTotal(result.total); } })
+      .catch(() => { if (request === listRequest.current) setError('Trace 列表加载失败'); })
+      .finally(() => { if (request === listRequest.current) setLoading(false); });
   }, [range, page, status]);
 
-  useEffect(() => { load(); }, [load]);
-  useEffect(() => { setPage(1); }, [range]);
+  useEffect(() => { load(); return () => { listRequest.current += 1; }; }, [load]);
+  useEffect(() => { setDetailOpen(false); return () => { detailRequest.current += 1; }; }, [range]);
 
   const openDetail = (id: string) => {
-    setDetail(null);
-    setDetailOpen(true);
-    setDetailLoading(true);
-    observabilityApi.trace(id).then(setDetail).catch(() => setDetail(null)).finally(() => setDetailLoading(false));
+    const request = ++detailRequest.current;
+    setDetail(null); setDetailOpen(true); setDetailLoading(true);
+    observabilityApi.trace(id).then(value => { if (request === detailRequest.current) setDetail(value); })
+      .catch(() => { if (request === detailRequest.current) setDetail(null); })
+      .finally(() => { if (request === detailRequest.current) setDetailLoading(false); });
   };
 
   const columns: ColumnsType<ObsTraceItem> = [
@@ -314,15 +321,23 @@ function StatsTab({ range }: { range: ObsRangeQuery }) {
   const [items, setItems] = useState<ObsDistributionItem[]>([]);
   const [loading, setLoading] = useState(true);
 
+  const [error, setError] = useState('');
+  const [retry, setRetry] = useState(0);
+
   useEffect(() => {
-    setLoading(true);
-    observabilityApi.stats({ ...range, by, metric }).then(setItems).finally(() => setLoading(false));
-  }, [range, by, metric]);
+    let cancelled = false;
+    setLoading(true); setError(''); setItems([]);
+    observabilityApi.stats({ ...range, by, metric }).then(value => { if (!cancelled) setItems(value); })
+      .catch(() => { if (!cancelled) setError('聚合报表加载失败，请重试'); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [range, by, metric, retry]);
 
   const field = { tokens: 'total_tokens', count: 'request_count', error: 'error_count', duration: 'avg_duration_ms' }[metric];
   const metricName = { tokens: 'Token', count: '调用数', error: '错误数', duration: '平均耗时' }[metric];
   return (
     <div className="obs-tab-content">
+      {error && <ErrorState message={error} retry={() => setRetry(value => value + 1)} />}
       <div className="obs-toolbar obs-toolbar--wrap">
         <Space wrap>
           <Segmented value={by} onChange={(v) => setBy(v as typeof by)} options={[
@@ -365,20 +380,35 @@ function ToolsTab({ range }: { range: ObsRangeQuery }) {
   const [selected, setSelected] = useState<string | null>(null);
   const [trend, setTrend] = useState<{ ts: string; request_count: number; error_count: number }[]>([]);
   const [trendLoading, setTrendLoading] = useState(false);
+  const [trendError, setTrendError] = useState('');
+
+  const [error, setError] = useState('');
+  const [retry, setRetry] = useState(0);
 
   useEffect(() => {
-    setLoading(true);
-    observabilityApi.toolRanking({ ...range, metric, top: 20 }).then(setItems).finally(() => setLoading(false));
-  }, [range, metric]);
+    let cancelled = false;
+    setLoading(true); setError(''); setItems([]);
+    observabilityApi.toolRanking({ ...range, metric, top: 20 }).then(value => { if (!cancelled) setItems(value); })
+      .catch(() => { if (!cancelled) setError('工具排行加载失败，请重试'); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [range, metric, retry]);
 
   useEffect(() => { setSelected(null); setTrend([]); }, [range]);
 
-  const pick = (tool: string) => {
-    setSelected(tool);
+  const pick = (tool: string) => setSelected(tool);
+  useEffect(() => {
+    let cancelled = false;
+    setTrend([]); setTrendError('');
+    if (!selected) return;
     setTrendLoading(true);
     const granularity = window === '1h' ? 'minute' : window === '7d' ? 'day' : 'hour';
-    observabilityApi.toolTrend(tool, granularity, range).then(setTrend).finally(() => setTrendLoading(false));
-  };
+    observabilityApi.toolTrend(selected, granularity, range)
+      .then(value => { if (!cancelled) setTrend(value); })
+      .catch(() => { if (!cancelled) setTrendError('工具趋势加载失败，请重试'); })
+      .finally(() => { if (!cancelled) setTrendLoading(false); });
+    return () => { cancelled = true; };
+  }, [selected, range, window, retry]);
 
   const trendData = useMemo(() => trend.flatMap((point) => [
     { ts: point.ts, value: point.request_count, metric: '调用数' },
@@ -387,6 +417,7 @@ function ToolsTab({ range }: { range: ObsRangeQuery }) {
 
   return (
     <div className="obs-tab-content">
+      {error && <ErrorState message={error} retry={() => setRetry(value => value + 1)} />}
       <div className="obs-toolbar">
         <Segmented value={metric} onChange={(v) => setMetric(v as typeof metric)} options={[
           { label: '调用次数', value: 'count' }, { label: '平均耗时', value: 'duration' }, { label: '错误率', value: 'error' }, { label: '注入 Token', value: 'tokens' },
@@ -411,7 +442,7 @@ function ToolsTab({ range }: { range: ObsRangeQuery }) {
         </Col>
         {selected && <Col xs={24} xl={11}>
           <Card size="small" title={`${selected} · 调用趋势`} extra={<Button type="link" size="small" onClick={() => setSelected(null)}>收起</Button>} className="obs-chart-card">
-            {trendLoading ? <Skeleton active /> : !trend.some((p) => p.request_count) ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无趋势数据" /> :
+            {trendError ? <ErrorState message={trendError} retry={() => setRetry(value => value + 1)} /> : trendLoading ? <Skeleton active /> : !trend.some((p) => p.request_count) ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无趋势数据" /> :
               <Line data={trendData} xField="ts" yField="value" colorField="metric" height={300} smooth scale={{ x: { tickCount: 6 }, color: { range: ['#1677ff', '#dc2626'] } }} axis={{ x: { title: false, labelAutoRotate: false, labelFormatter: (value: string) => localTime(value, window) }, y: { title: false } }}
                 tooltip={{ title: (datum: { ts: string }) => tooltipTime(datum.ts, window), items: [(datum: { metric: string; value: number }) => ({ name: datum.metric, value: fmt(datum.value) })] }} />}
           </Card>
@@ -428,11 +459,19 @@ function QualityTab({ range }: { range: ObsRangeQuery }) {
   const [data, setData] = useState<ObsQuality | null>(null);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    setLoading(true);
-    observabilityApi.quality(range).then(setData).finally(() => setLoading(false));
-  }, [range]);
+  const [error, setError] = useState('');
+  const [retry, setRetry] = useState(0);
 
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true); setError(''); setData(null);
+    observabilityApi.quality(range).then(value => { if (!cancelled) setData(value); })
+      .catch(() => { if (!cancelled) setError('对话质量加载失败，请重试'); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [range, retry]);
+
+  if (error) return <ErrorState message={error} retry={() => setRetry(value => value + 1)} />;
   if (loading) return <Skeleton active paragraph={{ rows: 10 }} />;
   if (!data || !data.trace_count) return <Empty description="该时间范围内暂无对话执行" />;
   const successRate = data.trace_count ? data.success_count / data.trace_count * 100 : 0;
@@ -459,12 +498,17 @@ function QualityTab({ range }: { range: ObsRangeQuery }) {
 export default function ObservabilityPage() {
   const role = useAuthStore((s) => s.role);
   const isAdmin = role === 'admin' || role === 'superadmin';
-  const [rangeMode, setRangeMode] = useState<ObsWindow | 'custom'>('24h');
-  const [customRange, setCustomRange] = useState<[Dayjs, Dayjs]>(() => [
-    dayjs().subtract(24, 'hour'),
-    dayjs(),
-  ]);
-  const [tab, setTab] = useState('overview');
+  const [params, updateQuery] = usePageQuery();
+  const rangeMode = queryChoice<ObsWindow | 'custom'>(params.get('window'), ['1h', '24h', '7d', 'custom'], '24h');
+  const setRangeMode = (value: ObsWindow | 'custom') => updateQuery({ window: value, page: null });
+  const [defaultRange] = useState<[Dayjs, Dayjs]>(() => [dayjs().subtract(24, 'hour'), dayjs()]);
+  const start = params.get('start');
+  const end = params.get('end');
+  const customRange = useMemo<[Dayjs, Dayjs]>(() => start && end && dayjs(start).isValid() && dayjs(end).isValid() && dayjs(start).isBefore(dayjs(end))
+    ? [dayjs(start), dayjs(end)] : defaultRange, [start, end, defaultRange]);
+  const setCustomRange = (value: [Dayjs, Dayjs]) => updateQuery({ start: value[0].toISOString(), end: value[1].toISOString(), page: null });
+  const tab = queryChoice(params.get('tab'), ['overview', 'traces', 'stats', 'tools', 'quality'], 'overview');
+  const setTab = (value: string) => updateQuery({ tab: value });
   const isDark = useThemeStore((s) => s.resolvedTheme()) === 'dark';
   const range = useMemo<ObsRangeQuery>(() => {
     if (rangeMode !== 'custom') return { window: rangeMode };

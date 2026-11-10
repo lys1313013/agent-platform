@@ -1,13 +1,20 @@
 import { useState, useEffect, useCallback } from 'react';
 import { SaveOutlined } from '@ant-design/icons';
 import { Form, Select, Button, Card, Typography, Skeleton, App, Input } from 'antd';
+import { Navigate } from 'react-router-dom';
 import { systemConfigApi, adminApi } from '@/lib/api';
 import type { LLMModel } from '@/lib/api';
+import { useAuthStore } from '@/stores/authStore';
 
 const { Text } = Typography;
 const { TextArea } = Input;
 
 export default function SystemConfigPage() {
+  const role = useAuthStore((s) => s.role);
+  return role === 'superadmin' ? <SystemConfigPageContent /> : <Navigate to="/" replace />;
+}
+
+function SystemConfigPageContent() {
   const { message } = App.useApp();
   const [form] = Form.useForm();
   const [loading, setLoading] = useState(true);

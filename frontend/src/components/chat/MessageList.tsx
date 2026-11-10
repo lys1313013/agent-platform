@@ -101,7 +101,7 @@ export default function MessageList<T extends Message>({ messages, streaming, ag
     const subtitle = emptySubtitle ?? (agent?.description || '发送消息开始对话');
 
     return (
-      <div className="chat-empty-state flex flex-1 items-center justify-center">
+      <div className="chat-empty-state flex min-h-0 flex-1 items-center justify-center overflow-y-auto">
         <div className="chat-empty-content flex max-w-md flex-col items-center text-center px-6">
           {/* Logo */}
           <div className={compact ? 'mb-4' : 'mb-6'}>

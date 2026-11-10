@@ -100,6 +100,12 @@ export default function ConfirmationCard({
         {agentBadge}
       </div>
 
+      {context.tool_arguments && (
+        <pre className="mb-3 max-h-64 overflow-auto rounded bg-muted p-3 text-xs whitespace-pre-wrap break-words">
+          {JSON.stringify(context.tool_arguments, null, 2)}
+        </pre>
+      )}
+
       {/* Interaction mode */}
       {mode === 'single_select' && options && (
         <SingleSelectCard options={options} onSubmit={handleSubmit} />

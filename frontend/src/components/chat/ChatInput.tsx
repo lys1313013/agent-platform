@@ -1,4 +1,8 @@
-import { useState, useRef, useCallback, useEffect, useMemo, type ReactNode, type FormEvent, type KeyboardEvent, type DragEvent, type ClipboardEvent } from 'react';
+import { useChatDraft } from '@/hooks/useChatDraft';
+import LocalBrowserControl from './LocalBrowserControl';
+import { localBrowserApi, type BrowserSelection, type BrowserAuthorization } from '@/lib/api/localBrowser';
+import { useAuthStore } from '@/stores/authStore';
+import { useState, useRef, useEffect, useMemo, type ReactNode, type FormEvent, type KeyboardEvent, type DragEvent, type ClipboardEvent } from 'react';
 import { ArrowUpOutlined, StopOutlined, PaperClipOutlined, CloseOutlined, LoadingOutlined, FileTextOutlined, FolderOutlined, ThunderboltOutlined, EditOutlined } from '@ant-design/icons';
 import { Input, Button, App, Image, Tooltip, Select } from 'antd';
 import { chatApi } from '@/lib/api';
@@ -17,30 +21,15 @@ const MAX_IMAGE_SIZE = 10 * 1024 * 1024; // 10MB
 const MAX_FILE_SIZE = 500 * 1024 * 1024; // 500MB
 const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
 
-interface PendingAttachment {
-  localId: string;
-  status: 'uploading' | 'done' | 'error';
-  thumb?: string;
-  attachment?: ChatAttachment;
-  error?: string;
-}
-
-interface PendingFile {
-  localId: string;
-  status: 'uploading' | 'done' | 'error';
-  fileName: string;
-  fileSize: number;
-  fileRef?: FileAttachmentRef;
-  error?: string;
-}
-
 interface StarterPrompt {
   label: string;
   icon: string;
 }
 
 export interface ChatInputProps {
-  onSend: (text: string, attachments: ChatAttachment[], fileAttachments?: FileAttachmentRef[]) => void | boolean | Promise<void | boolean>;
+  draftScope?: string;
+  browserAvailable?: boolean;
+  onSend: (text: string, attachments: ChatAttachment[], fileAttachments?: FileAttachmentRef[], browser?: BrowserAuthorization) => void | boolean | Promise<void | boolean>;
   onStop?: () => void;
   disabled?: boolean;
   isStreaming?: boolean;
@@ -75,16 +64,25 @@ function formatSize(bytes: number): string {
   return `${bytes} B`;
 }
 
-export default function ChatInput({ onSend, onStop, disabled, isStreaming, sessionId, onEnsureSession, starterPrompts, onStarterPromptClick, queue, onQueue, onQueueSendNow, onQueueRemove, simple, portal, fixedWorkspace, mentions, context, sendDisabled, stopping, attachmentLimits }: ChatInputProps) {
-  const [localInput, setLocalInput] = useState('');
+export default function ChatInput({ draftScope, browserAvailable, onSend, onStop, disabled, isStreaming, sessionId, onEnsureSession, starterPrompts, onStarterPromptClick, queue, onQueue, onQueueSendNow, onQueueRemove, simple, portal, fixedWorkspace, mentions, context, sendDisabled, stopping, attachmentLimits }: ChatInputProps) {
+  const [browserSelection, setBrowserSelection] = useState<BrowserSelection | null>(null);
+  const tenantId = useAuthStore(s => s.tenantId);
+  const username = useAuthStore(s => s.username);
+  const [browserRevision, setBrowserRevision] = useState(0);
+  useEffect(() => { setBrowserSelection(null); }, [sessionId, tenantId, username]);
+  const draft = useChatDraft(sessionId, draftScope ?? (simple ? 'pet' : portal ? 'portal' : 'chat'));
+  const { text: localInput, setText: setLocalInput, images: pending, setImages: setPending, files: pendingFiles, setFiles: setPendingFiles } = draft;
+  const ensureSession = async () => {
+    const id = await onEnsureSession?.();
+    if (id) draft.promote(id);
+    return id ?? null;
+  };
   const input = mentions ? mentions.value.text : localInput;
   const setInput = (value: string) => mentions ? mentions.onChange(editMentionDraft(mentions.value, value)) : setLocalInput(value);
   const [sending, setSending] = useState(false);
   const sendingRef = useRef(false);
   const limits = attachmentLimits ?? { images: MAX_ATTACHMENTS, files: MAX_ATTACHMENTS, total: MAX_ATTACHMENTS };
   const commandsEnabled = !simple && !portal && !mentions;
-  const [pending, setPending] = useState<PendingAttachment[]>([]);
-  const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
   const [isDragging, setIsDragging] = useState(false);
   const [commandIndex, setCommandIndex] = useState(0);
   const [commandDismissed, setCommandDismissed] = useState(false);
@@ -137,21 +135,19 @@ export default function ChatInput({ onSend, onStop, disabled, isStreaming, sessi
     pending.filter((p) => p.status !== 'error').length +
     pendingFiles.filter((p) => p.status !== 'error').length;
 
-  const counts = useRef({ images: 0, files: 0 });
-  counts.current = { images: pending.filter(p => p.status !== 'error').length, files: pendingFiles.filter(p => p.status !== 'error').length };
   const reserveAttachment = (kind: 'images' | 'files') => {
-    const count = counts.current;
+    const current = draft.getDraft();
+    const count = { images: current.images.filter(p => p.status !== 'error').length, files: current.files.filter(p => p.status !== 'error').length };
     if (count.images + count.files >= limits.total || count[kind] >= limits[kind]) {
       message.warning(kind === 'images' ? `最多 ${limits.images} 张图片，共 ${limits.total} 个附件` : `最多 ${limits.files} 个文件，共 ${limits.total} 个附件`);
       return false;
     }
-    count[kind] += 1;
     return true;
   };
 
   // ---- Image upload handling ----
 
-  const handleImageFiles = useCallback(async (files: FileList | File[]) => {
+  const handleImageFiles = async (files: FileList | File[]) => {
     const imageFiles = Array.from(files).filter((f) => ALLOWED_IMAGE_TYPES.includes(f.type));
 
     if (imageFiles.length === 0) {
@@ -181,16 +177,16 @@ export default function ChatInput({ onSend, onStop, disabled, isStreaming, sessi
         message.error(`${file.name}: ${errMsg}`);
       }
     }
-  }, [sessionId, message, limits.images, limits.total]);
+  };
 
   // ---- File upload handling ----
 
-  const handleFileUpload = useCallback(async (files: FileList | File[]) => {
+  const handleFileUpload = async (files: FileList | File[]) => {
     const fileArr = Array.from(files);
 
     let effectiveSessionId = sessionId;
     if (!effectiveSessionId) {
-      effectiveSessionId = onEnsureSession ? await onEnsureSession() : null;
+      effectiveSessionId = onEnsureSession ? await ensureSession() : null;
       if (!effectiveSessionId) {
         message.warning('请先创建会话');
         return;
@@ -223,7 +219,7 @@ export default function ChatInput({ onSend, onStop, disabled, isStreaming, sessi
         message.error(`${file.name}: ${errMsg}`);
       }
     }
-  }, [sessionId, onEnsureSession, message, limits.files, limits.total]);
+  };
 
   const handleAttachmentFiles = (files: FileList | File[]) => {
     if (disabled || sendingRef.current || sendDisabled) return;
@@ -282,6 +278,10 @@ export default function ChatInput({ onSend, onStop, disabled, isStreaming, sessi
     const fileAttachments = pendingFiles.filter((p) => p.status === 'done' && p.fileRef).map((p) => p.fileRef!);
     if (!text && attachments.length === 0 && fileAttachments.length === 0) return;
 
+    if (browserSelection && isStreaming && !text.startsWith("/")) {
+      message.warning("浏览器授权只用于当前一轮普通消息，请等待任务完成");
+      return;
+    }
     const isCommand = commandsEnabled && text.startsWith('/');
     if (isStreaming && !onQueue && !isCommand) return;
 
@@ -308,7 +308,17 @@ export default function ChatInput({ onSend, onStop, disabled, isStreaming, sessi
     sendingRef.current = true;
     setSending(true);
     try {
-      const accepted = await onSend(text, attachments, fileAttachments.length > 0 ? fileAttachments : undefined);
+      let browser: BrowserAuthorization | undefined;
+      if (browserSelection && !isCommand) {
+        const id = sessionId || await ensureSession();
+        if (!id) throw new Error("请先创建智能体会话");
+        const grant = await localBrowserApi.grant(id, browserSelection);
+        browser = { grantId: grant.id, sessionId: id };
+        setBrowserSelection(null);
+        setBrowserRevision(v => v + 1);
+      }
+      const files = fileAttachments.length > 0 ? fileAttachments : undefined;
+      const accepted = await onSend(text, attachments, files, browser);
       if (accepted === false) return;
       setInput('');
       setPending([]);
@@ -462,6 +472,7 @@ export default function ChatInput({ onSend, onStop, disabled, isStreaming, sessi
       onDragLeave={simple ? undefined : handleDragLeave}
       onDrop={simple ? undefined : handleDrop}
     >
+      {browserAvailable && <LocalBrowserControl key={`${username}:${tenantId}:${sessionId}:${browserRevision}`} sessionId={sessionId} streaming={isStreaming} available={browserAvailable} onChange={setBrowserSelection} />}
       {context && <div className="mx-auto mb-2 max-w-3xl">{context}</div>}
       {/* Starter prompts */}
       {!simple && starterPrompts && starterPrompts.length > 0 && (
@@ -706,6 +717,7 @@ export default function ChatInput({ onSend, onStop, disabled, isStreaming, sessi
                 <div className="flex min-w-0 items-center gap-0.5 text-muted-foreground">
                   <FolderOutlined className="ml-1 flex-shrink-0 text-xs" />
                   <Select
+                    aria-label="工作区"
                     size="small"
                     value={selectedWorkspaceId}
                     onChange={setSelectedWorkspace}

@@ -346,9 +346,9 @@ function RemoteToolManagementPageContent() {
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="w-full px-6 py-8">
+      <div className="page-content">
         {/* Header */}
-        <div className="mb-8 flex items-center justify-between">
+        <div className="mb-6 flex flex-wrap items-start justify-between gap-4">
           <div>
             <h1 className="text-2xl font-bold flex items-center gap-2">
               <ApiOutlined className="text-primary" />

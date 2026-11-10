@@ -36,7 +36,7 @@ export default function SettingsPage() {
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="w-full px-6 py-8">
+      <div className="page-content">
         {/* Header */}
         <div className="mb-8">
           <h1 className="text-2xl font-bold flex items-center gap-2">

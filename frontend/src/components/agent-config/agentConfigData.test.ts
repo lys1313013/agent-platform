@@ -62,10 +62,16 @@ beforeEach(() => {
   vi.mocked(graphKnowledgeApi.list).mockResolvedValue([]);
   root = createRoot(document.createElement('div'));
 });
-afterEach(async () => { await act(async () => root.unmount()); });
+afterEach(async () => { await act(async () => root.unmount()); vi.restoreAllMocks(); });
 
 describe('agent configuration scope and section drafts', () => {
   it('renders every extracted editor without reloading its shared options', async () => {
+    const matchMedia = window.matchMedia.bind(window);
+    vi.spyOn(window, 'matchMedia').mockImplementation(query => {
+      const media = matchMedia(query);
+      if (query === '(min-width: 1280px)') Object.defineProperty(media, 'matches', { value: true });
+      return media;
+    });
     const container = document.createElement('div');
     await act(async () => root.unmount());
     root = createRoot(container);
@@ -90,6 +96,21 @@ describe('agent configuration scope and section drafts', () => {
     expect(data.agent?.skill_ids).toEqual(['skill-1']);
     expect(agentsApi.adminList).toHaveBeenCalledTimes(1);
     expect(adminApi.listModels).toHaveBeenCalledTimes(1);
+    expect(data.dirty).toBe(true);
+  });
+
+  it('only warns about actual edits and clears the warning after saving them', async () => {
+    vi.mocked(agentsApi.adminList).mockResolvedValue([
+      agent('A', { child_ids: ['C', 'B'] }), agent('B', { max_iterations: 5 }), agent('C', { max_iterations: 7 }),
+    ]);
+    await render();
+    expect(data.dirty).toBe(false);
+    await act(async () => data.setSystemPrompt('edited prompt'));
+    expect(data.dirty).toBe(true);
+    await act(async () => data.saveSection('prompt', { system_prompt: 'edited prompt' }));
+    expect(data.dirty).toBe(false);
+    await act(async () => data.setChildMaxIterations({ B: 5, C: 7, unselected: 99 }));
+    expect(data.dirty).toBe(false);
   });
 
   it('discards a slow agent load after navigating to another agent', async () => {

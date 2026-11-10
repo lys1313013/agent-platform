@@ -1,7 +1,8 @@
+import { useMediaQuery } from '@/hooks/useMediaQuery';
 import { ToolOutlined, ThunderboltOutlined, FileTextOutlined, HistoryOutlined, DashboardOutlined, ApiOutlined, DatabaseOutlined, ApartmentOutlined, MenuFoldOutlined, MenuUnfoldOutlined } from '@ant-design/icons';
 import { cn } from '@/lib/utils';
 import { useState } from 'react';
-import { App, Tooltip } from 'antd';
+import { App, Tooltip, Drawer } from 'antd';
 import { AgentConfigContext } from './agent-config/context';
 import { useAgentConfigData, useAgentConfigScope } from './agent-config/useAgentConfigData';
 import { OverviewPanel } from './agent-config/OverviewPanel';
@@ -22,31 +23,34 @@ export default function AgentConfigSidebar(props: AgentConfigSidebarProps) {
 function AgentConfigSidebarSession({ agentId, onAgentUpdated }: AgentConfigSidebarProps) {
   const { message } = App.useApp();
   const config = useAgentConfigData(agentId, { success: message.success, error: message.error, onUpdated: onAgentUpdated });
+  const isNarrow = useMediaQuery('(max-width: 767px)');
   const [activeSection, setActiveSection] = useState<SectionKey | null>('overview');
-  const [sidebarExpanded, setSidebarExpanded] = useState(true);
+  const [sidebarExpanded, setSidebarExpanded] = useState(() => window.matchMedia('(min-width: 1280px)').matches);
   const toggleSection = (key: SectionKey) => {
-    setActiveSection((prev) => {
-      if (prev === key) {
-        // Closing the section — also collapse the sidebar
-        setSidebarExpanded(false);
-        return null;
-      }
-      // Opening/switching section — ensure sidebar is expanded
+    if (sidebarExpanded && activeSection === key) {
+      setSidebarExpanded(false);
+      setActiveSection(null);
+    } else {
       setSidebarExpanded(true);
-      return key;
-    });
+      setActiveSection(key);
+    }
   };
 
   const closePanel = () => {
     setActiveSection(null);
     setSidebarExpanded(false);
   };
+  const panel = activeSection && <div className="min-h-0 flex-1 min-w-0 flex flex-col overflow-hidden">
+    {activeSection === 'history' ? <HistoryPanel agentId={agentId} closePanel={closePanel} />
+      : activeSection === 'overview' ? <OverviewPanel closePanel={closePanel} setActiveSection={setActiveSection} />
+        : <AdminPanel activeSection={activeSection} closePanel={closePanel} />}
+  </div>;
   return (
     <AgentConfigContext.Provider value={config}>
       <div
         className={cn(
-          'flex flex-shrink-0 border-r border-border bg-card overflow-hidden transition-all duration-200 ease-in-out',
-          sidebarExpanded && activeSection ? 'w-[380px]' : 'w-11',
+          'flex flex-shrink-0 border-r border-border bg-card overflow-hidden',
+          !isNarrow && sidebarExpanded && activeSection ? 'w-[320px] xl:w-[380px]' : 'w-11',
         )}
       >
         {/* Icon rail */}
@@ -54,6 +58,7 @@ function AgentConfigSidebarSession({ agentId, onAgentUpdated }: AgentConfigSideb
           {/* Overview */}
           <Tooltip title="概览" placement="right" mouseEnterDelay={0.5}>
             <button
+              aria-label="概览"
               onClick={() => toggleSection('overview')}
               className={cn(
                 'flex items-center justify-center w-9 h-9 rounded-lg transition-colors',
@@ -69,6 +74,7 @@ function AgentConfigSidebarSession({ agentId, onAgentUpdated }: AgentConfigSideb
           {/* Config icons */}
           <Tooltip title="系统提示词" placement="right" mouseEnterDelay={0.5}>
             <button
+              aria-label="系统提示词"
               onClick={() => toggleSection('prompt')}
               className={cn(
                 'flex items-center justify-center w-9 h-9 rounded-lg transition-colors',
@@ -83,6 +89,7 @@ function AgentConfigSidebarSession({ agentId, onAgentUpdated }: AgentConfigSideb
 
           <Tooltip title="工具配置" placement="right" mouseEnterDelay={0.5}>
             <button
+              aria-label="工具配置"
               onClick={() => toggleSection('tools')}
               className={cn(
                 'flex items-center justify-center w-9 h-9 rounded-lg transition-colors',
@@ -97,6 +104,7 @@ function AgentConfigSidebarSession({ agentId, onAgentUpdated }: AgentConfigSideb
 
           <Tooltip title="MCP 服务" placement="right" mouseEnterDelay={0.5}>
             <button
+              aria-label="MCP 服务"
               onClick={() => toggleSection('mcp')}
               className={cn(
                 'flex items-center justify-center w-9 h-9 rounded-lg transition-colors',
@@ -111,6 +119,7 @@ function AgentConfigSidebarSession({ agentId, onAgentUpdated }: AgentConfigSideb
 
           <Tooltip title="知识库" placement="right" mouseEnterDelay={0.5}>
             <button
+              aria-label="知识库"
               onClick={() => toggleSection('knowledge')}
               className={cn(
                 'flex items-center justify-center w-9 h-9 rounded-lg transition-colors',
@@ -125,6 +134,7 @@ function AgentConfigSidebarSession({ agentId, onAgentUpdated }: AgentConfigSideb
 
           <Tooltip title="图谱知识库" placement="right" mouseEnterDelay={0.5}>
             <button
+              aria-label="图谱知识库"
               onClick={() => toggleSection('graph-knowledge')}
               className={cn(
                 'flex items-center justify-center w-9 h-9 rounded-lg transition-colors',
@@ -139,6 +149,7 @@ function AgentConfigSidebarSession({ agentId, onAgentUpdated }: AgentConfigSideb
 
           <Tooltip title="技能配置" placement="right" mouseEnterDelay={0.5}>
             <button
+              aria-label="技能配置"
               onClick={() => toggleSection('skills')}
               className={cn(
                 'flex items-center justify-center w-9 h-9 rounded-lg transition-colors',
@@ -153,6 +164,7 @@ function AgentConfigSidebarSession({ agentId, onAgentUpdated }: AgentConfigSideb
 
           <Tooltip title="子智能体" placement="right" mouseEnterDelay={0.5}>
             <button
+              aria-label="子智能体"
               onClick={() => toggleSection('children')}
               className={cn(
                 'flex items-center justify-center w-9 h-9 rounded-lg transition-colors',
@@ -168,6 +180,7 @@ function AgentConfigSidebarSession({ agentId, onAgentUpdated }: AgentConfigSideb
           {/* History icon - last */}
           <Tooltip title="对话历史" placement="right" mouseEnterDelay={0.5}>
             <button
+              aria-label="对话历史"
               onClick={() => toggleSection('history')}
               className={cn(
                 'flex items-center justify-center w-9 h-9 rounded-lg transition-colors',
@@ -186,6 +199,8 @@ function AgentConfigSidebarSession({ agentId, onAgentUpdated }: AgentConfigSideb
           {/* Sidebar collapse/expand toggle */}
           <Tooltip title={sidebarExpanded ? '收起侧边栏' : '展开侧边栏'} placement="right" mouseEnterDelay={0.5}>
             <button
+              aria-label={sidebarExpanded ? "收起侧边栏" : "展开侧边栏"}
+              aria-expanded={sidebarExpanded}
               onClick={() => {
                 if (sidebarExpanded) {
                   // Collapse: close panel and shrink
@@ -206,16 +221,11 @@ function AgentConfigSidebarSession({ agentId, onAgentUpdated }: AgentConfigSideb
           </Tooltip>
         </div>
 
-        {/* Inline panel — expands naturally with the sidebar */}
-        {sidebarExpanded && activeSection && (
-          <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
-            {activeSection === 'history'
-              ? <HistoryPanel agentId={agentId} closePanel={closePanel} />
-              : activeSection === 'overview'
-                ? <OverviewPanel closePanel={closePanel} setActiveSection={setActiveSection} />
-                : <AdminPanel activeSection={activeSection} closePanel={closePanel} />}
-          </div>
-        )}
+        {config.dirty && !sidebarExpanded && <span className="sr-only">有未保存的配置</span>}
+        {!isNarrow && sidebarExpanded && activeSection && panel}
+        <Drawer aria-label="智能体配置" destroyOnHidden open={isNarrow && sidebarExpanded && !!activeSection} onClose={closePanel} placement="left" size="min(380px, 100vw)" closable={false} styles={{ body: { padding: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' } }}>
+          {panel}
+        </Drawer>
       </div>
     </AgentConfigContext.Provider>
   );

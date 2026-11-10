@@ -36,6 +36,14 @@ const LAYER_LABELS: Record<string, string> = {
 };
 
 const TOOL_LABELS: Record<string, string> = {
+  local_browser_open: '打开本地浏览器',
+  local_browser_navigate: '打开网页',
+  local_browser_observe: '读取页面',
+  local_browser_interact: '操作页面',
+  local_browser_screenshot: '查看页面截图',
+  local_browser_tabs: '查看浏览器标签页',
+  local_browser_request_help: '请求手动接管',
+  local_browser_close: '关闭浏览器任务',
   web_search: '网页搜索',
   web_fetch: '读取网页',
   run_shell: 'Shell 命令',

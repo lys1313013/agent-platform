@@ -114,7 +114,7 @@ export default function KnowledgeGraphDetailPage() {
           </div>
         ) : (
           <>
-            <div className="mb-4 grid grid-cols-4 gap-4 max-w-2xl">
+            <div className="mb-4 grid grid-cols-2 sm:grid-cols-4 gap-4 max-w-2xl">
               <Card size="small">
                 <Statistic title="实体" value={kb.entity_count} prefix={<TagsOutlined />} />
               </Card>
@@ -233,7 +233,7 @@ function GraphViewTab({ kbId }: { kbId: string }) {
           description="暂无实体，请先在「抽取任务」中构建图谱并采纳实体与关系"
         />
       ) : (
-        <div className="border border-border rounded-lg overflow-hidden bg-white">
+        <div className="border border-border rounded-lg overflow-hidden bg-card">
           <GraphCanvas
             nodes={nodes}
             links={links}
@@ -1017,7 +1017,7 @@ function RetrieveTab({ kbId }: { kbId: string }) {
           )}
 
           {viewMode === 'graph' && result.entities.length > 0 ? (
-            <div className="border border-border rounded-lg overflow-hidden bg-white">
+            <div className="border border-border rounded-lg overflow-hidden bg-card">
               <GraphCanvas
                 height={560}
                 nodes={result.entities.map((e) => ({

@@ -22,11 +22,6 @@ export default function RegisterPage() {
     if (ok) navigate('/', { replace: true });
   };
 
-  const handleClick = (e: React.MouseEvent<HTMLButtonElement>) => {
-    e.preventDefault();
-    form.submit();
-  };
-
   return (
     <div className="flex min-h-screen items-center justify-center bg-background px-4">
       <div className="w-full max-w-sm space-y-6">
@@ -44,6 +39,7 @@ export default function RegisterPage() {
           form={form}
           layout="vertical"
           onFinish={handleSubmit}
+          scrollToFirstError={{ focus: true }}
           className="space-y-2"
         >
           {error && (
@@ -65,7 +61,7 @@ export default function RegisterPage() {
               { max: 128, message: '租户名称最多 128 个字符' },
             ]}
           >
-            <Input placeholder="例如：示例科技" size="large" autoFocus />
+            <Input placeholder="例如：示例科技" size="large" autoComplete="organization" />
           </Form.Item>
 
           <Form.Item
@@ -77,7 +73,7 @@ export default function RegisterPage() {
               { max: 64, message: '用户名最多 64 个字符' },
             ]}
           >
-            <Input placeholder="alice" size="large" />
+            <Input placeholder="alice" size="large" autoComplete="username" spellCheck={false} />
           </Form.Item>
 
           <Form.Item
@@ -88,7 +84,7 @@ export default function RegisterPage() {
               { type: 'email', message: '请输入有效的邮箱地址' },
             ]}
           >
-            <Input placeholder="alice@example.com" size="large" />
+            <Input placeholder="alice@example.com" type="email" size="large" autoComplete="email" spellCheck={false} />
           </Form.Item>
 
           <Form.Item
@@ -99,16 +95,15 @@ export default function RegisterPage() {
               { min: 8, message: '密码至少 8 个字符' },
             ]}
           >
-            <Input.Password placeholder="至少 8 个字符" size="large" />
+            <Input.Password placeholder="至少 8 个字符" size="large" autoComplete="new-password" />
           </Form.Item>
 
           <Form.Item>
             <Button
               type="primary"
-              htmlType="button"
+              htmlType="submit"
               size="large"
               loading={isLoading}
-              onClick={handleClick}
               block
             >
               创建账户

@@ -192,3 +192,18 @@ describe('saved reasoning and tool order', () => {
     expect(order()).toEqual(['thinking', 'thinking', 'thinking', 'tool', 'tool', 'tool']);
   });
 });
+
+
+it('retains a tool approval alongside the saved tool result after reload', async () => {
+  await act(async () => root.render(createElement(ChatMessage, { message: {
+    id: 'approval-message', role: 'assistant', content: 'done', created_at: '2026-10-31T00:00:00Z',
+    tool_calls: [{ id: 'read', name: 'read_file', arguments: { path: 'approved.txt' },
+      result: { status: 'ok', preview: 'saved result' }, confirmation: {
+        confirmation_id: 'approval', question: '批准读取 approved.txt', mode: 'approve',
+        context: { timeout_seconds: 300 },
+        resolved: { confirmation_id: 'approval', status: 'approved', resolved_at: '2026-10-31T00:00:00Z' },
+      } }],
+  } })));
+  expect(container.textContent).toContain('批准读取 approved.txt');
+  expect(container.textContent).toContain('读取文件');
+});

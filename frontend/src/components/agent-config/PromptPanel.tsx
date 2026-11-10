@@ -42,7 +42,7 @@ export function PromptPanel() {
         <Text type="secondary" className="text-xs block mb-2">
           推理温度 <span className="font-normal text-muted-foreground/70">· 留空使用模型默认</span>
         </Text>
-        <InputNumber
+        <InputNumber aria-label="推理温度"
           min={0}
           max={2}
           step={0.1}
@@ -70,7 +70,7 @@ export function PromptPanel() {
         <Text type="secondary" className="text-xs block mb-2">
           最大迭代次数 <span className="font-normal text-muted-foreground/70">· 默认 100，最高 500</span>
         </Text>
-        <InputNumber
+        <InputNumber aria-label="最大迭代次数"
           min={1}
           max={500}
           step={1}
@@ -99,7 +99,7 @@ export function PromptPanel() {
       <Text type="secondary" className="text-xs block mb-2">
         系统提示词 <span className="font-normal text-muted-foreground/70">· 可从模板开始</span>
       </Text>
-      <Select
+      <Select aria-label="提示词模板"
         placeholder="从模板加载提示词..."
         allowClear
         size="small"
@@ -115,7 +115,7 @@ export function PromptPanel() {
           </Option>
         ))}
       </Select>
-      <TextArea
+      <TextArea aria-label="系统提示词"
         value={systemPrompt}
         onChange={(e) => setSystemPrompt(e.target.value)}
         rows={10}
@@ -128,7 +128,7 @@ export function PromptPanel() {
         <Text type="secondary" className="text-xs block mb-2">
           欢迎语
         </Text>
-        <TextArea
+        <TextArea aria-label="欢迎语"
           value={welcomeMessage}
           onChange={(e) => setWelcomeMessage(e.target.value)}
           rows={3}
@@ -169,6 +169,7 @@ export function PromptPanel() {
               >
                 <Input
                   size="small"
+                  aria-label={`快捷提问 ${idx + 1} 图标`}
                   value={sp.icon}
                   onChange={(e) => {
                     const next = [...starterPrompts];
@@ -180,6 +181,7 @@ export function PromptPanel() {
                 />
                 <Input
                   size="small"
+                  aria-label={`快捷提问 ${idx + 1} 内容`}
                   value={sp.label}
                   onChange={(e) => {
                     const next = [...starterPrompts];
@@ -238,7 +240,7 @@ export function PromptPanel() {
           </div>
           <Switch
             size="small"
-            checked={enableMemoryExtraction}
+            aria-label="自动记忆提取" checked={enableMemoryExtraction}
             onChange={setEnableMemoryExtraction}
             className="flex-shrink-0"
           />
@@ -256,7 +258,7 @@ export function PromptPanel() {
           </div>
           <Switch
             size="small"
-            checked={enableRetry}
+            aria-label="LLM 自动重试" checked={enableRetry}
             onChange={setEnableRetry}
             className="flex-shrink-0"
           />
@@ -274,7 +276,7 @@ export function PromptPanel() {
           </div>
           <Switch
             size="small"
-            checked={enableAutoTitle}
+            aria-label="自动总结会话标题" checked={enableAutoTitle}
             onChange={setEnableAutoTitle}
             className="flex-shrink-0"
           />

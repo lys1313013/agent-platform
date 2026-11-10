@@ -23,6 +23,7 @@ export interface FileAttachmentRef {
 }
 
 export interface Session {
+  browser_private?: boolean;
   id: string;
   title: string | null;
   agent_id: string | null;
@@ -77,6 +78,7 @@ export interface PageContext {
 }
 
 export interface ChatRequest {
+  browser_grant_id?: string;
   session_id?: string | null;
   agent_id?: string | null;
   message: string;
@@ -571,6 +573,7 @@ export interface Agent {
 
 /** 用户端门户的 agent 精简信息（GET /api/portal/agents，已脱敏） */
 export interface PortalAgent {
+  local_browser_enabled?: boolean;
   id: string;
   name: string;
   description: string | null;
@@ -644,6 +647,8 @@ export interface TableSchema {
 }
 
 export interface ConfirmationContext {
+  tool_name?: string;
+  tool_arguments?: Record<string, unknown>;
   risk_level?: RiskLevel;
   category?: ConfirmationCategory;
   agent_id?: string;

@@ -1,3 +1,5 @@
+import { theme } from 'antd';
+import { useMediaQuery } from '@/hooks/useMediaQuery';
 import { useEffect, useRef } from 'react';
 import { GraphChart } from 'echarts/charts';
 import { LegendComponent, TooltipComponent } from 'echarts/components';
@@ -62,6 +64,8 @@ function escapeHtml(value: string): string {
 
 /** Force-directed knowledge-graph canvas (ECharts), styled after the ontology-cowork graph page. */
 export default function GraphCanvas({ nodes, links, height = 560, onNodeClick }: GraphCanvasProps) {
+  const { token } = theme.useToken();
+  const reducedMotion = useMediaQuery('(prefers-reduced-motion: reduce)');
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<ECharts | null>(null);
   const clickRef = useRef(onNodeClick);
@@ -87,7 +91,8 @@ export default function GraphCanvas({ nodes, links, height = 560, onNodeClick }:
 
   useEffect(() => {
     const chart = chartRef.current;
-    if (!chart || nodes.length === 0) return;
+    if (!chart) return;
+    if (nodes.length === 0) { chart.clear(); return; }
 
     const types = Array.from(new Set(nodes.map((n) => n.type || '其他')));
     const colorMap = buildColorMap(types);
@@ -99,10 +104,14 @@ export default function GraphCanvas({ nodes, links, height = 560, onNodeClick }:
     });
 
     const option: EChartsCoreOption = {
-      animationDurationUpdate: 350,
+      animation: !reducedMotion,
+      animationDurationUpdate: reducedMotion ? 0 : 350,
+      backgroundColor: token.colorBgContainer,
       color: types.map((t) => colorMap.get(t)!),
       tooltip: {
         confine: true,
+        backgroundColor: token.colorBgElevated, borderColor: token.colorBorder,
+        textStyle: { color: token.colorText },
         formatter: (params: unknown) => {
           const p = params as { dataType?: string; data?: Record<string, unknown> };
           const d = p.data ?? {};
@@ -123,7 +132,7 @@ export default function GraphCanvas({ nodes, links, height = 560, onNodeClick }:
         icon: 'circle',
         itemWidth: 10,
         itemGap: 14,
-        textStyle: { fontSize: 12, color: '#595959' },
+        textStyle: { fontSize: 12, color: token.colorTextSecondary },
         data: types,
       },
       series: [
@@ -153,7 +162,7 @@ export default function GraphCanvas({ nodes, links, height = 560, onNodeClick }:
             description: l.description ?? undefined,
             sourceName: nodeById.get(l.source)?.name ?? '',
             targetName: nodeById.get(l.target)?.name ?? '',
-            label: { show: true, formatter: l.relationType, fontSize: 9, color: '#8c8c8c' },
+            label: { show: true, formatter: l.relationType, fontSize: 9, color: token.colorTextSecondary },
           })),
           force: {
             repulsion: Math.min(1200, Math.max(300, nodes.length * 12)),
@@ -161,8 +170,8 @@ export default function GraphCanvas({ nodes, links, height = 560, onNodeClick }:
             gravity: 0.1,
             friction: 0.15,
           },
-          label: { show: true, position: 'right', fontSize: 11, color: '#262626' },
-          lineStyle: { color: '#d9d9d9', width: 1 },
+          label: { show: true, position: 'right', fontSize: 11, color: token.colorText },
+          lineStyle: { color: token.colorBorder, width: 1 },
           emphasis: {
             focus: 'adjacency',
             lineStyle: { width: 2.5 },
@@ -173,7 +182,7 @@ export default function GraphCanvas({ nodes, links, height = 560, onNodeClick }:
       ],
     };
     chart.setOption(option, true);
-  }, [nodes, links]);
+  }, [nodes, links, token.colorBgContainer, token.colorBgElevated, token.colorBorder, token.colorText, token.colorTextSecondary, reducedMotion]);
 
   return <div ref={containerRef} style={{ height, width: '100%' }} />;
 }

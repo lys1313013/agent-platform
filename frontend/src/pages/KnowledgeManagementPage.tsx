@@ -49,6 +49,7 @@ export default function KnowledgeManagementPage() {
 
 function KnowledgeManagementPageContent() {
   const { message } = App.useApp();
+  const isSuperAdmin = useAuthStore((s) => s.role) === 'superadmin';
 
   // ---- List state ----
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([]);
@@ -102,10 +103,15 @@ function KnowledgeManagementPageContent() {
     }
   }, [message, settingsForm]);
 
-  useEffect(() => { fetchData(); fetchSettings(); }, [fetchData, fetchSettings]);
+  useEffect(() => {
+    void fetchData();
+    if (isSuperAdmin) void fetchSettings();
+    else setSettingsLoading(false);
+  }, [fetchData, fetchSettings, isSuperAdmin]);
 
   // ---- Save RAGFlow settings ----
   const handleSaveSettings = async () => {
+    if (!isSuperAdmin) return;
     try {
       const values = await settingsForm.validateFields();
       setSettingsSaving(true);
@@ -227,9 +233,9 @@ function KnowledgeManagementPageContent() {
   // ---- Rendering ----
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="w-full px-6 py-8">
+      <div className="page-content">
         {/* Header */}
-        <div className="mb-8 flex items-center justify-between">
+        <div className="mb-6 flex flex-wrap items-start justify-between gap-4">
           <div>
             <h1 className="text-2xl font-bold flex items-center gap-2">
               <DatabaseOutlined className="text-primary" />
@@ -244,7 +250,8 @@ function KnowledgeManagementPageContent() {
           </Button>
         </div>
 
-        {/* RAGFlow Global Settings */}
+        {/* RAGFlow Global Settings — shared by every tenant */}
+        {isSuperAdmin && (
         <Card
           title={
             <div className="flex items-center gap-2">
@@ -294,6 +301,7 @@ function KnowledgeManagementPageContent() {
             </Form>
           )}
         </Card>
+        )}
 
         {/* Knowledge Base List */}
         {loading ? (

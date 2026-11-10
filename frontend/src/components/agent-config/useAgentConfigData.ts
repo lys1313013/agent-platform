@@ -1,3 +1,4 @@
+import { useUnsavedChanges } from '@/hooks/useUnsavedChanges';
 import { useEffect, useRef, useState, useSyncExternalStore, type SetStateAction } from 'react';
 import { agentsApi, adminApi, skillsApi, toolsApi, mcpApi, knowledgeApi, graphKnowledgeApi } from '@/lib/api';
 import type { Agent } from '@/lib/types';
@@ -36,6 +37,12 @@ function emptyDraft() {
   };
 }
 type Draft = ReturnType<typeof emptyDraft>;
+
+function comparableDraft(draft: Draft) {
+  return { ...draft, childMaxIterations: Object.fromEntries(
+    draft.selectedChildIds.map(id => [id, draft.childMaxIterations[id] ?? null]),
+  ) };
+}
 
 function draftFromAgent(agent: Agent, options: Options): Draft {
   const builtinNames = new Set(options.allTools.filter((tool) => tool.category !== 'mcp').map((tool) => tool.name));
@@ -90,6 +97,11 @@ export function useAgentConfigData(agentId: string, feedback: Feedback) {
   const [savedSections, setSavedSections] = useState<Partial<Record<AdminSectionKey, boolean>>>({});
   const savingRef = useRef(new Set<AdminSectionKey>());
   const savedTimers = useRef(new Map<AdminSectionKey, ReturnType<typeof setTimeout>>());
+
+  const baseline = agent ? draftFromAgent(agent, data) : null;
+  // Unselected child limits are retained in the editor but are not saved.
+  const dirty = !!baseline && JSON.stringify(comparableDraft(draft)) !== JSON.stringify(comparableDraft(baseline));
+  useUnsavedChanges(dirty, `/agents/${agentId}`);
 
   function current(owner: string, epoch = epochRef.current) {
     const liveScope = `${getAuthGeneration()}:${useAuthStore.getState().tenantId ?? ''}`;
@@ -215,7 +227,7 @@ export function useAgentConfigData(agentId: string, feedback: Feedback) {
   }
 
   return {
-    agentId, agent, ...data, ...draft, loading, error, savingSections, savedSections,
+    agentId, agent, ...data, ...draft, loading, error, dirty, savingSections, savedSections,
     retryLoad: () => { epochRef.current += 1; setLoadVersion((version) => version + 1); },
     saveSection: (section: AdminSectionKey, payload: Record<string, unknown>) => performSave(section, payload),
     saveChildrenSection: () => performSave('children', { child_ids: draft.selectedChildIds }, Object.fromEntries(

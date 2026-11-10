@@ -24,6 +24,7 @@ beforeEach(() => {
 afterEach(async () => {
   await act(async () => root.unmount());
   host.remove();
+  vi.restoreAllMocks();
   document.querySelectorAll('.ant-modal-root, .ant-message').forEach((n) => n.remove());
 });
 
@@ -72,4 +73,22 @@ describe('技能附件移除', () => {
     })));
     expect(document.querySelector('.anticon-delete')).toBeNull();
   });
+});
+
+it('keeps a skill draft when closing is cancelled', async () => {
+  const onClose = vi.fn();
+  const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+  await act(async () => root.render(createElement(SkillEditorDrawer, { open: true, mode: 'edit', skill, onClose, onSaved: () => {} })));
+  const input = document.querySelector('textarea[aria-label="技能内容"]') as HTMLTextAreaElement;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(input, '重要的未保存修改');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await act(async () => (document.querySelector('.ant-modal-close') as HTMLButtonElement).click());
+  expect(confirm).toHaveBeenCalledTimes(1);
+  expect(onClose).not.toHaveBeenCalled();
+  expect(input.value).toBe('重要的未保存修改');
+  confirm.mockReturnValue(true);
+  await act(async () => (document.querySelector('.ant-modal-close') as HTMLButtonElement).click());
+  expect(onClose).toHaveBeenCalledTimes(1);
 });

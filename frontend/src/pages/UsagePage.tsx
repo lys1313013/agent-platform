@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Bar, Column, Line, Pie } from '@ant-design/plots';
 import {
+  Alert,
+  Button,
   Card,
   Col,
   DatePicker,
@@ -56,12 +58,16 @@ export default function UsagePage() {
   const role = useAuthStore((s) => s.role);
   const isDark = useThemeStore((s) => s.resolvedTheme()) === 'dark';
   const chartTheme = isDark ? 'dark' : undefined;
-  const isAdmin = role === 'admin' || role === 'superadmin';
+  const isSuperAdmin = role === 'superadmin';
 
   const [scope, setScope] = useState<AnalyticsScope>('mine');
   const [preset, setPreset] = useState<Preset>('today');
   const [customRange, setCustomRange] = useState<[Dayjs, Dayjs] | null>(null);
 
+  const [error, setError] = useState('');
+  const [detailError, setDetailError] = useState('');
+  const [retry, setRetry] = useState(0);
+  const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
   const [loading, setLoading] = useState(true);
   const [summary, setSummary] = useState<AnalyticsSummary | null>(null);
   const [trend, setTrend] = useState<AnalyticsTrendPoint[]>([]);
@@ -81,45 +87,39 @@ export default function UsagePage() {
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    const guard = <T,>(p: Promise<T>, set: (d: T) => void): Promise<void> =>
-      p.then((d) => {
-        if (!cancelled) set(d);
-      });
-    const loads: Promise<void>[] = [
-      guard(analyticsApi.summary(query), setSummary),
-      guard(analyticsApi.trend(query), setTrend),
-      guard(analyticsApi.distribution({ ...query, by: 'model' }), setModelDist),
-      guard(analyticsApi.distribution({ ...query, by: 'agent' }), setAgentDist),
-    ];
-    if (scope === 'global') {
-      loads.push(guard(analyticsApi.distribution({ ...query, by: 'user' }), setUserDist));
-    } else {
-      setUserDist([]);
-    }
-    Promise.all(loads)
-      .catch(() => {})
-      .finally(() => !cancelled && setLoading(false));
-    return () => {
-      cancelled = true;
-    };
-  }, [query, scope]);
+    setError('');
+    setSummary(null);
+    setTrend([]);
+    setModelDist([]);
+    setAgentDist([]);
+    setUserDist([]);
+    setUpdatedAt(null);
+    Promise.all([
+      analyticsApi.summary(query), analyticsApi.trend(query),
+      analyticsApi.distribution({ ...query, by: 'model' }),
+      analyticsApi.distribution({ ...query, by: 'agent' }),
+      scope === 'global' ? analyticsApi.distribution({ ...query, by: 'user' }) : Promise.resolve([]),
+    ]).then(([summaryData, trendData, models, agents, users]) => {
+      if (cancelled) return;
+      setSummary(summaryData); setTrend(trendData); setModelDist(models);
+      setAgentDist(agents); setUserDist(users); setUpdatedAt(new Date());
+    }).catch(() => { if (!cancelled) setError('用量数据加载失败，请重试。'); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [query, scope, retry]);
 
-  const loadDetail = useCallback(
-    (page: number) => {
-      setDetailLoading(true);
-      analyticsApi
-        .detail({ ...query, page, page_size: 10 })
-        .then(setDetail)
-        .catch(() => {})
-        .finally(() => setDetailLoading(false));
-    },
-    [query],
-  );
-
+  useEffect(() => { setDetailPage(1); }, [query]);
   useEffect(() => {
-    setDetailPage(1);
-    loadDetail(1);
-  }, [loadDetail]);
+    let cancelled = false;
+    setDetailLoading(true);
+    setDetailError('');
+    setDetail({ items: [], total: 0 });
+    analyticsApi.detail({ ...query, page: detailPage, page_size: 10 })
+      .then(value => { if (!cancelled) setDetail(value); })
+      .catch(() => { if (!cancelled) setDetailError('用量明细加载失败，请重试。'); })
+      .finally(() => { if (!cancelled) setDetailLoading(false); });
+    return () => { cancelled = true; };
+  }, [query, detailPage, retry]);
 
   const tokenLineData = useMemo(
     () =>
@@ -150,11 +150,13 @@ export default function UsagePage() {
 
   return (
     <div className="h-full overflow-y-auto">
-      <div style={{ padding: 24, maxWidth: 1200, margin: '0 auto' }}>
+      <div className="page-content max-w-[1200px] mx-auto">
+      {error && <Alert className="mb-4" type="error" showIcon title={error} action={<Button onClick={() => setRetry(value => value + 1)}>重试</Button>} />}
+      {updatedAt && <p className="mb-2 text-xs text-muted-foreground">更新于 {updatedAt.toLocaleTimeString()}</p>}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12, marginBottom: 16 }}>
         <Title level={4} style={{ margin: 0 }}>用量统计</Title>
         <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
-          {isAdmin && (
+          {isSuperAdmin && (
             <Segmented
               value={scope}
               onChange={(v) => setScope(v as AnalyticsScope)}
@@ -248,7 +250,9 @@ export default function UsagePage() {
           </Row>
 
           <Card title="用量明细" size="small" style={{ marginTop: 16 }}>
+            {detailError && <Alert className="mb-3" type="error" showIcon title={detailError} action={<Button onClick={() => setRetry(value => value + 1)}>重试</Button>} />}
             <Table
+              scroll={{ x: 720 }}
               rowKey={(r) => `${r.date}-${r.model}`}
               loading={detailLoading}
               columns={detailColumns}
@@ -261,7 +265,6 @@ export default function UsagePage() {
                 showSizeChanger: false,
                 onChange: (p) => {
                   setDetailPage(p);
-                  loadDetail(p);
                 },
               }}
             />

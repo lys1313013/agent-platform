@@ -72,6 +72,17 @@ describe('background chat subscriptions', () => {
     expect(result.streaming.finalText).toBe('');
   });
 
+  it('stops and ignores subsequent events after access is revoked', async () => {
+    const old = consume;
+    await act(async () => consume({ type: 'access_revoked' }));
+    expect(controller.signal.aborted).toBe(true);
+    expect(result.streaming.isStreaming).toBe(false);
+    expect(result.run).toBeNull();
+    expect(result.error).toContain('权限已失效');
+    await act(async () => old({ type: 'text_delta', content: 'private' }));
+    expect(result.streaming.finalText).toBe('');
+  });
+
   it('explicit stop waits for the server and loads persisted history', async () => {
     vi.mocked(chatApi.stopRun).mockResolvedValue({ ...info, status: 'stopped', can_resume: true });
     await act(async () => consume({ type: 'run', ...info }));

@@ -53,15 +53,9 @@ export const tokenStorage = {
 };
 
 /**
- * Attach the current access token to a chat-attachment image URL so an
- * `<img>` tag (which cannot set an Authorization header) can load it. The
- * backend `/api/public/images/{key}` endpoint validates the token and the
- * key's ownership. Non-public URLs are returned unchanged.
+ * Attachment URLs now carry a short-lived HMAC token scoped to the object key
+ * (minted by the server), so no access token is appended in the browser.
  */
 export function withImageAuth(url: string): string {
-  if (!url.includes('/api/public/images/')) return url;
-  const token = localStorage.getItem(ACCESS_KEY);
-  if (!token) return url;
-  const sep = url.includes('?') ? '&' : '?';
-  return `${url}${sep}token=${encodeURIComponent(token)}`;
+  return url;
 }

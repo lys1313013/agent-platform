@@ -122,7 +122,7 @@ export function HistoryPanel({ agentId, closePanel }: { agentId: string; closePa
           </div>
         </div>
         <button
-          onClick={closePanel}
+          aria-label="关闭对话历史" onClick={closePanel}
           className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground transition hover:bg-muted hover:text-foreground"
         >
           <CloseOutlined className="text-xs" />
@@ -389,7 +389,6 @@ function SessionItem({
 
   return (
     <div
-      onClick={onSelect}
       className={cn(
         'group relative flex cursor-pointer items-start gap-2.5 rounded-lg px-3 py-2.5 text-sm transition-all',
         isActive
@@ -417,13 +416,13 @@ function SessionItem({
             autoFocus
           />
           <button
-            onClick={onFinishRename}
+            aria-label="保存对话名称" onClick={onFinishRename}
             className="flex h-6 w-6 items-center justify-center rounded text-green-500 transition hover:bg-green-500/10"
           >
             <CheckOutlined className="text-xs" />
           </button>
           <button
-            onClick={onCancelRename}
+            aria-label="取消重命名" onClick={onCancelRename}
             className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground transition hover:bg-muted"
           >
             <CloseOutlined className="text-xs" />
@@ -431,7 +430,7 @@ function SessionItem({
         </div>
       ) : (
         <>
-          <div className="flex-1 overflow-hidden">
+          <button type="button" onClick={onSelect} aria-current={isActive ? "page" : undefined} className="min-w-0 flex-1 overflow-hidden text-left rounded">
             <div
               className={cn(
                 'truncate text-sm leading-snug',
@@ -446,12 +445,13 @@ function SessionItem({
                 {SESSION_SOURCE_LABELS[session.source] ?? session.source}
               </span>
             </div>
-          </div>
+          </button>
 
           <Dropdown menu={{ items: menuItems }} trigger={['click']}>
             <button
+              aria-label="对话操作"
               onClick={(e) => e.stopPropagation()}
-              className="mt-0.5 flex h-6 w-6 flex-shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 transition hover:bg-muted hover:text-foreground group-hover:opacity-100"
+              className="mt-0.5 flex h-6 w-6 flex-shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 transition hover:bg-muted hover:text-foreground group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100"
             >
               <MoreOutlined className="text-xs" />
             </button>

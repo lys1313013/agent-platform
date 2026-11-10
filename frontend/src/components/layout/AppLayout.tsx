@@ -1,3 +1,5 @@
+import { useMediaQuery } from '@/hooks/useMediaQuery';
+import { confirmDiscardChanges, clearUnsavedChanges } from '@/hooks/useUnsavedChanges';
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useAuthStore } from '@/stores/authStore';
@@ -30,7 +32,7 @@ import {
   BgColorsOutlined,
   HistoryOutlined,
 } from '@ant-design/icons';
-import { Dropdown, Avatar, Select, Modal } from 'antd';
+import { Dropdown, Avatar, Select, Modal, Drawer, App } from 'antd';
 import type { MenuProps } from 'antd';
 import { cn } from '@/lib/utils';
 import { settingsApi } from '@/lib/api';
@@ -44,7 +46,10 @@ import { captureScreenshot, snapshotEngine } from '@/lib/uiActions/snapshot';
 
 export default function AppLayout() {
   const { logout, role, username, tenantName } = useAuthStore();
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const isMobile = useMediaQuery('(max-width: 1023px)');
+  const [sidebarOpen, setSidebarOpen] = useState(() => window.matchMedia('(min-width: 1280px)').matches);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const { message } = App.useApp();
   const [skinOpen, setSkinOpen] = useState(false);
   const [tenantOptions, setTenantOptions] = useState<Array<{
     id: string;
@@ -111,6 +116,7 @@ export default function AppLayout() {
   const pathname = location.pathname;
   useEffect(() => {
     snapshotEngine.invalidate();
+    setMobileNavOpen(false);
   }, [pathname]);
 
   interface NavItem {
@@ -180,7 +186,6 @@ export default function AppLayout() {
               },
               { path: '/mcp-servers', icon: <CloudServerOutlined />, label: 'MCP 服务' },
               { path: '/remote-tools', icon: <GlobalOutlined />, label: '远程工具' },
-              { path: '/web-tools', icon: <SearchOutlined />, label: 'Web 工具' },
             ]
           : []),
         { path: '/workspaces', icon: <FolderOpenOutlined />, label: '工作区文件' },
@@ -192,8 +197,11 @@ export default function AppLayout() {
             key: 'system',
             label: '系统管理',
             items: [
-              ...(isAdmin
-                ? [{ path: '/system-config', icon: <SettingOutlined />, label: '系统配置' }]
+              ...(isSuperAdmin
+                ? [
+                    { path: '/system-config', icon: <SettingOutlined />, label: '系统配置' },
+                    { path: '/web-tools', icon: <SearchOutlined />, label: 'Web 工具' },
+                  ]
                 : []),
               ...(isSuperAdmin
                 ? [
@@ -210,6 +218,7 @@ export default function AppLayout() {
       label: '个人',
       items: [
         { path: '/portrait', icon: <IdcardOutlined />, label: '个人画像' },
+        { path: '/local-browsers', icon: <SettingOutlined />, label: '本地浏览器' },
         { path: '/settings', icon: <SettingOutlined />, label: '设置' },
       ],
     },
@@ -300,63 +309,19 @@ export default function AppLayout() {
       icon: <LogoutOutlined />,
       label: '退出登录',
       danger: true,
-      onClick: logout,
+      onClick: () => { if (confirmDiscardChanges()) void logout(); },
     },
   ];
 
-  return (
-    <div className="flex h-screen flex-col overflow-hidden bg-background">
-      {/* Top header — full width */}
-      <header className="flex h-14 flex-shrink-0 items-center justify-between border-b border-border bg-card px-5">
-        <div className="flex items-center gap-2.5">
-          <BrandLogo className="h-6 w-6" />
-          <h1 className="text-sm font-bold tracking-tight text-foreground">智能体平台</h1>
-        </div>
-
-        <div className="flex items-center gap-2">
-          {tenantOptions.length > 1 ? (
-            <Select
-              aria-label="当前租户"
-              size="small"
-              className="min-w-32 max-w-52"
-              value={tenantOptions.find((tenant) => tenant.is_current)?.id}
-              options={tenantOptions
-                .filter((tenant) => tenant.is_active)
-                .map((tenant) => ({ value: tenant.id, label: tenant.name }))}
-              onChange={async (tenantId) => {
-                await settingsApi.switchTenant(tenantId);
-                window.location.reload();
-              }}
-            />
-          ) : tenantName ? (
-            <span
-              title={tenantName}
-              className="flex max-w-52 items-center gap-1.5 rounded-lg px-2 py-1 text-sm text-muted-foreground"
-            >
-              <GlobalOutlined className="shrink-0 text-primary" />
-              <span className="truncate">{tenantName}</span>
-            </span>
-          ) : null}
-          <Dropdown menu={{ items: userMenuItems }} trigger={['click']} placement="bottomRight">
-            <button className="flex items-center gap-2 rounded-lg px-2 py-1.5 transition hover:bg-muted">
-              <Avatar size={28} icon={<UserOutlined />} className="bg-primary/20 text-primary" />
-              <span className="text-sm text-foreground">{username || '用户'}</span>
-            </button>
-          </Dropdown>
-        </div>
-      </header>
-
-      {/* Below header: sidebar + content */}
-      <div className="flex flex-1 overflow-hidden">
-        {/* Sidebar */}
-        {sidebarOpen ? (
-          <aside className="flex w-56 flex-shrink-0 flex-col border-r border-border bg-card transition-all duration-200">
+  const sidebar = ((sidebarOpen || isMobile) ? (
+          <aside className="flex h-full w-full lg:w-56 flex-shrink-0 flex-col border-r border-border bg-card">
             <nav className="flex-1 overflow-y-auto py-2 px-2">
               {navGroups.map((group) => {
                 const isCollapsed = !!collapsedGroups[group.key];
                 return (
                   <div key={group.key} className="mb-1">
                     <button
+                      aria-expanded={!isCollapsed}
                       onClick={() => toggleGroup(group.key)}
                       className="flex w-full items-center justify-between rounded-lg px-3 pt-2.5 pb-1.5 text-xs font-semibold text-muted-foreground transition hover:text-foreground"
                     >
@@ -369,8 +334,9 @@ export default function AppLayout() {
                       />
                     </button>
                     <div
+                      style={{ display: isCollapsed ? 'none' : undefined }}
                       className={cn(
-                        'grid transition-[grid-template-rows] duration-200 ease-in-out',
+                        'grid',
                         isCollapsed ? 'grid-rows-[0fr]' : 'grid-rows-[1fr]',
                       )}
                     >
@@ -382,9 +348,10 @@ export default function AppLayout() {
                             return (
                               <div key={item.label} className="mb-0.5">
                                 <button
+                                  aria-expanded={expanded}
                                   onClick={() => toggleSubmenu(item.label)}
                                   className="group relative flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm transition-all hover:bg-muted/50 hover:text-foreground"
-                                  title={item.label}
+                                  aria-label={item.label} title={item.label}
                                 >
                                   {active && (
                                     <div className="absolute left-0 top-1/2 -translate-y-1/2 h-5 w-[3px] rounded-r-full bg-primary" />
@@ -406,8 +373,9 @@ export default function AppLayout() {
                                   />
                                 </button>
                                 <div
+                                  style={{ display: expanded ? undefined : 'none' }}
                                   className={cn(
-                                    'grid transition-[grid-template-rows] duration-200 ease-in-out',
+                                    'grid',
                                     expanded ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]',
                                   )}
                                 >
@@ -483,9 +451,9 @@ export default function AppLayout() {
             </nav>
             <div className="border-t border-border p-2 flex justify-center">
               <button
-                onClick={() => setSidebarOpen(false)}
+                onClick={() => isMobile ? setMobileNavOpen(false) : setSidebarOpen(false)}
                 className="flex h-8 w-8 items-center justify-center rounded-lg text-muted-foreground transition hover:bg-muted hover:text-foreground"
-                title="折叠侧边栏"
+                aria-label="折叠侧边栏" title="折叠侧边栏"
               >
                 <MenuFoldOutlined />
               </button>
@@ -513,7 +481,7 @@ export default function AppLayout() {
                             ? 'bg-muted text-primary'
                             : 'text-muted-foreground hover:bg-muted/50 hover:text-foreground',
                         )}
-                        title={item.label}
+                        aria-label={item.label} title={item.label}
                       >
                         {item.icon}
                       </NavLink>
@@ -525,15 +493,68 @@ export default function AppLayout() {
             <button
               onClick={() => setSidebarOpen(true)}
               className="flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground transition hover:bg-muted hover:text-foreground"
-              title="展开侧边栏"
+              aria-label="展开侧边栏" title="展开侧边栏"
             >
               <MenuUnfoldOutlined />
             </button>
           </aside>
-        )}
+        ));
+
+  return (
+    <div className="flex h-[100dvh] flex-col overflow-hidden bg-background">
+      <a className="skip-link" href="#main-content">跳到主要内容</a>
+      {/* Top header — full width */}
+      <header className="flex h-14 flex-shrink-0 items-center justify-between border-b border-border bg-card px-3 sm:px-5">
+        <div className="flex min-w-0 items-center gap-2.5">
+          {isMobile && <button aria-label="打开导航" aria-expanded={mobileNavOpen} onClick={() => setMobileNavOpen(true)} className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg hover:bg-muted"><MenuUnfoldOutlined /></button>}
+          <BrandLogo className="h-6 w-6" />
+          <h1 className="truncate text-sm font-bold tracking-tight text-foreground">智能体平台</h1>
+        </div>
+
+        <div className="flex items-center gap-2">
+          {tenantOptions.length > 1 ? (
+            <Select
+              aria-label="当前租户"
+              size="small"
+              className="w-28 sm:w-40"
+              value={tenantOptions.find((tenant) => tenant.is_current)?.id}
+              options={tenantOptions
+                .filter((tenant) => tenant.is_active)
+                .map((tenant) => ({ value: tenant.id, label: tenant.name }))}
+              onChange={async (tenantId) => {
+                if (!confirmDiscardChanges()) return;
+                try { await settingsApi.switchTenant(tenantId); clearUnsavedChanges(); window.location.reload(); }
+                catch (error) { message.error(error instanceof Error ? error.message : '切换租户失败，请重试'); }
+              }}
+            />
+          ) : tenantName ? (
+            <span
+              title={tenantName}
+              className="hidden sm:flex max-w-52 items-center gap-1.5 rounded-lg px-2 py-1 text-sm text-muted-foreground"
+            >
+              <GlobalOutlined className="shrink-0 text-primary" />
+              <span className="truncate">{tenantName}</span>
+            </span>
+          ) : null}
+          <Dropdown menu={{ items: userMenuItems }} trigger={['click']} placement="bottomRight">
+            <button aria-label="账户菜单" className="flex items-center gap-2 rounded-lg px-2 py-1.5 transition hover:bg-muted">
+              <Avatar size={28} icon={<UserOutlined />} className="bg-primary/20 text-primary" />
+              <span className="hidden sm:inline text-sm text-foreground">{username || '用户'}</span>
+            </button>
+          </Dropdown>
+        </div>
+      </header>
+
+      {/* Below header: sidebar + content */}
+      <div className="flex min-h-0 flex-1 overflow-hidden">
+        {/* Sidebar */}
+        {!isMobile && sidebar}
+        <Drawer title="导航" placement="left" size={280} open={isMobile && mobileNavOpen} onClose={() => setMobileNavOpen(false)} styles={{ body: { padding: 0 } }}>
+          {sidebar}
+        </Drawer>
 
         {/* Main content */}
-        <main className="flex flex-1 flex-col overflow-hidden bg-background">
+        <main id="main-content" tabIndex={-1} className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-background">
           <Outlet />
         </main>
       </div>

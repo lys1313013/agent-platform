@@ -1,5 +1,6 @@
+import { confirmDiscardChanges, clearUnsavedChanges } from '@/hooks/useUnsavedChanges';
 import { useEffect, useState, type ReactNode } from 'react';
-import { Outlet, useLocation, useNavigate } from 'react-router-dom';
+import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useAuthStore } from '@/stores/authStore';
 import {
   LogoutOutlined,
@@ -8,7 +9,7 @@ import {
   GlobalOutlined,
   BgColorsOutlined,
 } from '@ant-design/icons';
-import { Dropdown, Avatar, Modal, Select } from 'antd';
+import { Dropdown, Avatar, Modal, Select, App } from 'antd';
 import type { MenuProps } from 'antd';
 import { settingsApi } from '@/lib/api';
 import { SkinPickerContent } from '@/components/SkinPicker';
@@ -22,6 +23,7 @@ export interface PortalOutletContext { navigation: ReactNode }
  */
 export default function PortalLayout() {
   const { logout, username, tenantName } = useAuthStore();
+  const { message } = App.useApp();
   const navigate = useNavigate();
   const { pathname } = useLocation();
   const isAgentChat = /^\/portal\/agents\/[^/]+\/chat(?:\/|$)/.test(pathname);
@@ -57,14 +59,14 @@ export default function PortalLayout() {
       icon: <LogoutOutlined />,
       label: '退出登录',
       danger: true,
-      onClick: logout,
+      onClick: () => { if (confirmDiscardChanges()) void logout(); },
     },
   ];
 
   const navigation = (
     <div className="flex items-center gap-2">
-      <button onClick={() => navigate('/portal/rooms')} className="rounded-lg px-2 py-1.5 text-sm text-primary hover:bg-muted">聊天室</button>
-      <button onClick={() => navigate('/portal/skills')} className="rounded-lg px-2 py-1.5 text-sm text-primary hover:bg-muted">我的技能</button>
+      <Link to="/portal/rooms" className="rounded-lg px-2 py-1.5 text-sm text-primary hover:bg-muted">聊天室</Link>
+      <Link to="/portal/skills" className="rounded-lg px-2 py-1.5 text-sm text-primary hover:bg-muted">我的技能</Link>
       {tenantOptions.length > 1 ? (
         <Select
           aria-label="当前租户"
@@ -75,8 +77,9 @@ export default function PortalLayout() {
             .filter((tenant) => tenant.is_active)
             .map((tenant) => ({ value: tenant.id, label: tenant.name }))}
           onChange={async (tenantId) => {
-            await settingsApi.switchTenant(tenantId);
-            window.location.reload();
+            if (!confirmDiscardChanges()) return;
+            try { await settingsApi.switchTenant(tenantId); clearUnsavedChanges(); window.location.reload(); }
+            catch (error) { message.error(error instanceof Error ? error.message : '切换租户失败，请重试'); }
           }}
         />
       ) : tenantName ? (
@@ -98,8 +101,8 @@ export default function PortalLayout() {
   );
 
   return (
-    <div className={`flex h-screen flex-col overflow-hidden bg-background ${isAgentChat ? 'portal-chat-layout' : ''}`}>
-      <header className="relative z-10 flex h-14 flex-shrink-0 items-center justify-between border-b border-border/40 bg-card/90 px-4 shadow-[0_1px_12px_rgba(15,23,42,0.04)] backdrop-blur-sm sm:px-6">
+    <div className={`flex h-[100dvh] flex-col overflow-hidden bg-background ${isAgentChat ? 'portal-chat-layout' : ''}`}>
+      <header className="relative z-10 flex min-h-14 flex-wrap gap-2 py-2 flex-shrink-0 items-center justify-between border-b border-border/40 bg-card/90 px-4 shadow-[0_1px_12px_rgba(15,23,42,0.04)] backdrop-blur-sm sm:px-6">
         <button
           aria-label="智能体平台"
           onClick={() => navigate('/portal')}

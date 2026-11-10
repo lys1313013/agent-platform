@@ -1,3 +1,4 @@
+import type { BrowserAuthorization } from '@/lib/api/localBrowser';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useNavigate, useOutletContext } from 'react-router-dom';
 import { useChatStore } from '@/stores/chatStore';
@@ -86,8 +87,8 @@ export default function PortalChatPage() {
   }, [agentId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleSend = useCallback(
-    async (content: string, attachments: ChatAttachment[] = []) => {
-      let sessionId = activeSessionId;
+    async (content: string, attachments: ChatAttachment[] = [], _files?: unknown, browser?: BrowserAuthorization) => {
+      let sessionId = browser?.sessionId || activeSessionId;
 
       if (!sessionId) {
         const title = content.slice(0, 100) || (attachments.length > 0 ? '文件消息' : '新对话');
@@ -119,7 +120,7 @@ export default function PortalChatPage() {
 
       const controller = chatApi.stream(
         {
-          session_id: sessionId,
+          session_id: sessionId, browser_grant_id: browser?.grantId,
           agent_id: agentId,
           message: content,
           attachments: attachments.length > 0 ? attachments : null,
@@ -249,6 +250,14 @@ export default function PortalChatPage() {
             )}
           </>}
           input={{
+            draftScope: `portal-agent:${agentId}`,
+            browserAvailable: agent?.local_browser_enabled,
+            onEnsureSession: async () => {
+              if (activeSessionId) return activeSessionId;
+              const id = await createSession("新对话", agentId);
+              if (id) navigate(`/portal/agents/${agentId}/chat/${id}`, { replace: true });
+              return id;
+            },
             portal: true, onSend: handleSend, onStop: interrupt, isStreaming: streaming.isStreaming, sessionId: activeSessionId, starterPrompts: agent?.starter_prompts ?? undefined, onStarterPromptClick: handleStarterPrompt,
             queue, onQueue: enqueue, onQueueSendNow: sendQueuedNow, onQueueRemove: removeQueued,
           }}

@@ -72,12 +72,35 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
   const runRef = useRef<ChatRunInfo | null>(null);
   const generationRef = useRef(0);
   const sequenceRef = useRef(0);
+  const revokedSessionRef = useRef<string | null>(null);
   const consumeRef = useRef<(event: ChatStreamEvent) => void>(() => {});
   const abortRef = useRef<AbortController | null>(null);
   /** 当前这一轮的会话 id（done/session_title 等事件回写消息的归属） */
   const turnSessionIdRef = useRef<string | null>(null);
   /** 本轮 done 后是否应 flush 消息队列（回放流为 false） */
   const flushOnDoneRef = useRef(true);
+
+  // Coalesce token deltas into one React update per animation frame.
+  const pendingTextRef = useRef('');
+  const textFrameRef = useRef<number | null>(null);
+  const flushPendingText = useCallback(() => {
+    if (textFrameRef.current !== null) {
+      cancelAnimationFrame(textFrameRef.current);
+      textFrameRef.current = null;
+    }
+    const pending = pendingTextRef.current;
+    if (!pending) return;
+    pendingTextRef.current = '';
+    setStreaming((prev) => ({
+      ...prev,
+      isStreaming: true,
+      finalText: prev.finalText + pending,
+    }));
+  }, []);
+
+  useEffect(() => () => {
+    if (textFrameRef.current !== null) cancelAnimationFrame(textFrameRef.current);
+  }, []);
   /** 当前轮是否为斜杠命令（command_result 已落 system 消息，done 不再补 assistant 消息） */
   const gotCommandResultRef = useRef(false);
 
@@ -312,15 +335,26 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
         break;
       }
 
-      case 'text_delta':
-        setStreaming((prev) => ({
-          ...prev,
-          isStreaming: true,
-          finalText: prev.finalText + ((event.content as string) || ''),
-        }));
+      case 'text_delta': {
+        pendingTextRef.current += (event.content as string) || '';
+        if (textFrameRef.current === null) {
+          textFrameRef.current = requestAnimationFrame(() => {
+            textFrameRef.current = null;
+            const pending = pendingTextRef.current;
+            if (!pending) return;
+            pendingTextRef.current = '';
+            setStreaming((prev) => ({
+              ...prev,
+              isStreaming: true,
+              finalText: prev.finalText + pending,
+            }));
+          });
+        }
         break;
+      }
 
       case 'text':
+        flushPendingText();
         setStreaming((prev) => ({
           ...prev,
           isStreaming: true,
@@ -329,6 +363,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
         break;
 
       case 'done': {
+        flushPendingText();
         if (runRef.current) {
           runRef.current = { ...runRef.current, status: 'completed' };
           setRun(runRef.current);
@@ -359,7 +394,22 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
         break;
       }
 
+      case 'access_revoked': {
+        revokedSessionRef.current = turnSessionIdRef.current;
+        generationRef.current += 1;
+        abortRef.current?.abort();
+        abortRef.current = null;
+        runRef.current = null;
+        setRun(null);
+        setStreaming(IDLE_STREAMING);
+        const reason = '会话访问权限已失效，请检查租户和成员权限';
+        setError(reason);
+        onErrorRef.current?.(reason);
+        break;
+      }
+
       case 'error': {
+        flushPendingText();
         setStreaming(IDLE_STREAMING);
         // 防御：error.message 可能是字符串数组或非字符串
         const raw = event.message;
@@ -569,7 +619,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
     let disposed = false;
     let busy = false;
     const recover = async () => {
-      if (disposed || busy || abortRef.current) return;
+      if (disposed || busy || abortRef.current || revokedSessionRef.current === activeSessionId) return;
       busy = true;
       const generation = generationRef.current;
       try {

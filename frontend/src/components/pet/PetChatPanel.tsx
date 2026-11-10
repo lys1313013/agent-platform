@@ -1,3 +1,4 @@
+import type { BrowserAuthorization } from '@/lib/api/localBrowser';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Alert, Spin, App } from 'antd';
@@ -151,7 +152,7 @@ export default function PetChatPanel({ open, pet, sessionId, agentId, onClose, o
   }, [sessionId, clearQueue]);
 
   const handleSend = useCallback(
-    async (content: string, attachments: ChatAttachment[] = [], fileAttachments?: FileAttachmentRef[]) => {
+    async (content: string, attachments: ChatAttachment[] = [], fileAttachments?: FileAttachmentRef[], browser?: BrowserAuthorization) => {
       if (!sessionId) return;
 
       addMessage(sessionId, {
@@ -169,6 +170,7 @@ export default function PetChatPanel({ open, pet, sessionId, agentId, onClose, o
       const controller = chatApi.stream(
         {
           session_id: sessionId,
+          browser_grant_id: browser?.grantId,
           agent_id: agentId ?? undefined,
           message: content,
           attachments: attachments.length > 0 ? attachments : null,
@@ -379,6 +381,7 @@ export default function PetChatPanel({ open, pet, sessionId, agentId, onClose, o
         )}
 
         <ChatInput
+          browserAvailable={!!agentId && !!sessionId}
           simple
           onSend={handleSend}
           onStop={handleStop}

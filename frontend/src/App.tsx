@@ -19,6 +19,7 @@ const SkillsPage = lazy(() => import('@/pages/SkillsPage'));
 const SkillDetailPage = lazy(() => import('@/pages/SkillDetailPage'));
 const PetsPage = lazy(() => import('@/pages/PetsPage'));
 const WorkspacesPage = lazy(() => import('@/pages/WorkspacesPage'));
+const LocalBrowsersPage = lazy(() => import('@/pages/LocalBrowsersPage'));
 const SettingsPage = lazy(() => import('@/pages/SettingsPage'));
 const PortraitPage = lazy(() => import('@/pages/PortraitPage'));
 const ModelManagementPage = lazy(() => import('@/pages/ModelManagementPage'));
@@ -118,6 +119,7 @@ export default function App() {
         <Route path="/pets" element={<PetsPage />} />
         <Route path="/workspaces" element={<WorkspacesPage />} />
         <Route path="/portrait" element={<PortraitPage />} />
+        <Route path="/local-browsers" element={<LocalBrowsersPage />} />
         <Route path="/settings" element={<SettingsPage />} />
         <Route path="/models" element={<ModelManagementPage />} />
         <Route path="/system-config" element={<SystemConfigPage />} />
