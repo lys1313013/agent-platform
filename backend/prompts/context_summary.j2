@@ -7,6 +7,20 @@ You are a conversation summarizer. Your task is to compress the following conver
 - The summary should be written in the same language as the conversation
 - Maximum length: {{ max_chars }} characters
 
+{% if existing_summary %}
+## Existing Summary
+{{ existing_summary }}
+
+## New Messages
+{% for msg in messages %}
+**{{ msg.role }}**: {{ msg.content }}
+{% endfor %}
+
+## Output
+Rewrite the summary by folding the new messages into the existing summary.
+Keep prior facts that are still relevant; update anything the new messages supersede.
+Provide ONLY the summary text, no preamble or explanation. Start directly with the key context.
+{% else %}
 ## Conversation History
 {% for msg in messages %}
 **{{ msg.role }}**: {{ msg.content }}
@@ -14,3 +28,4 @@ You are a conversation summarizer. Your task is to compress the following conver
 
 ## Output
 Provide ONLY the summary text, no preamble or explanation. Start directly with the key context.
+{% endif %}

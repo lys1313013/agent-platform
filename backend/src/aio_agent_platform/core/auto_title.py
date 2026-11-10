@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from aio_agent_platform.db.models import LLMModel, SystemConfig
-from aio_agent_platform.llm import LLMMessage, create_provider
+from aio_agent_platform.llm import LLMMessage, LLMProvider, create_provider
 
 logger = structlog.get_logger()
 
@@ -92,6 +92,52 @@ def _fallback_title(message: str, max_len: int = 20) -> str:
     return text[:max_len] or "新对话"
 
 
+async def resolve_utility_model(db: AsyncSession, tenant_id: UUID) -> LLMModel | None:
+    """Cheap model for background work (titles, summaries).
+
+    Prefers the configured auto-title model, then the tenant default.
+    """
+    config = await load_auto_title_config(db)
+    if config.model_id:
+        model = await db.scalar(
+            select(LLMModel)
+            .options(selectinload(LLMModel.provider))
+            .where(
+                LLMModel.id == config.model_id,
+                LLMModel.is_active,
+                LLMModel.tenant_id == tenant_id,
+            )
+        )
+        if model:
+            return model
+    return await db.scalar(
+        select(LLMModel)
+        .options(selectinload(LLMModel.provider))
+        .where(
+            LLMModel.is_default,
+            LLMModel.is_active,
+            LLMModel.tenant_id == tenant_id,
+        )
+        .limit(1)
+    )
+
+
+def provider_for_model(model: LLMModel) -> LLMProvider | None:
+    if not model.provider:
+        return None
+    return create_provider(
+        provider=model.provider.provider_type,
+        model=model.model_name,
+        base_url=model.provider.base_url,
+        api_key=model.provider.api_key_encrypted,
+    )
+
+
+async def resolve_utility_provider(db: AsyncSession, tenant_id: UUID) -> LLMProvider | None:
+    model = await resolve_utility_model(db, tenant_id)
+    return provider_for_model(model) if model else None
+
+
 async def generate_session_title(message: str, tenant_id: UUID) -> str:
     """Generate a session title from the first user message.
 
@@ -104,38 +150,17 @@ async def generate_session_title(message: str, tenant_id: UUID) -> str:
         factory = get_session_factory()
         async with factory() as db:
             config = await load_auto_title_config(db)
-
-            model = None
-            if config.model_id:
-                result = await db.execute(
-                    select(LLMModel)
-                    .options(selectinload(LLMModel.provider))
-                    .where(LLMModel.id == config.model_id, LLMModel.is_active, LLMModel.tenant_id == tenant_id)
-                )
-                model = result.scalar_one_or_none()
-            if not model:
-                result = await db.execute(
-                    select(LLMModel)
-                    .options(selectinload(LLMModel.provider))
-                    .where(LLMModel.is_default, LLMModel.is_active, LLMModel.tenant_id == tenant_id)
-                    .limit(1)
-                )
-                model = result.scalar_one_or_none()
+            model = await resolve_utility_model(db, tenant_id)
     except Exception:
         logger.exception("auto_title skipped: failed to load model config")
         return _fallback_title(message)
 
-    if not model or not model.provider:
+    provider = provider_for_model(model) if model else None
+    if provider is None:
         logger.warning("auto_title skipped: no usable LLM model")
         return _fallback_title(message)
 
     try:
-        provider = create_provider(
-            provider=model.provider.provider_type,
-            model=model.model_name,
-            base_url=model.provider.base_url,
-            api_key=model.provider.api_key_encrypted,
-        )
         prompt = config.prompt.replace("{message}", message[:4000])
         # temperature 不显式传入：部分模型（如 k3）只允许默认值，硬编码会被网关 400 拒绝
         response = await provider.complete(

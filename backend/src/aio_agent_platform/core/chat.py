@@ -18,7 +18,7 @@ from uuid import UUID
 
 import structlog
 from fastapi import HTTPException
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy import update as sql_update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload, with_loader_criteria
@@ -60,6 +60,10 @@ from aio_agent_platform.tools.mcp.selection import is_mcp_tool_allowed
 from aio_agent_platform.tools.registry import Tool
 
 logger = structlog.get_logger()
+
+# Background memory extraction is a full model call; do not run it on every
+# turn of an active conversation. The night cron still refines daily memory.
+_MEMORY_EXTRACTION_INTERVAL_SECONDS = 180
 
 # Background tasks set — keeps references alive until completion.
 background_tasks: set[asyncio.Task] = set()
@@ -144,17 +148,22 @@ async def load_execution_agent(db: AsyncSession, agent_id: UUID | None, user: Us
     return await load_agent(db, agent_id, user=user, tenant_id=tenant_id)
 
 
-async def load_chat_agent(db: AsyncSession, agent_id: UUID | None, session_id: UUID | None, user: User):
+async def load_chat_agent(db: AsyncSession, agent_id: UUID | None, session_id: UUID | None, user: User, *,
+                          pinned_tenant_id: UUID | None = None):
     if session_id is not None:
         session = await db.scalar(select(Session).where(
             Session.id == session_id, Session.user_id == user.id, Session.source != "room",
-        ))
+        ).with_for_update())
         if session is None:
             raise HTTPException(status_code=404, detail="Session not found")
-        agent_id = agent_id or session.agent_id
+        from aio_agent_platform.core.session_access import authorize_session
+        await authorize_session(db, session, user.id, tenant_id=pinned_tenant_id)
+        if agent_id is not None and agent_id != session.agent_id:
+            raise HTTPException(409, "智能体与会话绑定不一致，请新建会话或显式切换智能体")
+        agent_id = session.agent_id
     if agent_id is None:
         try:
-            await require_execution_user(db, user.id, user.tenant_id)
+            await require_execution_user(db, user.id, pinned_tenant_id or user.tenant_id)
         except ExecutionAccessError as error:
             raise HTTPException(status_code=403, detail=str(error)) from error
     agent = await load_execution_agent(db, agent_id, user)
@@ -171,7 +180,7 @@ async def load_chat_agent(db: AsyncSession, agent_id: UUID | None, session_id: U
 async def refresh_mcp_tools_for_agent(tool_executor: ToolExecutor, agent: Agent | None) -> None:
     manager = tool_executor.mcp_manager
     if manager:
-        server_ids = None
+        server_ids = set()
         if agent and agent.mcp_server_ids is not None:
             server_ids = {str(sid) for sid in agent.mcp_server_ids}
         await manager.ensure_tools_fresh(server_ids)
@@ -182,6 +191,7 @@ def filter_tools_by_agent(
     agent: Agent | None,
     delegation_depth: int = 0,
     extra_blacklist: set[str] | None = None,
+    allow_local_browser: bool = False,
 ) -> tuple[list, list]:
     """Filter tools based on agent's enabled_tools, delegation depth, and blacklist.
 
@@ -191,6 +201,11 @@ def filter_tools_by_agent(
     """
     all_tools = tool_executor.registry.list_tools()
     blacklist = set(extra_blacklist or ())
+    from aio_agent_platform.browser.tools import NAMES
+    if not allow_local_browser or delegation_depth > 0:
+        blacklist.update(NAMES)
+    elif not agent or not agent.enabled_tools:
+        blacklist.update(NAMES)
 
     if agent and agent.enabled_tools:
         enabled_set = set(agent.enabled_tools)
@@ -260,7 +275,9 @@ def filter_tools_by_agent(
             dynamic_spawn=True,
         )
 
-    allowed_server_ids = None
+    # No explicit agent binding grants no MCP capability. A process-wide
+    # manager is a transport pool, never an authorization scope.
+    allowed_server_ids = set()
     if agent and agent.mcp_server_ids is not None:
         try:
             allowed_server_ids = {str(sid) for sid in agent.mcp_server_ids}
@@ -346,6 +363,7 @@ async def build_system_prompt_with_memories(
     agent: Agent | None = None,
     workspace_files: list | None = None,
     tenant_id: UUID | None = None,
+    prompt_config: dict | None = None,
 ) -> str:
     """Build system prompt with L1/L2/L3 memories and relevant skills injected."""
     memory_top_k = await get_memory_top_k(db, user_id)
@@ -376,7 +394,7 @@ async def build_system_prompt_with_memories(
         relevant_memories=memory_data["l2_memories"] + memory_data["l3_memories"],
         daily_memories=memory_data["daily_memories"],
         relevant_skills=matched_skills if matched_skills else None,
-        agent_prompt=agent.system_prompt if agent else None,
+        agent_prompt=(prompt_config or {}).get("system_prompt", agent.system_prompt if agent else None),
         child_agents=agent.children if agent and agent.children else None,
         workspace_files=workspace_files,
         user_portrait=user_portrait,
@@ -434,10 +452,12 @@ async def resolve_model(
 
 
 async def build_agent_provider(
-    db: AsyncSession, *, tenant_id: UUID, config: AgentRuntimeConfig,
+    db: AsyncSession, *, tenant_id: UUID, config: AgentRuntimeConfig, resolved_model: LLMModel | None = None,
 ) -> LLMProvider:
     """Resolve and build providers consistently for root and delegated execution."""
-    model_to_use = await resolve_model(db, tenant_id=tenant_id, model_id=config.model_id)
+    model_to_use = resolved_model or await resolve_model(db, tenant_id=tenant_id, model_id=config.model_id)
+    if model_to_use.tenant_id != tenant_id:
+        raise ModelUnavailableError("模型与执行租户不一致")
 
     provider = create_provider(
         provider=model_to_use.provider.provider_type,
@@ -474,6 +494,8 @@ async def build_agent_loop(
     allowed_tools: set[str] | None = None,
     *,
     runtime_config: AgentRuntimeConfig | None = None,
+    user_id: UUID | None = None,
+    resolved_model: LLMModel | None = None,
 ) -> AgentLoop:
     """Build every execution provider through the same tenant-scoped factory.
 
@@ -486,7 +508,7 @@ async def build_agent_loop(
         max_iterations=agent_max_iterations,
         enable_retry=agent_enable_retry if agent_enable_retry is not None else True,
     )
-    provider = await build_agent_provider(db, tenant_id=tenant_id, config=config)
+    provider = await build_agent_provider(db, tenant_id=tenant_id, config=config, resolved_model=resolved_model)
 
     return AgentLoop(
         execution_tenant_id=tenant_id,
@@ -494,13 +516,20 @@ async def build_agent_loop(
         tool_executor=tool_executor,
         system_prompt=system_prompt,
         max_iterations=config.max_iterations if config.max_iterations is not None else settings.agent.max_iterations,
-        trust_level=settings.agent.trust_level,
+        trust_level=await resolve_trust_level(db, user_id),
         delegation=delegation,
         event_queue=event_queue,
         workspace_id=workspace_id,
         workspace_slug=workspace_slug,
         allowed_tools=allowed_tools,
     )
+
+
+async def resolve_trust_level(db: AsyncSession, user_id: UUID | None) -> str:
+    if user_id is None:
+        return settings.agent.trust_level
+    value = await db.scalar(select(UserConfig.trust_level).where(UserConfig.user_id == user_id))
+    return value if value in {"ask_always", "ask_dangerous", "auto_all"} else settings.agent.trust_level
 
 
 # ---------------------------------------------------------------------------
@@ -712,7 +741,8 @@ def fire_memory_extraction(
     agent_id: UUID | None = None,
 ) -> None:
     """Fire-and-forget memory extraction as a background task."""
-    if not enable:
+    from aio_agent_platform.browser.context import is_private_browser_run
+    if not enable or is_private_browser_run():
         return
     if len(history) < 2:
         return
@@ -726,6 +756,12 @@ def fire_memory_extraction(
     messages.append({"role": "assistant", "content": assistant_output})
 
     async def _extract_and_merge_daily() -> None:
+        from aio_agent_platform.core.throttle import allow_once
+
+        if not await allow_once(
+            f"aio:memory_extract:{session_id}", _MEMORY_EXTRACTION_INTERVAL_SECONDS,
+        ):
+            return
         created = await MemoryService.extract_memories_from_conversation(
             user_id=user_id,
             session_id=session_id,
@@ -754,8 +790,15 @@ async def update_context_summary(
     user_message: str,
     assistant_output: str,
     provider: Any,
+    *,
+    user_id: UUID | None = None,
+    tenant_id: UUID | None = None,
 ) -> None:
-    """Update session context_summary if conversation is long enough."""
+    """Update the session summary incrementally, once per few new messages.
+
+    The summary is folded forward from the previous version plus only the
+    messages added since then, and prefers the tenant's cheap utility model.
+    """
     all_messages = [
         *list(history),
         LLMMessage(role="user", content=user_message),
@@ -764,18 +807,53 @@ async def update_context_summary(
     if len(all_messages) < 10:
         return
 
+    from aio_agent_platform.core.throttle import claim_message_batch
+    from aio_agent_platform.db.connection import set_db_user
+
     try:
-        summary = await generate_summary(all_messages[-20:], provider)
-        if summary:
-            factory = get_session_factory()
-            async with factory() as db:
-                await db.execute(
-                    sql_update(Session)
-                    .where(Session.id == session_id)
-                    .values(context_summary=summary)
-                )
-                await db.commit()
-                logger.info(f"Context summary updated for session {session_id}: {len(summary)} chars")
+        factory = get_session_factory()
+        async with factory() as db:
+            if user_id is not None:
+                await set_db_user(db, user_id)
+            total_messages = int(await db.scalar(
+                select(func.count(Message.id)).where(Message.session_id == session_id)
+            ) or 0)
+            existing = await db.scalar(
+                select(Session.context_summary).where(Session.id == session_id)
+            )
+            utility = None
+            if tenant_id is not None:
+                from aio_agent_platform.core.auto_title import resolve_utility_provider
+
+                utility = await resolve_utility_provider(db, tenant_id)
+
+        # The loaded history is capped by the soft limit, so throttle on the
+        # session's absolute message count instead of len(history).
+        previous = await claim_message_batch(
+            f"aio:context_summary_at:{session_id}", total_messages, min_delta=4,
+        )
+        if previous is None:
+            return
+        new_count = max(total_messages - previous, 2)
+        new_messages = all_messages[-min(new_count, len(all_messages)):]
+        if not new_messages:
+            return
+
+        summary = await generate_summary(
+            new_messages[-20:], utility or provider, existing_summary=existing,
+        )
+        if not summary:
+            return
+        async with factory() as db:
+            if user_id is not None:
+                await set_db_user(db, user_id)
+            await db.execute(
+                sql_update(Session)
+                .where(Session.id == session_id)
+                .values(context_summary=summary)
+            )
+            await db.commit()
+            logger.info(f"Context summary updated for session {session_id}: {len(summary)} chars")
     except Exception:
         logger.exception(f"Failed to update context summary for session {session_id}")
 

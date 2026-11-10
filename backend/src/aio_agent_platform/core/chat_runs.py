@@ -1,7 +1,10 @@
 """Durable Web tasks with leased workers and independent, cursor-based subscribers.
 
-Text deltas are committed in batches; tool boundaries commit before the producer
-can execute its next step. An expired worker is never automatically re-executed.
+Adjacent streaming deltas are coalesced into one event row; the producer keeps
+the live snapshot in memory and persists it at tool/terminal boundaries (with a
+short checkpoint), so JSONB writes no longer scale with delta count. Subscribers
+read committed rows and wake on a Redis notification instead of polling and
+locking the run row.
 """
 from __future__ import annotations
 
@@ -19,6 +22,8 @@ from fastapi import HTTPException
 from sqlalchemy import select, text
 
 from aio_agent_platform.core.chat_history import _merge_file_changes
+from aio_agent_platform.core.chat_run_notify import notifier
+from aio_agent_platform.core.session_access import authorize_session
 from aio_agent_platform.core.task_scope import call_key, child_tasks, completed_calls
 from aio_agent_platform.db.connection import current_user_id, get_session_factory
 from aio_agent_platform.db.models import ChatRun, ChatRunEvent, Message, Session
@@ -29,6 +34,15 @@ OWNER = str(uuid4())
 LEASE_SECONDS = 30
 _workers: dict[UUID, asyncio.Task] = {}
 _worker_users: dict[UUID, UUID] = {}
+
+# The producer owns the live snapshot; JSONB is only rewritten at tool/terminal
+# boundaries or every checkpoint interval. A crash loses at most one interval
+# of streamed text, and ChatRunEvent rows remain the authoritative event log.
+_live_snapshots: dict[UUID, dict] = {}
+_snapshot_saved_at: dict[UUID, float] = {}
+_SNAPSHOT_CHECKPOINT_SECONDS = 2.0
+
+_DELTA_TYPES = {"thinking", "text_delta", "delegation_thinking", "delegation_text_delta"}
 
 
 def now() -> datetime:
@@ -41,8 +55,7 @@ async def user_scope(db, user_id: UUID) -> None:
         await db.execute(text("SELECT set_config('app.current_user_id', :uid, true)"), {"uid": str(user_id)})
 
 
-def snapshot_event(snapshot: dict, event: dict) -> dict:
-    state = copy.deepcopy(snapshot)
+def _apply_event(state: dict, event: dict) -> None:
     kind = event.get("type")
     if kind == "thinking":
         chunks = state.setdefault("reasoning", [])
@@ -62,7 +75,8 @@ def snapshot_event(snapshot: dict, event: dict) -> dict:
                 call["result"] = {"status": event.get("status"), "preview": event.get("preview", "")}
     elif kind == "confirmation_required":
         for call in state.get("tool_calls", []):
-            if call["name"] == "AskUserQuestion" and not call.get("confirmation"):
+            if ((call["id"] == event.get("tool_call_id") if event.get("tool_call_id")
+                 else call["name"] == "AskUserQuestion") and not call.get("confirmation")):
                 call["confirmation"] = dict(event)
                 break
     elif kind == "confirmation_resolved":
@@ -108,7 +122,27 @@ def snapshot_event(snapshot: dict, event: dict) -> dict:
             state[key] = incoming
     if kind not in {"ui_action_heartbeat", "delegation_heartbeat"}:
         state["last_type"] = kind
+
+
+def snapshot_event(snapshot: dict, event: dict) -> dict:
+    state = copy.deepcopy(snapshot)
+    _apply_event(state, event)
     return state
+
+
+def _coalesce(events: list[dict]) -> list[dict]:
+    """Merge adjacent streaming deltas so one DB row carries a whole batch."""
+    merged: list[dict] = []
+    for event in events:
+        kind = event.get("type")
+        if (merged and kind in _DELTA_TYPES and merged[-1].get("type") == kind
+                and merged[-1].get("delegation_id") == event.get("delegation_id")):
+            previous = dict(merged[-1])
+            previous["content"] = (previous.get("content") or "") + (event.get("content") or "")
+            merged[-1] = previous
+        else:
+            merged.append(event)
+    return merged
 
 
 def uncertain_tools(run: ChatRun) -> list[str]:
@@ -123,7 +157,7 @@ def describe(run: ChatRun) -> dict:
     return {"id": str(run.id), "session_id": str(run.session_id), "status": run.status,
             "assistant_message_id": str(run.assistant_message_id),
             "last_sequence": run.last_sequence, "stop_requested": run.stop_requested,
-            "can_resume": run.status in {"interrupted", "failed", "stopped"} and not uncertain,
+            "can_resume": run.status in {"interrupted", "failed", "stopped"} and not uncertain and not run.request.get("browser_private"),
             "uncertain_tools": uncertain}
 
 
@@ -164,12 +198,16 @@ async def latest(db, user_id: UUID, session_id: UUID) -> ChatRun | None:
     run = await db.scalar(select(ChatRun).where(ChatRun.session_id == session_id, ChatRun.user_id == user_id)
                           .order_by(ChatRun.created_at.desc()).limit(1).with_for_update())
     if run:
+        await authorize_run(db, run)
         await expire_run(db, run)
+    else:
+        await authorize_session(db, session, user_id)
     await db.commit()
     return run
 
 
-async def owned(db, user_id: UUID, run_id: UUID, *, lock: bool = False) -> ChatRun:
+async def _load_run(db, user_id: UUID, run_id: UUID, *, lock: bool = False) -> ChatRun:
+    """Identity-only load for producer cleanup; never expose it from a route."""
     await user_scope(db, user_id)
     query = select(ChatRun).where(ChatRun.id == run_id, ChatRun.user_id == user_id)
     if lock:
@@ -180,11 +218,33 @@ async def owned(db, user_id: UUID, run_id: UUID, *, lock: bool = False) -> ChatR
     return run
 
 
-async def reserve(db, user_id: UUID, session_id: UUID, request: dict, resumed_from: UUID | None = None) -> ChatRun:
+async def authorize_run(db, run: ChatRun) -> None:
+    session = await db.get(Session, run.session_id, populate_existing=True)
+    if session is None:
+        raise HTTPException(404, "Session not found")
+    source_agent = run.request.get("_execution_agent_id")
+    if "_execution_agent_id" in run.request and (str(session.agent_id) if session.agent_id else None) != source_agent:
+        raise HTTPException(403, "任务来源智能体已改变")
+    tenant = run.request.get("_execution_tenant_id")
+    if tenant is None and session.agent_id is None:
+        raise HTTPException(403, "历史任务缺少可信租户归属，无法访问或续跑")
+    await authorize_session(db, session, run.user_id, tenant_id=UUID(tenant) if tenant else None)
+
+
+async def owned(db, user_id: UUID, run_id: UUID, *, lock: bool = False) -> ChatRun:
+    run = await _load_run(db, user_id, run_id, lock=lock)
+    await authorize_run(db, run)
+    return run
+
+
+async def reserve(db, user_id: UUID, session_id: UUID, request: dict, resumed_from: UUID | None = None, *, tenant_id: UUID | None = None) -> ChatRun:
     await user_scope(db, user_id)
     session = await db.scalar(select(Session).where(Session.id == session_id, Session.user_id == user_id).with_for_update())
     if not session:
         raise HTTPException(404, "Session not found")
+    tenant = await authorize_session(db, session, user_id, tenant_id=tenant_id)
+    request = {**request, "_execution_tenant_id": str(tenant),
+               "_execution_agent_id": str(session.agent_id) if session.agent_id else None}
     active = await db.scalar(select(ChatRun).where(ChatRun.session_id == session_id, ChatRun.user_id == user_id,
                                                  ChatRun.status == "running").with_for_update())
     if active:
@@ -215,26 +275,58 @@ async def reserve(db, user_id: UUID, session_id: UUID, request: dict, resumed_fr
     return run
 
 
-async def append(run_id: UUID, user_id: UUID, events: list[dict]) -> None:
+async def append(
+    run_id: UUID, user_id: UUID, events: list[dict], *, force_snapshot: bool = False,
+) -> None:
+    events = _coalesce(events)
+    if not events:
+        return
     async with get_session_factory()() as db:
         run = await owned(db, user_id, run_id, lock=True)
         if run.status != "running" or run.owner != OWNER:
             raise asyncio.CancelledError()
+        state = _live_snapshots.get(run_id)
+        if state is None:
+            state = copy.deepcopy(run.snapshot or {})
+        boundary = False
         for event in events:
             run.last_sequence += 1
             payload = sanitize_pg_text(event)
-            run.snapshot = snapshot_event(run.snapshot, payload)
-            db.add(ChatRunEvent(run_id=run_id, user_id=user_id, sequence=run.last_sequence, payload=payload))
+            _apply_event(state, payload)
+            db.add(ChatRunEvent(
+                run_id=run_id, user_id=user_id, sequence=run.last_sequence, payload=payload,
+            ))
+            if payload.get("type") not in _DELTA_TYPES:
+                boundary = True
+        _live_snapshots[run_id] = state
+        saved_at = time.monotonic()
+        if (force_snapshot or boundary
+                or saved_at - _snapshot_saved_at.get(run_id, 0.0) >= _SNAPSHOT_CHECKPOINT_SECONDS):
+            run.snapshot = copy.deepcopy(state)
+            _snapshot_saved_at[run_id] = saved_at
         await db.commit()
+        sequence = run.last_sequence
+    await notifier.publish(run_id, sequence, "running")
 
 
 async def finish(run_id: UUID, user_id: UUID, status: str) -> None:
+    changed = False
     async with get_session_factory()() as db:
-        run = await owned(db, user_id, run_id, lock=True)
+        # Revocation must stop new work but still permit terminal cleanup.
+        run = await _load_run(db, user_id, run_id, lock=True)
         if run.status == "running" and run.owner == OWNER:
+            state = _live_snapshots.get(run_id)
+            if state is not None:
+                run.snapshot = copy.deepcopy(state)
             run.status = status
             await save_snapshot(db, run)
             await db.commit()
+            changed = True
+        sequence, final_status = run.last_sequence, run.status
+    _live_snapshots.pop(run_id, None)
+    _snapshot_saved_at.pop(run_id, None)
+    if changed:
+        await notifier.publish(run_id, sequence, final_status)
 
 
 async def heartbeat(run_id: UUID, user_id: UUID, worker: asyncio.Task) -> None:
@@ -258,6 +350,15 @@ async def heartbeat(run_id: UUID, user_id: UUID, worker: asyncio.Task) -> None:
 
 
 async def produce(run: ChatRun, source: AsyncIterator[str]) -> None:
+    from aio_agent_platform.browser.context import (
+        BrowserRunContext,
+        browser_run,
+        private_browser_history,
+    )
+    from aio_agent_platform.browser.service import finish_run
+    private_token = private_browser_history.set(bool(run.request.get("browser_private")))
+    grant_id = run.request.get("browser_grant_id")
+    browser_token = browser_run.set(BrowserRunContext(run.id, UUID(grant_id), run.user_id) if grant_id else None)
     token = current_user_id.set(str(run.user_id))
     children: set[asyncio.Task] = set()
     child_token = child_tasks.set(children)
@@ -285,7 +386,7 @@ async def produce(run: ChatRun, source: AsyncIterator[str]) -> None:
             elif event.get("type") == "error":
                 outcome = "failed"
         if pending:
-            await append(run.id, run.user_id, pending)
+            await append(run.id, run.user_id, pending, force_snapshot=True)
             pending.clear()
     except asyncio.CancelledError:
         pass
@@ -304,14 +405,23 @@ async def produce(run: ChatRun, source: AsyncIterator[str]) -> None:
             await source.aclose()
         try:
             if pending:
-                await append(run.id, run.user_id, pending)
+                with suppress(HTTPException):
+                    await append(run.id, run.user_id, pending, force_snapshot=True)
             async with get_session_factory()() as db:
-                current = await owned(db, run.user_id, run.id)
+                current = await _load_run(db, run.user_id, run.id)
                 if current.stop_requested and outcome != "completed":
                     outcome = "stopped"
             await finish(run.id, run.user_id, outcome)
         except (Exception, asyncio.CancelledError):
             logger.exception("chat_run_finalize_failed", run_id=str(run.id))
+        try:
+            if grant_id:
+                await finish_run(run.id, run.user_id)
+        except (Exception, asyncio.CancelledError):
+            logger.error("browser_run_cleanup_pending", run_id=str(run.id))
+        finally:
+            browser_run.reset(browser_token)
+            private_browser_history.reset(private_token)
         child_tasks.reset(child_token)
         completed_calls.reset(completed_token)
         current_user_id.reset(token)
@@ -330,6 +440,16 @@ def start(run: ChatRun, source: AsyncIterator[str]) -> None:
 
 
 async def subscribe(run_id: UUID, user_id: UUID, after: int = 0, *, replay: bool = True) -> AsyncIterator[str]:
+    try:
+        async for event in _subscribe(run_id, user_id, after, replay=replay):
+            yield event
+    except HTTPException as error:
+        if error.status_code not in {403, 404}:
+            raise
+        yield sse({"type": "access_revoked", "message": "任务访问权限已失效"})
+
+
+async def _subscribe(run_id: UUID, user_id: UUID, after: int = 0, *, replay: bool = True) -> AsyncIterator[str]:
     # Read-only subscriber. Closing this generator does not touch the worker.
     async with get_session_factory()() as db:
         run = await owned(db, user_id, run_id)
@@ -337,10 +457,19 @@ async def subscribe(run_id: UUID, user_id: UUID, after: int = 0, *, replay: bool
         info = describe(run)
     yield sse({"type": "run", **info})
     cursor = after
+    last_expire_check = 0.0
     while True:
+        # Capture the wake-up version before reading, so a notification that
+        # lands between the read and the wait is not lost.
+        seen = notifier.version(run_id)
         async with get_session_factory()() as db:
-            run = await owned(db, user_id, run_id, lock=True)
-            await expire_run(db, run)
+            run = await owned(db, user_id, run_id)
+            monotonic = time.monotonic()
+            if monotonic - last_expire_check >= 5.0:
+                # A stalled worker is only detected here; do not take a row
+                # lock on the read path.
+                await expire_run(db, run)
+                last_expire_check = monotonic
             rows = list((await db.scalars(select(ChatRunEvent).where(
                 ChatRunEvent.run_id == run_id, ChatRunEvent.user_id == user_id,
                 ChatRunEvent.sequence > cursor).order_by(ChatRunEvent.sequence).limit(256))).all())
@@ -360,7 +489,9 @@ async def subscribe(run_id: UUID, user_id: UUID, after: int = 0, *, replay: bool
             return
         if not rows:
             yield ": ping\n\n"
-        await asyncio.sleep(0.2)
+        # Wake on the producer's publish; the timeout is the Redis-down and
+        # cross-process fallback (and also refreshes the run's status).
+        await notifier.wait(run_id, seen, 1.0)
 
 
 def sse(event: dict) -> str:
@@ -403,3 +534,6 @@ async def shutdown() -> None:
     for run_id, user_id, task in jobs:
         if task.cancelled():
             await finish(run_id, user_id, "interrupted")
+    _live_snapshots.clear()
+    _snapshot_saved_at.clear()
+    await notifier.shutdown()

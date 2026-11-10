@@ -30,6 +30,9 @@ async def factory(tmp_path, monkeypatch):
             await conn.run_sync(model.__table__.create)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     monkeypatch.setattr(runtime, "get_session_factory", lambda: factory)
+    # Lifecycle tests isolate authorization; test_execution_security covers real membership.
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr(runtime, "authorize_session", AsyncMock(return_value=uuid4()))
     yield factory
     await runtime.shutdown()
     await engine.dispose()
@@ -169,8 +172,7 @@ async def test_events_and_mutations_are_owner_scoped(factory):
                           runtime.stop(db, other, run.id)):
             with pytest.raises(HTTPException, match="404"):
                 await operation
-    with pytest.raises(HTTPException, match="404"):
-        await anext(runtime.subscribe(run.id, other))
+    assert "access_revoked" in await anext(runtime.subscribe(run.id, other))
 
 
 async def test_cursor_replay_has_no_duplicates_and_marks_historical_actions(factory):
@@ -186,6 +188,36 @@ async def test_cursor_replay_has_no_duplicates_and_marks_historical_actions(fact
     assert all(item["replay"] for item in replay if "sequence" in item)
     async with factory() as db:
         assert len((await db.scalars(select(ChatRunEvent))).all()) == 3
+
+
+async def test_adjacent_deltas_are_coalesced_across_a_boundary(factory):
+    run = await reserve(factory)
+    await runtime.append(run.id, run.user_id, [
+        {"type": "text_delta", "content": "a"},
+        {"type": "text_delta", "content": "b"},
+        {"type": "tool_call", "id": "t", "name": "write", "arguments": {}},
+        {"type": "text_delta", "content": "c"},
+        {"type": "text_delta", "content": "d"},
+    ])
+    async with factory() as db:
+        rows = list((await db.scalars(
+            select(ChatRunEvent).order_by(ChatRunEvent.sequence)
+        )).all())
+    assert [row.payload["type"] for row in rows] == ["text_delta", "tool_call", "text_delta"]
+    assert rows[0].payload["content"] == "ab"
+    assert rows[2].payload["content"] == "cd"
+
+
+async def test_finish_persists_text_streamed_after_the_last_boundary(factory):
+    run = await reserve(factory)
+    for index in range(5):
+        await runtime.append(run.id, run.user_id, [
+            {"type": "text_delta", "content": str(index)},
+        ])
+    await runtime.finish(run.id, run.user_id, "interrupted")
+    async with factory() as db:
+        message = await db.get(Message, run.assistant_message_id)
+        assert message.content == "01234"
 
 
 async def test_generation_error_marks_failed_and_keeps_partial_text(factory):
@@ -254,12 +286,16 @@ async def test_real_chat_route_disconnect_then_reconnect(factory, monkeypatch, l
     monkeypatch.setattr(chat, "propagate_attributes", lambda **kwargs: nullcontext())
     for name, value in {
         "load_chat_agent": None, "generate_session_title": "", "load_pet_chat_context": None,
-        "refresh_mcp_tools_for_agent": None, "_build_system_prompt_with_memories": "system",
-        "_resolve_workspace": (None, None), "_build_agent_loop": FakeLoop(),
+        "refresh_mcp_tools_for_agent": None,
+        "_resolve_workspace": (None, None),
         "prepare_context": ([LLMMessage(role="user", content="write report")], None),
         "_update_context_summary": None,
     }.items():
         monkeypatch.setattr(chat, name, AsyncMock(return_value=value))
+    from aio_agent_platform.core.chat import load_conversation_history
+    plan = SimpleNamespace(provider_type="openai", allow_images=False, build_loop=AsyncMock(return_value=FakeLoop()),
+                           build_prompt=AsyncMock(return_value="system"), load_history=load_conversation_history)
+    monkeypatch.setattr(chat.ChatExecutionService, "prepare", AsyncMock(return_value=plan))
     monkeypatch.setattr(chat, "_filter_tools_by_agent", Mock(return_value=([], [])))
     monkeypatch.setattr(chat, "_fire_memory_extraction", Mock())
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(tool_executor=Mock())))
@@ -367,9 +403,21 @@ async def test_completed_event_survives_crash_before_terminal_commit(factory):
 async def test_session_history_recovers_legacy_action_order_without_rewriting_messages(factory):
     from types import SimpleNamespace
 
+    from aio_agent_platform.db.models import Tenant, TenantMembership, User
     from aio_agent_platform.interface.routes.sessions import get_session
-
     run = await reserve(factory)
+    # History reads now validate the existing session's execution owner.
+    tenant_id = uuid4()
+    async with factory.kw["bind"].begin() as connection:
+        for model in (Tenant, User, TenantMembership):
+            await connection.run_sync(model.__table__.create)
+    async with factory() as db:
+        db.add_all([
+            Tenant(id=tenant_id, name="test", slug="test"),
+            User(id=run.user_id, tenant_id=tenant_id, username="test", email="test@example.test", password_hash="unused"),
+            TenantMembership(user_id=run.user_id, tenant_id=tenant_id),
+        ])
+        await db.commit()
     old = [{"id": "thinking-0", "content": "先搜索"}, {"id": "thinking-1", "content": "再读取"}]
     async with factory() as db:
         message = await db.get(Message, run.assistant_message_id)
@@ -383,7 +431,7 @@ async def test_session_history_recovers_legacy_action_order_without_rewriting_me
             db.add(ChatRunEvent(run_id=run.id, user_id=run.user_id, sequence=sequence, payload=payload))
         await db.commit()
     async with factory() as db:
-        detail = await get_session(run.session_id, SimpleNamespace(id=run.user_id), db)
+        detail = await get_session(run.session_id, SimpleNamespace(id=run.user_id, tenant_id=tenant_id), db)
         assert [c['tool_call_index'] for c in detail.messages[0].reasoning] == [0, 1]
         assert not db.dirty
     async with factory() as db:

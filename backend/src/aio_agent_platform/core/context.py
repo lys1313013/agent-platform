@@ -336,13 +336,18 @@ async def generate_summary(
     messages: list[LLMMessage],
     provider: LLMProvider,
     max_chars: int | None = None,
+    *,
+    existing_summary: str | None = None,
 ) -> str:
     """Generate a compressed summary of conversation messages using LLM.
 
     Uses the provided provider (ideally a fast/cheap model).
+    When ``existing_summary`` is given, only ``messages`` are the new turns and
+    the model folds them into the existing summary instead of re-reading the
+    whole conversation.
     Returns summary text within max_chars limit.
     """
-    if not messages:
+    if not messages and not existing_summary:
         return ""
 
     max_chars = max_chars or settings.agent.context_summary_max_chars
@@ -357,7 +362,9 @@ async def generate_summary(
         msg_dicts.append({"role": msg.role, "content": content})
 
     template = _jinja_env.get_template("context_summary.j2")
-    summary_prompt = template.render(messages=msg_dicts, max_chars=max_chars)
+    summary_prompt = template.render(
+        messages=msg_dicts, max_chars=max_chars, existing_summary=existing_summary,
+    )
 
     try:
         response = await provider.complete(

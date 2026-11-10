@@ -1089,7 +1089,7 @@ class ChannelInboundPipeline:
             workspace_id, workspace_slug = await resolve_workspace(db, session, ctx.user_id)
 
         agent_loop = await build_agent_loop(
-            self.tool_executor, system_prompt, db,
+            self.tool_executor, system_prompt, db, user_id=ctx.user_id,
             agent_model_id=(session.model_id if session and session.model_id else None) or agent.model_id,
             agent_temperature=agent.temperature,
             agent_max_iterations=agent.max_iterations,
@@ -1097,6 +1097,7 @@ class ChannelInboundPipeline:
             tenant_id=agent.tenant_id,
             workspace_id=workspace_id,
             workspace_slug=workspace_slug,
+            allowed_tools={s["function"]["name"] for s in tools_schema},
         )
         agent_loop.execution_agent_id = agent.id
 
@@ -1257,7 +1258,8 @@ class ChannelInboundPipeline:
         )
         summary_task = asyncio.create_task(
             update_context_summary(
-                ctx.session_id, history, event.text, final_output, agent_loop.provider
+                ctx.session_id, history, event.text, final_output, agent_loop.provider,
+                user_id=ctx.user_id, tenant_id=self.channel.tenant_id,
             )
         )
         background_tasks.add(summary_task)
