@@ -9,8 +9,8 @@ async def trigram_match(db, column, query: str, threshold: float):
     """Return a WHERE expression; ``%`` uses the trigram index, similarity() does not."""
     if db.get_bind().dialect.name == "postgresql":
         await db.execute(
-            text("SET LOCAL pg_trgm.similarity_threshold = :threshold"),
-            {"threshold": float(threshold)},
+            text("SELECT set_config('pg_trgm.similarity_threshold', :threshold, true)"),
+            {"threshold": str(float(threshold))},
         )
         return column.op("%")(query)
     return func.similarity(column, query) > threshold

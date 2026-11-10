@@ -1,4 +1,4 @@
-"""Channel creation/editing is tenant-wide; identity bindings stay channel-local."""
+"""Channel management requires an admin; member bindings stay channel-local."""
 
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -16,7 +16,7 @@ from agent_platform.interface.routes import channels
 
 
 @pytest.mark.asyncio
-async def test_regular_user_channel_management_and_binding_scope(db_session, monkeypatch):
+async def test_admin_channel_management_and_member_binding_scope(db_session, monkeypatch):
     tenant_id = uuid4()
     user = User(
         tenant_id=tenant_id,
@@ -47,6 +47,15 @@ async def test_regular_user_channel_management_and_binding_scope(db_session, mon
             "app_secret": "test",
             "mode": "websocket",
         }
+        # Members cannot inspect or mutate channel configuration.
+        assert (await client.get("/api/channels")).status_code == 403
+        assert (await client.post("/api/channels", json=payload)).status_code == 403
+        assert (
+            await client.put(f"/api/channels/{uuid4()}", json={"name": "forbidden"})
+        ).status_code == 403
+        assert (await client.post(f"/api/channels/{uuid4()}/enable")).status_code == 403
+        user.role = "admin"
+        await db_session.flush()
         first = await client.post("/api/channels", json=payload)
         assert first.status_code == 201, first.text
         first_id = first.json()["id"]
@@ -58,7 +67,9 @@ async def test_regular_user_channel_management_and_binding_scope(db_session, mon
         result = await client.put(f"/api/channels/{first_id}", json={"name": "renamed"})
         assert result.status_code == 200 and result.json()["name"] == "renamed"
         assert len((await client.get("/api/channels")).json()) == 2
-        # Activating/deleting existing channels still requires an admin.
+        # Members may manage their own bindings, but cannot disable/delete channels.
+        user.role = "user"
+        await db_session.flush()
         assert (await client.post(f"/api/channels/{first_id}/disable")).status_code == 403
         assert (await client.delete(f"/api/channels/{first_id}")).status_code == 403
         from uuid import UUID
@@ -83,8 +94,11 @@ async def test_regular_user_channel_management_and_binding_scope(db_session, mon
         assert len((await client.get(f"/api/channels/{first_id}/bindings")).json()) == 1
         assert (await client.delete(f"/api/channel-bindings/{other.id}")).status_code == 404
         assert (await client.delete(f"/api/channel-bindings/{own[0]['id']}")).status_code == 204
-        # Tenant boundaries apply even after opening management to ordinary users.
+        # Tenant boundaries apply to member bindings and administrator management.
         user.tenant_id = uuid4()
+        await db_session.flush()
+        assert (await client.get(f"/api/channels/{first_id}/bindings")).status_code == 404
+        user.role = "admin"
         await db_session.flush()
         assert (await client.get("/api/channels")).json() == []
         assert (
