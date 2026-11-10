@@ -545,18 +545,21 @@ async def resolve_workspace(
 ):
     """Resolve the workspace for a chat session.
 
-    Returns (workspace_id, workspace_slug). Sandbox is user-bound: all sessions
-    use the user's default workspace. Always uses the default workspace,
-    overriding any previously assigned value.
+    Returns (workspace_id, workspace_slug). A session with an owned workspace
+    keeps it; otherwise falls back to the user's default workspace. Sandbox is
+    user-bound, so the workspace only isolates files, not the container.
     """
     from agent_platform.workspaces.service import WorkspaceService
 
-    workspace = await WorkspaceService.get_or_create_default(db=db, user_id=user_id)
+    if session.workspace_id is not None:
+        owned = await WorkspaceService.get_workspace(db, session.workspace_id, user_id)
+        if owned is not None:
+            return owned.id, owned.slug
 
+    workspace = await WorkspaceService.get_or_create_default(db=db, user_id=user_id)
     if session.workspace_id != workspace.id:
         session.workspace_id = workspace.id
         await db.flush()
-
     return workspace.id, workspace.slug
 
 

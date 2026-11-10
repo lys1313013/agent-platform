@@ -38,6 +38,7 @@ def _serialize(task: task_registry.RunningTask) -> dict:
         "source": task.source,
         "chat_key": task.chat_key,
         "agent_id": task.agent_id,
+        "workspace_id": task.workspace_id,
         "started_at": task.started_at,
     }
 
@@ -46,7 +47,8 @@ class TaskEventBroker:
     """进程内注册表 + 单条 Redis pubsub 订阅任务，向各 SSE 连接分发事件。"""
 
     def __init__(self) -> None:
-        self._subscribers: dict[str, set[asyncio.Queue]] = {}
+        # user_id -> {queue: workspace_id filter or None}
+        self._subscribers: dict[str, dict[asyncio.Queue, str | None]] = {}
         self._listen_task: asyncio.Task | None = None
 
     async def _ensure_running(self) -> None:
@@ -96,21 +98,26 @@ class TaskEventBroker:
         user_id = str(data.get("user_id") or "")
         if not user_id:
             return
-        queues = list(self._subscribers.get(user_id, ()))
-        for q in queues:
+        workspace_id = str(data.get("workspace_id") or "")
+        for q, workspace_filter in list(self._subscribers.get(user_id, {}).items()):
+            if workspace_filter is not None and workspace_id != workspace_filter:
+                continue
             try:
                 q.put_nowait(data)
             except asyncio.QueueFull:
                 pass
 
-    async def stream(self, user_id: UUID) -> AsyncIterator[dict | None]:
+    async def stream(
+        self, user_id: UUID, workspace_id: str | UUID | None = None
+    ) -> AsyncIterator[dict | None]:
         """先订阅再读快照，随后排空增量事件；超过心跳间隔未收到事件产出 None（心跳哨兵）。"""
         key = str(user_id)
+        workspace_filter = str(workspace_id) if workspace_id else None
         queue: asyncio.Queue = asyncio.Queue(maxsize=_QUEUE_MAX)
         await self._ensure_running()
-        self._subscribers.setdefault(key, set()).add(queue)
+        self._subscribers.setdefault(key, {})[queue] = workspace_filter
         try:
-            tasks = await task_registry.list_tasks(user_id)
+            tasks = await task_registry.list_tasks(user_id, workspace_id=workspace_filter)
             yield {
                 "type": "pet_task_snapshot",
                 "tasks": [_serialize(t) for t in tasks],
@@ -125,7 +132,7 @@ class TaskEventBroker:
         finally:
             queues = self._subscribers.get(key)
             if queues is not None:
-                queues.discard(queue)
+                queues.pop(queue, None)
                 if not queues:
                     self._subscribers.pop(key, None)
 

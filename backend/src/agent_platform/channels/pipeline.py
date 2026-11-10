@@ -1143,8 +1143,13 @@ class ChannelInboundPipeline:
         # 登记在跑任务，供宠物 widget 展示（渠道任务没有浏览器 SSE）
         chat_key = f"{self.channel.id}:{event.chat_id}:{event.external_id}"
         await task_started(
-            ctx.user_id, ctx.session_id, user_message_for_llm, self.channel.channel_type, chat_key,
+            ctx.user_id,
+            ctx.session_id,
+            user_message_for_llm,
+            self.channel.channel_type,
+            chat_key,
             agent_id=str(self.channel.agent_id),
+            workspace_id=str(workspace_id) if workspace_id else "",
         )
 
         # 渠道原生流式卡片输出，不调用普通消息编辑接口。

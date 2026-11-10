@@ -35,6 +35,7 @@ class RunningTask:
     # 渠道会话标识 {channel_id}:{chat_id}:{external_id}，同一渠道聊天 /new 换 session 后仍同 key
     chat_key: str = ""
     agent_id: str = ""  # 会话所属 Agent（点击任务条跳转会话页用）
+    workspace_id: str = ""  # 会话所属工作区；宠物任务条按当前工作区隔离
     tool: str | None = None
     started_at: float = field(default_factory=time.time)
 
@@ -46,6 +47,7 @@ class RunningTask:
                 "source": self.source,
                 "chat_key": self.chat_key,
                 "agent_id": self.agent_id,
+                "workspace_id": self.workspace_id,
                 "tool": self.tool,
                 "started_at": self.started_at,
             },
@@ -62,6 +64,7 @@ class RunningTask:
                 source=str(data["source"]),
                 chat_key=str(data.get("chat_key") or ""),
                 agent_id=str(data.get("agent_id") or ""),
+                workspace_id=str(data.get("workspace_id") or ""),
                 tool=data.get("tool"),
                 started_at=float(data.get("started_at") or time.time()),
             )
@@ -93,11 +96,22 @@ async def _publish(user_id: str, event: dict) -> None:
 
 
 async def task_started(
-    user_id: UUID, session_id: UUID, label: str, source: str, chat_key: str = "", agent_id: str = ""
+    user_id: UUID,
+    session_id: UUID,
+    label: str,
+    source: str,
+    chat_key: str = "",
+    agent_id: str = "",
+    workspace_id: str = "",
 ) -> None:
     label = " ".join(label.split())[:LABEL_MAX_LEN]
     task = RunningTask(
-        session_id=str(session_id), label=label, source=source, chat_key=chat_key, agent_id=agent_id
+        session_id=str(session_id),
+        label=label,
+        source=source,
+        chat_key=chat_key,
+        agent_id=agent_id,
+        workspace_id=workspace_id,
     )
     try:
         pipe = _redis().pipeline()
@@ -116,6 +130,7 @@ async def task_started(
             "source": task.source,
             "chat_key": task.chat_key,
             "agent_id": task.agent_id,
+            "workspace_id": task.workspace_id,
             "started_at": task.started_at,
         },
     })
@@ -170,7 +185,7 @@ async def get_task(user_id: UUID, session_id: UUID) -> RunningTask | None:
     return task
 
 
-async def list_tasks(user_id: UUID) -> list[RunningTask]:
+async def list_tasks(user_id: UUID, workspace_id: str | UUID | None = None) -> list[RunningTask]:
     try:
         raw = await _redis().hgetall(_key(user_id))
     except Exception:
@@ -179,10 +194,13 @@ async def list_tasks(user_id: UUID) -> list[RunningTask]:
     now = time.time()
     tasks: list[RunningTask] = []
     stale_fields: list[str] = []
+    workspace_filter = str(workspace_id) if workspace_id else None
     for field_name, value in raw.items():
         task = RunningTask.loads(value)
         if task is None or now - task.started_at > TASK_TTL_SECONDS:
             stale_fields.append(field_name)
+            continue
+        if workspace_filter is not None and task.workspace_id != workspace_filter:
             continue
         tasks.append(task)
     if stale_fields:

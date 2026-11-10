@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from agent_platform.auth.dependencies import get_current_user, get_execution_user
 from agent_platform.db.models import Agent, Tenant, TenantMembership, User
 from agent_platform.interface.api import app
+from agent_platform.workspaces.service import WorkspaceService
 
 TENANT_A = uuid.UUID("10000000-0000-0000-0000-00000000000a")
 TENANT_B = uuid.UUID("10000000-0000-0000-0000-00000000000b")
@@ -395,3 +396,49 @@ async def test_pet_chat_reuse_and_force_new(client: AsyncClient, db_session: Asy
     assert sid3 != sid1
     old = await client.get(f"/api/sessions/{sid1}")
     assert old.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_pet_chat_scoped_to_workspace(client: AsyncClient, db_session: AsyncSession):
+    """宠物会话按工作区复用，不同工作区互不串用。"""
+    owner = _make_user(OWNER_ID, TENANT_A)
+    await _login_as(client, db_session, owner)
+    await _upload(client)
+
+    agent = Agent(
+        id=uuid.uuid4(),
+        tenant_id=TENANT_A,
+        created_by=owner.id,
+        name="pet-agent",
+        visibility="tenant",
+        is_active=True,
+    )
+    db_session.add(agent)
+    await db_session.flush()
+    mine = (await client.get("/api/pets/mine")).json()
+    pet_id = mine[0]["id"]
+    bind = await client.put(f"/api/pets/{pet_id}/agent", json={"agent_id": str(agent.id)})
+    assert bind.status_code == 200, bind.text
+
+    ws_a = await WorkspaceService.create_workspace(db_session, owner.id, "空间 A")
+    ws_b = await WorkspaceService.create_workspace(db_session, owner.id, "空间 B")
+
+    r_a = await client.post(f"/api/pets/{pet_id}/chat?workspace_id={ws_a.id}")
+    r_b = await client.post(f"/api/pets/{pet_id}/chat?workspace_id={ws_b.id}")
+    assert r_a.status_code == 200, r_a.text
+    assert r_b.status_code == 200, r_b.text
+    sid_a = r_a.json()["conversation_id"]
+    sid_b = r_b.json()["conversation_id"]
+    assert sid_a != sid_b
+
+    # 同一工作区重复开启 → 复用该工作区会话
+    again = await client.post(f"/api/pets/{pet_id}/chat?workspace_id={ws_a.id}")
+    assert again.json()["conversation_id"] == sid_a
+
+    session_a = (await client.get(f"/api/sessions/{sid_a}")).json()
+    session_b = (await client.get(f"/api/sessions/{sid_b}")).json()
+    assert session_a["workspace_id"] == str(ws_a.id)
+    assert session_b["workspace_id"] == str(ws_b.id)
+
+    missing = await client.post(f"/api/pets/{pet_id}/chat?workspace_id={uuid.uuid4()}")
+    assert missing.status_code == 404

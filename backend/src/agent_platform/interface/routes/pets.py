@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -470,6 +470,7 @@ async def pet_chat(
     user: ExecutionUser,
     db: DbSession,
     force_new: bool = False,
+    workspace_id: UUID | None = Query(default=None),
 ) -> PetChatOut:
     """开启/复用宠物闲聊会话（source='pet'）。之后走现有会话消息接口 + SSE。
 
@@ -486,23 +487,29 @@ async def pet_chat(
     if agent is None:
         raise HTTPException(status_code=400, detail="请先为该宠物绑定智能体")
 
+    if workspace_id is not None:
+        from agent_platform.workspaces.service import WorkspaceService
+
+        workspace = await WorkspaceService.get_workspace(db, workspace_id, user.id)
+        if workspace is None:
+            raise HTTPException(status_code=404, detail="工作区不存在")
+
     session: Session | None = None
     if not force_new:
-        result = await db.execute(
-            select(Session)
-            .where(
-                Session.user_id == user.id,
-                Session.pet_id == user_pet_id,
-                Session.source == "pet",
-            )
-            .order_by(Session.updated_at.desc())
-            .limit(1)
+        query = select(Session).where(
+            Session.user_id == user.id,
+            Session.pet_id == user_pet_id,
+            Session.source == "pet",
         )
+        if workspace_id is not None:
+            query = query.where(Session.workspace_id == workspace_id)
+        result = await db.execute(query.order_by(Session.updated_at.desc()).limit(1))
         session = result.scalars().first()
     if session is None:
         session = Session(
             user_id=user.id,
             agent_id=agent.id,
+            workspace_id=workspace_id,
             source="pet",
             pet_id=user_pet_id,
             title=f"与{pkg.display_name}的闲聊",
@@ -550,7 +557,10 @@ async def get_active_pet(user: ExecutionUser, db: DbSession) -> UserPetOut | Non
 
 
 @router.get("/active-tasks", response_model=list[ActiveTaskOut])
-async def list_active_tasks(user: ExecutionUser) -> list[ActiveTaskOut]:
+async def list_active_tasks(
+    user: ExecutionUser,
+    workspace_id: UUID | None = Query(default=None),
+) -> list[ActiveTaskOut]:
     """当前用户的在跑任务（渠道触发，如飞书）。调试/回退用，前端已改走 SSE。"""
     return [
         ActiveTaskOut(
@@ -562,16 +572,19 @@ async def list_active_tasks(user: ExecutionUser) -> list[ActiveTaskOut]:
             agent_id=t.agent_id,
             started_at=t.started_at,
         )
-        for t in await task_registry.list_tasks(user.id)
+        for t in await task_registry.list_tasks(user.id, workspace_id=workspace_id)
     ]
 
 
 @router.get("/tasks/events")
-async def task_events_stream(user: ExecutionUser) -> StreamingResponse:
+async def task_events_stream(
+    user: ExecutionUser,
+    workspace_id: UUID | None = Query(default=None),
+) -> StreamingResponse:
     """用户级 SSE：渠道任务生命周期实时推送（连接即快照，再收增量 + 心跳）。"""
 
     async def event_generator():
-        async for item in broker.stream(user.id):
+        async for item in broker.stream(user.id, workspace_id=workspace_id):
             if item is None:
                 yield ": ping\n\n"
             else:
