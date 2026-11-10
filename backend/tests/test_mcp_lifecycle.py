@@ -12,8 +12,8 @@ import pytest
 import pytest_asyncio
 import uvicorn
 
-from aio_agent_platform.tools.mcp.adapter import MCPServerConnection
-from aio_agent_platform.tools.mcp.manager import MCPManager
+from agent_platform.tools.mcp.adapter import MCPServerConnection
+from agent_platform.tools.mcp.manager import MCPManager
 
 # Real TCP/SDK handshakes need headroom on shared CI runners with coverage.
 # The lifecycle test checks ownership/cancellation, not network latency; keep

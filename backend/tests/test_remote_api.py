@@ -5,7 +5,7 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
-from aio_agent_platform.interface.routes.remote_tools import (
+from agent_platform.interface.routes.remote_tools import (
     RemoteToolCreate,
     RemoteToolOut,
     RemoteToolTestRequest,

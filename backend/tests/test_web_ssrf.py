@@ -2,7 +2,7 @@
 
 import pytest
 
-from aio_agent_platform.tools.web.ssrf import SSRFError, assert_public_url
+from agent_platform.tools.web.ssrf import SSRFError, assert_public_url
 
 # ---- scheme / format validation ----
 
@@ -80,7 +80,7 @@ async def test_rejects_blocked_metadata_hostname(monkeypatch):
         return ["169.254.169.254"]
 
     monkeypatch.setattr(
-        "aio_agent_platform.tools.web.ssrf._resolve_host", fake_resolve
+        "agent_platform.tools.web.ssrf._resolve_host", fake_resolve
     )
     with pytest.raises(SSRFError):
         await assert_public_url("http://evil.example.com/")
@@ -91,7 +91,7 @@ async def test_rejects_when_any_resolved_ip_is_private(monkeypatch):
         return ["8.8.8.8", "192.168.0.1"]  # one bad apple → reject
 
     monkeypatch.setattr(
-        "aio_agent_platform.tools.web.ssrf._resolve_host", fake_resolve
+        "agent_platform.tools.web.ssrf._resolve_host", fake_resolve
     )
     with pytest.raises(SSRFError):
         await assert_public_url("http://evil.example.com/")
@@ -102,7 +102,7 @@ async def test_allows_public_hostname(monkeypatch):
         return ["93.184.216.34"]
 
     monkeypatch.setattr(
-        "aio_agent_platform.tools.web.ssrf._resolve_host", fake_resolve
+        "agent_platform.tools.web.ssrf._resolve_host", fake_resolve
     )
     await assert_public_url("https://example.com/")
 
@@ -114,7 +114,7 @@ async def test_rejects_unresolvable_host(monkeypatch):
         raise socket.gaierror("name or service not known")
 
     monkeypatch.setattr(
-        "aio_agent_platform.tools.web.ssrf._resolve_host", fake_resolve
+        "agent_platform.tools.web.ssrf._resolve_host", fake_resolve
     )
     with pytest.raises(SSRFError):
         await assert_public_url("http://nonexistent.invalid/")

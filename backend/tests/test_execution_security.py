@@ -12,11 +12,11 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.ext.compiler import compiles
 
-from aio_agent_platform.core import chat, chat_runs
-from aio_agent_platform.core.agent import AgentLoop, AgentStep, ToolContext
-from aio_agent_platform.core.confirmation import confirmation_manager
-from aio_agent_platform.core.execution_scope import bind_execution_scope
-from aio_agent_platform.db.models import (
+from agent_platform.core import chat, chat_runs
+from agent_platform.core.agent import AgentLoop, AgentStep, ToolContext
+from agent_platform.core.confirmation import confirmation_manager
+from agent_platform.core.execution_scope import bind_execution_scope
+from agent_platform.db.models import (
     Agent,
     ChatRun,
     ChatRunEvent,
@@ -28,10 +28,10 @@ from aio_agent_platform.db.models import (
     User,
     UserConfig,
 )
-from aio_agent_platform.llm import ToolCall
-from aio_agent_platform.tools.executor import ToolExecutor
-from aio_agent_platform.tools.mcp.adapter import MCPToolInfo
-from aio_agent_platform.tools.registry import Tool, ToolRegistry
+from agent_platform.llm import ToolCall
+from agent_platform.tools.executor import ToolExecutor
+from agent_platform.tools.mcp.adapter import MCPToolInfo
+from agent_platform.tools.registry import Tool, ToolRegistry
 
 
 @compiles(JSONB, "sqlite")
@@ -57,7 +57,7 @@ async def env(monkeypatch):
                     MCPServer(id=server, tenant_id=a, name="A", transport_type="sse", url="https://invalid.test")])
         await db.commit()
     monkeypatch.setattr(chat_runs, "get_session_factory", lambda: factory)
-    monkeypatch.setattr("aio_agent_platform.db.connection.get_session_factory", lambda: factory)
+    monkeypatch.setattr("agent_platform.db.connection.get_session_factory", lambda: factory)
     yield NS(factory=factory, a=a, b=b, uid=uid, aid=aid, bid=bid, sid=sid, server=server, user=user)
     await chat_runs.shutdown()
     await engine.dispose()
@@ -138,7 +138,7 @@ async def test_user_trust_setting_is_used(env):
 
 
 async def test_tool_catalog_does_not_disclose_another_tenants_mcp_schema(env):
-    from aio_agent_platform.interface.routes.tools import list_tools
+    from agent_platform.interface.routes.tools import list_tools
 
     manager = NS(_tool_to_server={"a_read": env.server},
                  list_all_tools=lambda: [("a_read", MCPToolInfo(name="read", description="private schema"))])
@@ -164,7 +164,7 @@ async def test_unbound_run_keeps_tenant_when_ui_selection_becomes_unusable(env):
 
 
 async def test_confirmation_uses_execution_tenant_after_ui_switch_and_rechecks_membership(env):
-    from aio_agent_platform.interface.routes.confirmations import get_pending_confirmations
+    from agent_platform.interface.routes.confirmations import get_pending_confirmations
 
     loop = AgentLoop(provider=Mock(), tool_executor=ToolExecutor(ToolRegistry(), None),
                      event_queue=asyncio.Queue(), execution_tenant_id=env.a)
@@ -257,7 +257,7 @@ async def test_closing_approval_does_not_leave_pending_confirmation():
 
 
 def test_tool_approval_survives_message_persistence_and_does_not_shift_legacy_question():
-    from aio_agent_platform.core.turn_metadata import InteractiveTurnMetadata
+    from agent_platform.core.turn_metadata import InteractiveTurnMetadata
 
     metadata = InteractiveTurnMetadata()
     calls = [{"id": "shell", "name": "run_shell", "arguments": {}},
@@ -275,8 +275,8 @@ def test_tool_approval_survives_message_persistence_and_does_not_shift_legacy_qu
 
 
 async def test_remote_tool_is_denied_outside_its_owning_tenant():
-    from aio_agent_platform.tools.executor import SecurityError
-    from aio_agent_platform.tools.remote.manager import RemoteToolConfig
+    from agent_platform.tools.executor import SecurityError
+    from agent_platform.tools.remote.manager import RemoteToolConfig
 
     user_id = uuid4()
     executor = ToolExecutor(ToolRegistry(), Mock())

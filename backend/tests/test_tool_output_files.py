@@ -8,21 +8,21 @@ from uuid import uuid4
 
 import pytest
 
-from aio_agent_platform.core.agent import AgentLoop
-from aio_agent_platform.core.chat_history import ChatTurnRecorder
-from aio_agent_platform.core.context import compress_early_tool_results
-from aio_agent_platform.llm.client import LLMChunk, LLMMessage, ToolCall
-from aio_agent_platform.storage.workspace import WorkspaceStorage
-from aio_agent_platform.tools.builtin import READ_FILE
-from aio_agent_platform.tools.executor import ToolExecutor
-from aio_agent_platform.tools.registry import Tool, ToolRegistry
+from agent_platform.core.agent import AgentLoop
+from agent_platform.core.chat_history import ChatTurnRecorder
+from agent_platform.core.context import compress_early_tool_results
+from agent_platform.llm.client import LLMChunk, LLMMessage, ToolCall
+from agent_platform.storage.workspace import WorkspaceStorage
+from agent_platform.tools.builtin import READ_FILE
+from agent_platform.tools.executor import ToolExecutor
+from agent_platform.tools.registry import Tool, ToolRegistry
 
 
 @pytest.fixture
 def setup(monkeypatch):
     hooks, recorder = Mock(), Mock()
-    monkeypatch.setattr("aio_agent_platform.tools.executor.get_hook_manager", lambda: hooks)
-    monkeypatch.setattr("aio_agent_platform.tools.executor.get_recorder", lambda: recorder)
+    monkeypatch.setattr("agent_platform.tools.executor.get_hook_manager", lambda: hooks)
+    monkeypatch.setattr("agent_platform.tools.executor.get_recorder", lambda: recorder)
     manager = SimpleNamespace(
         get_or_create=AsyncMock(return_value=object()),
         write_workspace_file=AsyncMock(return_value=True),

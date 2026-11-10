@@ -1,0 +1,840 @@
+"""Agent external API routes — version management + public API endpoints."""
+
+from __future__ import annotations
+
+import json
+from collections.abc import AsyncIterator
+from contextlib import aclosing
+from typing import Annotated
+from uuid import UUID, uuid4
+
+import structlog
+from anyio import CancelScope
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Request,
+)
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from agent_platform.auth.dependencies import AdminUser, CurrentUser, ExecutionUser
+from agent_platform.core.agent import AgentLoop, AgentStep
+from agent_platform.core.chat import ModelUnavailableError, build_tools_schema
+from agent_platform.core.chat_history import ChatTurnRecorder
+from agent_platform.core.context import (
+    emergency_compress,
+    is_context_overflow_error,
+    prepare_context,
+    prepared_history,
+)
+from agent_platform.core.execution import ChatExecutionService
+from agent_platform.core.runtime_config import AgentRuntimeConfig
+from agent_platform.core.session_access import owned_session
+from agent_platform.db import Message, Session
+from agent_platform.db.connection import get_db
+from agent_platform.db.models import Agent, AgentVersion, User
+from agent_platform.interface.contracts import EventStreamResponse, sse_contract
+from agent_platform.tools.executor import ToolExecutor
+
+logger = structlog.get_logger()
+
+router = APIRouter(tags=["agent-api"])
+
+
+# ---- Schemas ----
+
+
+class ExecuteRequest(BaseModel):
+    user_input: str = Field(..., min_length=1, max_length=10000)
+    variables: dict | None = None
+    session_rid: str | None = None
+
+
+class ExecuteResponse(BaseModel):
+    code: int = 0
+    data: dict
+
+
+class CreateSessionRequest(BaseModel):
+    session_type: str = "production"
+    user_id: str | None = None
+
+
+class CreateSessionResponse(BaseModel):
+    code: int = 0
+    data: dict
+
+
+class SseChatRequest(BaseModel):
+    message: str = Field(..., min_length=1, max_length=50000)
+
+
+class VersionOut(BaseModel):
+    id: UUID
+    agent_id: UUID
+    version: str
+    changelog: str | None = None
+    published_at: str
+    is_active: bool
+
+    model_config = {"from_attributes": True}
+
+
+class PublishVersionRequest(BaseModel):
+    version: str | None = None
+    changelog: str | None = None
+
+
+class AgentApiDoc(BaseModel):
+    agent_id: str
+    agent_name: str
+    agent_description: str | None = None
+    agent_icon: str = "robot"
+    model_name: str | None = None
+    streaming_enabled: bool = True
+    thinking_enabled: bool = False
+    tool_count: int = 0
+    skill_count: int = 0
+    has_published_version: bool = False
+    latest_version: VersionOut | None = None
+    base_url: str = ""
+
+
+# ---- Helpers ----
+
+
+async def _load_agent_with_relations(
+    db: AsyncSession, agent_id: UUID, user: User
+) -> Agent | None:
+    """Execution is scoped to the published agent, with membership and visibility checks."""
+    from agent_platform.core.chat import load_execution_agent
+
+    return await load_execution_agent(db, agent_id, user)
+
+
+async def _get_active_version(db: AsyncSession, agent_id: UUID) -> AgentVersion | None:
+    """Get the currently active published version for an agent."""
+    result = await db.execute(
+        select(AgentVersion)
+        .where(AgentVersion.agent_id == agent_id, AgentVersion.is_active)
+        .order_by(AgentVersion.published_at.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def _prepare_published_execution(db, config_snapshot, tenant_id, user_id=None):
+    try:
+        return await ChatExecutionService.prepare(
+            db, tenant_id=tenant_id, user_id=user_id,
+            config=AgentRuntimeConfig.from_snapshot(config_snapshot),
+        )
+    except ModelUnavailableError as error:
+        raise HTTPException(status_code=400, detail="没有可用的模型，请在管理后台配置模型") from error
+
+
+async def _build_agent_loop_for_version(
+    tool_executor: ToolExecutor,
+    system_prompt: str,
+    db: AsyncSession,
+    config_snapshot: dict,
+    tenant_id: UUID,
+    workspace_id: UUID | None = None,
+    workspace_slug: str | None = None,
+    allowed_tools: set[str] | None = None,
+    user_id: UUID | None = None,
+) -> AgentLoop:
+    """Use published settings with the same model/provider policy as live chat."""
+    execution = await _prepare_published_execution(db, config_snapshot, tenant_id, user_id)
+    return await execution.build_loop(
+        tool_executor, system_prompt, db, workspace_id=workspace_id,
+        workspace_slug=workspace_slug, allowed_tools=allowed_tools,
+    )
+
+
+def _filter_tools_for_agent(
+    tool_executor: ToolExecutor, config_snapshot: dict, tenant_id: UUID | None = None,
+) -> tuple[list, list]:
+    """Filter tools based on the version config snapshot."""
+    from agent_platform.tools.executor import visible_registry_tools
+
+    all_tools = visible_registry_tools(tool_executor, tenant_id)
+    enabled_tools = config_snapshot.get("enabled_tools", [])
+
+    if enabled_tools:
+        enabled_set = set(enabled_tools)
+        filtered = [
+            t for t in all_tools
+            if t.name in enabled_set and t.execution_location != "frontend"
+        ]
+    else:
+        # Preview runs have no browser frontend — never offer ui_* tools.
+        filtered = [t for t in all_tools if t.execution_location != "frontend"]
+
+    return filtered, build_tools_schema(
+        tool_executor,
+        filtered,
+        mcp_server_ids={str(sid) for sid in config_snapshot.get("mcp_server_ids", [])},
+        enabled_tools=set(enabled_tools) if enabled_tools else None,
+        mcp_all_tools_server_ids={
+            str(sid) for sid in config_snapshot.get("mcp_all_tools_server_ids", [])
+        },
+    )
+
+
+def _build_config_snapshot(agent: Agent) -> dict:
+    """Build a config snapshot from the current agent state."""
+    return {
+        **AgentRuntimeConfig.from_agent(agent).to_snapshot(),
+        "system_prompt": agent.system_prompt,
+        "enabled_tools": agent.enabled_tools or [],
+        "mcp_server_ids": [str(sid) for sid in (agent.mcp_server_ids or [])],
+        "mcp_all_tools_server_ids": [
+            str(sid) for sid in (agent.mcp_all_tools_server_ids or [])
+        ],
+        "skill_ids": [str(s.id) for s in agent.skills] if agent.skills else [],
+        "knowledge_base_ids": [str(kb.id) for kb in agent.knowledge_bases] if agent.knowledge_bases else [],
+        "child_ids": [str(c.id) for c in agent.children] if agent.children else [],
+        "welcome_message": agent.welcome_message,
+        "enable_memory_extraction": agent.enable_memory_extraction,
+        "enable_auto_title": agent.enable_auto_title if agent.enable_auto_title is not None else True,
+    }
+
+
+# ---- Version Management ----
+
+
+@router.get("/api/agents/{agent_id}/versions", response_model=list[VersionOut])
+async def list_versions(
+    agent_id: UUID,
+    user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[VersionOut]:
+    """List all published versions of an agent (visible to the caller only)."""
+    agent = await _load_agent_with_relations(db, agent_id, user)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    result = await db.execute(
+        select(AgentVersion)
+        .where(AgentVersion.agent_id == agent_id)
+        .order_by(AgentVersion.published_at.desc())
+    )
+    versions = result.scalars().all()
+    return [
+        VersionOut(
+            id=v.id,
+            agent_id=v.agent_id,
+            version=v.version,
+            changelog=v.changelog,
+            published_at=v.published_at.isoformat(),
+            is_active=v.is_active,
+        )
+        for v in versions
+    ]
+
+
+@router.post("/api/agents/{agent_id}/versions", response_model=VersionOut, status_code=201)
+async def publish_version(
+    agent_id: UUID,
+    req: PublishVersionRequest,
+    user: AdminUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> VersionOut:
+    """Publish a new version of an agent (admin/owner only).
+
+    Creates a snapshot of the current agent configuration.
+    """
+    # Load agent with relations for snapshot
+    agent = await _load_agent_with_relations(db, agent_id, user)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    # Check ownership or admin
+    if agent.created_by != user.id and user.role != "admin":
+        raise HTTPException(status_code=403, detail="No permission to publish this agent")
+
+    # Generate version string
+    version = req.version or str(uuid4())[:8]
+
+    # Build config snapshot
+    config_snapshot = _build_config_snapshot(agent)
+
+    # Deactivate previous active versions
+    await db.execute(
+        update(AgentVersion)
+        .where(AgentVersion.agent_id == agent_id, AgentVersion.is_active)
+        .values(is_active=False)
+    )
+
+    # Create new version
+    new_version = AgentVersion(
+        agent_id=agent_id,
+        version=version,
+        changelog=req.changelog,
+        config_snapshot=config_snapshot,
+        published_by=user.id,
+        is_active=True,
+    )
+    db.add(new_version)
+    await db.flush()
+
+    logger.info(
+        "agent_version_published",
+        agent_id=str(agent_id),
+        version=version,
+        published_by=str(user.id),
+    )
+
+    return VersionOut(
+        id=new_version.id,
+        agent_id=new_version.agent_id,
+        version=new_version.version,
+        changelog=new_version.changelog,
+        published_at=new_version.published_at.isoformat(),
+        is_active=new_version.is_active,
+    )
+
+
+# ---- API Doc Metadata ----
+
+
+@router.get("/api/agents/{agent_id}/api-doc", response_model=AgentApiDoc)
+async def get_api_doc(
+    agent_id: UUID,
+    user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> AgentApiDoc:
+    """Get API documentation metadata for an agent."""
+    agent = await _load_agent_with_relations(db, agent_id, user)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    # Get active version
+    active_version = await _get_active_version(db, agent_id)
+    version_out = None
+    if active_version:
+        version_out = VersionOut(
+            id=active_version.id,
+            agent_id=active_version.agent_id,
+            version=active_version.version,
+            changelog=active_version.changelog,
+            published_at=active_version.published_at.isoformat(),
+            is_active=active_version.is_active,
+        )
+
+    tool_count = len(agent.enabled_tools or [])
+    skill_count = len(agent.skills) if agent.skills else 0
+
+    return AgentApiDoc(
+        agent_id=str(agent_id),
+        agent_name=agent.name,
+        agent_description=agent.description,
+        agent_icon=agent.icon,
+        model_name=agent.model.name if agent.model else None,
+        streaming_enabled=True,
+        thinking_enabled=False,
+        tool_count=tool_count,
+        skill_count=skill_count,
+        has_published_version=active_version is not None,
+        latest_version=version_out,
+    )
+
+
+# ---- Execute (Sync) ----
+
+
+@router.post("/api/agents/{agent_id}/execute", response_model=ExecuteResponse)
+async def execute_agent(
+    agent_id: UUID,
+    req: ExecuteRequest,
+    request: Request,
+    user: ExecutionUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ExecuteResponse:
+    """Synchronous one-shot execution of an agent.
+
+    Sends a message and waits for the complete response.
+    No session management needed unless session_rid is provided.
+    """
+    try:
+        return await _execute_agent_inner(agent_id, req, request, user, db)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("execute_agent_unhandled_error", error=str(e), exc_info=True)
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}") from e
+
+
+async def _execute_agent_inner(
+    agent_id: UUID,
+    req: ExecuteRequest,
+    request: Request,
+    user: User,
+    db: AsyncSession,
+) -> ExecuteResponse:
+    """Inner implementation of execute_agent."""
+    tool_executor: ToolExecutor = request.app.state.tool_executor
+
+    # Check for published version
+    active_version = await _get_active_version(db, agent_id)
+    if not active_version:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": 40001, "message": "Agent 未发布版本，请先在界面发布一个版本"},
+        )
+
+    config_snapshot = active_version.config_snapshot
+
+    # Load agent with relations
+    agent = await _load_agent_with_relations(db, agent_id, user)
+    if not agent:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": 40401, "message": "Agent 不存在"},
+        )
+
+    # Get or create session
+    session = None
+    if req.session_rid:
+        try:
+            sid = UUID(req.session_rid)
+            result = await db.execute(
+                select(Session).where(
+                    Session.id == sid, Session.user_id == user.id,
+                    Session.agent_id == agent.id, Session.source != "room",
+                )
+            )
+            session = result.scalar_one_or_none()
+            if session is not None and session.browser_private:
+                raise HTTPException(403, "本地浏览器私密会话仅支持 Web 聊天")
+            if session is None:
+                raise HTTPException(status_code=404, detail="Session not found for this agent")
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="Invalid session_rid") from exc
+
+    if not session:
+        session = Session(
+            user_id=user.id,
+            agent_id=agent_id,
+            title=req.user_input[:100],
+            source="api",
+        )
+        db.add(session)
+        await db.flush()
+
+    execution = await _prepare_published_execution(db, config_snapshot, agent.tenant_id, user.id)
+    history, _ = await execution.load_history(db, session.id)
+
+    # Build system prompt
+    if tool_executor.mcp_manager:
+        await tool_executor.mcp_manager.ensure_tools_fresh(
+            {str(sid) for sid in config_snapshot.get("mcp_server_ids", [])}
+        )
+    tools_list, tools_schema = _filter_tools_for_agent(
+        tool_executor, config_snapshot, agent.tenant_id,
+    )
+
+    system_prompt = await execution.build_prompt(
+        db, req.user_input, tools_list, agent=agent, prompt_config=config_snapshot,
+    )
+
+    # Resolve workspace (default workspace for user)
+    from agent_platform.workspaces.service import WorkspaceService
+    workspace = await WorkspaceService.get_or_create_default(db=db, user_id=user.id)
+    workspace_id = workspace.id
+    workspace_slug = workspace.slug
+
+    # Build agent loop
+    agent_loop = await execution.build_loop(
+        tool_executor, system_prompt, db,
+        workspace_id=workspace_id,
+        workspace_slug=workspace_slug,
+        allowed_tools={s["function"]["name"] for s in tools_schema},
+    )
+
+    agent_loop.execution_agent_id = agent.id
+
+    # Prepare context
+    prepared_messages, _ = await prepare_context(
+        system_prompt=system_prompt,
+        history=history,
+        user_input=req.user_input,
+        provider=agent_loop.provider,
+        existing_summary=session.context_summary,
+    )
+
+    processed_history = prepared_history(
+        prepared_messages, system_prompt=system_prompt, user_input=req.user_input,
+    )
+
+    # Save user message
+    user_msg = Message(
+        session_id=session.id,
+        user_id=user.id,
+        role="user",
+        content=req.user_input,
+    )
+    db.add(user_msg)
+    await db.flush()
+
+    # Run agent loop
+    final_output = ""
+    try:
+        async for event in agent_loop.run(
+            user_input=req.user_input,
+            user_id=user.id,
+            session_id=session.id,
+            conversation_history=processed_history,
+            tools=tools_schema,
+        ):
+            if isinstance(event, AgentStep) and event.done:
+                final_output = event.final_output
+    except Exception as e:
+        if is_context_overflow_error(e):
+            logger.warning(f"Context overflow in execute, emergency compress: {e}")
+            emergency_history = emergency_compress(prepared_messages, level=1)
+            emergency_hist = prepared_history(
+                emergency_history, system_prompt=system_prompt, user_input=req.user_input,
+            )
+            async for event in agent_loop.run(
+                user_input=req.user_input,
+                user_id=user.id,
+                session_id=session.id,
+                conversation_history=emergency_hist,
+                tools=tools_schema,
+            ):
+                if isinstance(event, AgentStep) and event.done:
+                    final_output = event.final_output
+        else:
+            logger.error("execute_agent_error", error=str(e), exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Agent execution failed: {type(e).__name__}: {e}") from e
+
+    # Save assistant message
+    assistant_msg = Message(
+        session_id=session.id,
+        user_id=user.id,
+        role="assistant",
+        content=final_output,
+    )
+    db.add(assistant_msg)
+    await db.flush()
+
+    return ExecuteResponse(
+        code=0,
+        data={
+            "markdown_response": final_output,
+            "session_rid": str(session.id),
+        },
+    )
+
+
+# ---- External Session Management ----
+
+
+@router.post("/api/agents/{agent_id}/sessions", response_model=CreateSessionResponse, status_code=201)
+async def create_external_session(
+    agent_id: UUID,
+    req: CreateSessionRequest,
+    user: ExecutionUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> CreateSessionResponse:
+    """Create a new session for external API calls (SSE streaming)."""
+    # Verify agent exists and has a published version
+    agent = await _load_agent_with_relations(db, agent_id, user)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    active_version = await _get_active_version(db, agent_id)
+    if not active_version:
+        raise HTTPException(
+            status_code=400,
+            detail="Agent 未发布版本，请先在界面发布一个版本",
+        )
+
+    session = Session(
+        user_id=user.id,
+        agent_id=agent_id,
+        title=f"API Session ({req.session_type})",
+        source="api",
+    )
+    db.add(session)
+    await db.flush()
+
+    return CreateSessionResponse(
+        code=0,
+        data={
+            "id": str(session.id),
+            "agent_id": str(agent_id),
+            "created_at": session.created_at.isoformat(),
+        },
+    )
+
+
+# ---- SSE Streaming Chat (external sessions) ----
+
+
+def _sse_event(data: dict) -> str:
+    """Format a dict as an SSE data line."""
+    return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+@router.post("/api/sessions/{session_id}/chat", response_class=EventStreamResponse, openapi_extra=sse_contract(named_events=True))
+async def sse_chat(
+    session_id: UUID,
+    req: SseChatRequest,
+    request: Request,
+    user: ExecutionUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> StreamingResponse:
+    """SSE streaming chat for external API sessions.
+
+    Accept: text/event-stream
+    """
+    tool_executor: ToolExecutor = request.app.state.tool_executor
+
+    # Load session
+    result = await db.execute(
+        select(Session).where(Session.id == session_id, Session.user_id == user.id, Session.source != "room")
+    )
+    session = result.scalar_one_or_none()
+    if session is not None and session.browser_private:
+        raise HTTPException(403, "本地浏览器私密会话仅支持 Web 聊天")
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    agent_id = session.agent_id
+    if not agent_id:
+        raise HTTPException(status_code=400, detail="Session has no associated agent")
+
+    # Check for published version
+    active_version = await _get_active_version(db, agent_id)
+    if not active_version:
+        raise HTTPException(status_code=400, detail="Agent 未发布版本")
+
+    config_snapshot = active_version.config_snapshot
+
+    # Load agent
+    agent = await _load_agent_with_relations(db, agent_id, user)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    execution = await _prepare_published_execution(db, config_snapshot, agent.tenant_id, user.id)
+
+    async def event_generator() -> AsyncIterator[str]:
+        """Generate SSE events for streaming chat."""
+        from agent_platform.db.connection import get_session_factory
+
+        async with get_session_factory()() as db_session:
+            # Send session event
+            yield f"event: session\ndata: {json.dumps({'session_id': str(session_id)}, ensure_ascii=False)}\n\n"
+
+            await owned_session(db_session, session_id, user.id)
+            history, _ = await execution.load_history(db_session, session_id)
+
+            # Build tools and system prompt
+            if tool_executor.mcp_manager:
+                await tool_executor.mcp_manager.ensure_tools_fresh(
+                    {str(sid) for sid in config_snapshot.get("mcp_server_ids", [])}
+                )
+            tools_list, tools_schema = _filter_tools_for_agent(
+                tool_executor, config_snapshot, execution.tenant_id,
+            )
+
+            system_prompt = await execution.build_prompt(
+                db_session, req.message, tools_list, agent=agent, prompt_config=config_snapshot,
+            )
+
+            # Resolve workspace (default workspace for user)
+            from agent_platform.workspaces.service import WorkspaceService
+            workspace = await WorkspaceService.get_or_create_default(db=db_session, user_id=user.id)
+            workspace_id = workspace.id
+            workspace_slug = workspace.slug
+
+            # Build agent loop
+            agent_loop = await execution.build_loop(
+                tool_executor, system_prompt, db_session,
+                workspace_id=workspace_id,
+                workspace_slug=workspace_slug,
+                allowed_tools={s["function"]["name"] for s in tools_schema},
+            )
+
+            agent_loop.execution_agent_id = agent.id
+
+            # Prepare context
+            prepared_messages, _ = await prepare_context(
+                system_prompt=system_prompt,
+                history=history,
+                user_input=req.message,
+                provider=agent_loop.provider,
+                existing_summary=session.context_summary,
+            )
+            processed_history = prepared_history(
+                prepared_messages, system_prompt=system_prompt, user_input=req.message,
+            )
+
+            # Save user message
+            user_msg = Message(
+                session_id=session_id,
+                user_id=user.id,
+                role="user",
+                content=req.message,
+            )
+            db_session.add(user_msg)
+            await db_session.flush()
+
+            # Use the same recorder as interactive and background execution.
+            turn = ChatTurnRecorder(session_id, user.id)
+            try:
+                async with aclosing(agent_loop.run(
+                    user_input=req.message,
+                    user_id=user.id,
+                    session_id=session_id,
+                    conversation_history=processed_history,
+                    tools=tools_schema,
+                )) as events:
+                    async for event in events:
+                        previous_content = turn.content
+                        payload = await turn.process(event, db_session)
+                        if isinstance(event, AgentStep) and event.done and not previous_content and turn.content:
+                            payload = {"type": "text_delta", "content": turn.content}
+                        if payload:
+                            event_type = payload.pop("type")
+                            # Preserve the published API's text_delta payload contract.
+                            if event_type == "text_delta":
+                                payload = {"text": payload["content"]}
+                            yield f"event: {event_type}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+            except Exception as e:
+                logger.exception("external_chat_failed", session_id=str(session_id))
+                yield f"event: error\ndata: {json.dumps({'code': 50002, 'message': str(e)}, ensure_ascii=False)}\n\n"
+                return
+            finally:
+                # Commit before done, and retain partial answers on disconnect.
+                with CancelScope(shield=True):
+                    await turn.save(db_session, force=True)
+
+            done_data = {
+                "message_id": str(turn.message_id),
+                "content": turn.content,
+                "trace": {"tool_calls": turn.tool_calls},
+            }
+            yield f"event: done\ndata: {json.dumps(done_data, ensure_ascii=False)}\n\n"
+
+    return EventStreamResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# ---- Session Management Endpoints ----
+
+
+@router.get("/api/sessions/{session_id}/messages")
+async def get_session_messages(
+    session_id: UUID,
+    user: ExecutionUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict:
+    """Get conversation history for an external API session."""
+    await owned_session(db, session_id, user.id)
+    result = await db.execute(
+        select(Session).where(Session.id == session_id, Session.user_id == user.id, Session.source != "room")
+    )
+    session = result.scalar_one_or_none()
+    if session is not None and session.browser_private:
+        raise HTTPException(403, "本地浏览器私密会话仅支持 Web 聊天")
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    msg_result = await db.execute(
+        select(Message)
+        .where(Message.session_id == session_id)
+        .order_by(*Message.chronological_order())
+    )
+    messages = msg_result.scalars().all()
+
+    return {
+        "code": 0,
+        "data": [
+            {
+                "id": str(msg.id),
+                "role": msg.role,
+                "content": msg.content,
+                "created_at": msg.created_at.isoformat(),
+            }
+            for msg in messages
+        ],
+    }
+
+
+@router.post("/api/sessions/{session_id}/clear")
+async def clear_session(
+    session_id: UUID,
+    user: ExecutionUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict:
+    """Clear all messages in a session (keep the session)."""
+    await owned_session(db, session_id, user.id)
+    result = await db.execute(
+        select(Session).where(Session.id == session_id, Session.user_id == user.id, Session.source != "room")
+    )
+    session = result.scalar_one_or_none()
+    if session is not None and session.browser_private:
+        raise HTTPException(403, "本地浏览器私密会话仅支持 Web 聊天")
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    from sqlalchemy import delete
+    await db.execute(delete(Message).where(Message.session_id == session_id))
+    session.context_summary = None
+
+    return {"code": 0, "data": {"message": "Session cleared"}}
+
+
+@router.post("/api/sessions/{session_id}/messages/{message_id}/feedback")
+async def submit_message_feedback(
+    session_id: UUID,
+    message_id: UUID,
+    body: dict,
+    user: ExecutionUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict:
+    """Submit feedback (up/down) for a message (session owner only)."""
+    # The session must belong to the caller, or anyone could mutate another
+    # user's message feedback.
+    await owned_session(db, session_id, user.id)
+    owned = await db.scalar(
+        select(Session.id).where(
+            Session.id == session_id, Session.user_id == user.id, Session.source != "room"
+        )
+    )
+    if not owned:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    result = await db.execute(
+        select(Message)
+        .where(Message.id == message_id, Message.session_id == session_id)
+    )
+    msg = result.scalar_one_or_none()
+    if not msg:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    feedback = body.get("feedback", "")
+    if feedback not in ("up", "down"):
+        raise HTTPException(status_code=400, detail="feedback must be 'up' or 'down'")
+
+    # Store feedback in token_usage JSONB (reuse field for simplicity)
+    token_usage = msg.token_usage or {}
+    token_usage["feedback"] = feedback
+    msg.token_usage = token_usage
+
+    return {"code": 0, "data": {"message": "Feedback recorded"}}

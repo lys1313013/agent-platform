@@ -11,9 +11,9 @@ import pytest_asyncio
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from aio_agent_platform.core.execution_scope import bind_execution_scope, execution_tenant_id
-from aio_agent_platform.cron_jobs.handlers import handle_create_cron_job
-from aio_agent_platform.db.models import (
+from agent_platform.core.execution_scope import bind_execution_scope, execution_tenant_id
+from agent_platform.cron_jobs.handlers import handle_create_cron_job
+from agent_platform.db.models import (
     Agent,
     CronJob,
     LLMModel,
@@ -22,17 +22,17 @@ from aio_agent_platform.db.models import (
     TenantMembership,
     User,
 )
-from aio_agent_platform.interface.routes.models import list_models
-from aio_agent_platform.tools import model_catalog
-from aio_agent_platform.tools.builtin import CREATE_CRON_JOB, register_builtin_tools
-from aio_agent_platform.tools.executor import ToolExecutor
-from aio_agent_platform.tools.registry import ToolRegistry
+from agent_platform.interface.routes.models import list_models
+from agent_platform.tools import model_catalog
+from agent_platform.tools.builtin import CREATE_CRON_JOB, register_builtin_tools
+from agent_platform.tools.executor import ToolExecutor
+from agent_platform.tools.registry import ToolRegistry
 
 
 @pytest.fixture
 def executor(monkeypatch):
-    monkeypatch.setattr("aio_agent_platform.tools.executor.get_hook_manager", Mock())
-    monkeypatch.setattr("aio_agent_platform.tools.executor.get_recorder", Mock())
+    monkeypatch.setattr("agent_platform.tools.executor.get_hook_manager", Mock())
+    monkeypatch.setattr("agent_platform.tools.executor.get_recorder", Mock())
     registry = ToolRegistry()
     register_builtin_tools(registry)
     executor = ToolExecutor(registry, None)
@@ -72,8 +72,8 @@ async def catalog(db_session, engine, monkeypatch):
     await db_session.commit()
     factory = async_sessionmaker(engine, expire_on_commit=False)
     monkeypatch.setattr(model_catalog, "get_session_factory", lambda: factory)
-    monkeypatch.setattr("aio_agent_platform.cron_jobs.handlers.get_session_factory", lambda: factory)
-    monkeypatch.setattr("aio_agent_platform.cron_jobs.handlers.get_global_scheduler", lambda: None)
+    monkeypatch.setattr("agent_platform.cron_jobs.handlers.get_session_factory", lambda: factory)
+    monkeypatch.setattr("agent_platform.cron_jobs.handlers.get_global_scheduler", lambda: None)
     return SimpleNamespace(a=a, b=b, user=user, agent=agent, models=models, factory=factory)
 
 

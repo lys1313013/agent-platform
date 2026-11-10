@@ -15,8 +15,8 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from aio_agent_platform.db.models import Agent, Message, Session, TokenUsageDaily, User
-from aio_agent_platform.interface.api import app
+from agent_platform.db.models import Agent, Message, Session, TokenUsageDaily, User
+from agent_platform.interface.api import app
 
 TEST_USER_ID = uuid.UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
 
@@ -24,7 +24,7 @@ TEST_USER_ID = uuid.UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
 @pytest_asyncio.fixture
 async def auth_client(client: AsyncClient, db_session: AsyncSession):
     """HTTP client with auth bypassed — returns the same user every time."""
-    from aio_agent_platform.auth.dependencies import get_current_user
+    from agent_platform.auth.dependencies import get_current_user
 
     user = User(
         id=TEST_USER_ID,

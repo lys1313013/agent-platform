@@ -14,24 +14,24 @@ import uuid
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
-from aio_agent_platform.core.agent import AgentLoop
-from aio_agent_platform.core.context import (
+from agent_platform.core.agent import AgentLoop
+from agent_platform.core.context import (
     _content_to_text,
     _fallback_summary,
     _summarize_tool_result,
     generate_summary,
 )
-from aio_agent_platform.core.ui_action import (
+from agent_platform.core.ui_action import (
     SCREENSHOT_RATE_MAX,
     UiActionManager,
     ui_action_manager,
 )
-from aio_agent_platform.llm import LLMChunk, LLMMessage, ToolCall
-from aio_agent_platform.llm.client import (
+from agent_platform.llm import LLMChunk, LLMMessage, ToolCall
+from agent_platform.llm.client import (
     build_image_message_content,
     sanitize_messages_for_trace,
 )
-from aio_agent_platform.tools.registry import Tool, ToolRegistry
+from agent_platform.tools.registry import Tool, ToolRegistry
 
 DATA_URI = "data:image/webp;base64," + "A" * 64
 

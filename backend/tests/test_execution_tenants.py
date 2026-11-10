@@ -11,16 +11,16 @@ import pytest_asyncio
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from aio_agent_platform.core import agent as agent_module
-from aio_agent_platform.core import chat
-from aio_agent_platform.core.execution_scope import (
+from agent_platform.core import agent as agent_module
+from agent_platform.core import chat
+from agent_platform.core.execution_scope import (
     ExecutionAccessError,
     bind_execution_scope,
     execution_tenant_id,
     require_execution_user,
     resolve_background_tenant,
 )
-from aio_agent_platform.db.models import (
+from agent_platform.db.models import (
     Agent,
     AgentRelationship,
     ChannelSessionMapping,
@@ -35,8 +35,8 @@ from aio_agent_platform.db.models import (
     TenantMembership,
     User,
 )
-from aio_agent_platform.delegation import handler as delegation
-from aio_agent_platform.memory.daily import DailyMemoryService, day_range_utc, local_today
+from agent_platform.delegation import handler as delegation
+from agent_platform.memory.daily import DailyMemoryService, day_range_utc, local_today
 
 
 @pytest_asyncio.fixture
@@ -59,15 +59,15 @@ async def scope_env(db_session, engine, monkeypatch):
     db_session.add_all(objects)
     await db_session.commit()
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    monkeypatch.setattr("aio_agent_platform.db.connection.get_session_factory", lambda: factory)
+    monkeypatch.setattr("agent_platform.db.connection.get_session_factory", lambda: factory)
     return SimpleNamespace(a=a, b=b, user=user, parent=parent, child=child,
                            session=session, factory=factory)
 
 
 @pytest.mark.postgres
 async def test_web_api_pet_and_session_use_object_tenant(scope_env, db_session):
-    from aio_agent_platform.interface.routes.agent_api import _load_agent_with_relations
-    from aio_agent_platform.pets.service import PetService
+    from agent_platform.interface.routes.agent_api import _load_agent_with_relations
+    from agent_platform.pets.service import PetService
 
     d = scope_env
     for agent in (
@@ -124,7 +124,7 @@ async def test_existing_and_dynamic_delegation_inherit_tenant(scope_env, db_sess
 
 @pytest.mark.postgres
 async def test_channel_commands_use_channel_tenant(scope_env, db_session):
-    from aio_agent_platform.channels.pipeline import ChannelInboundPipeline, _ResolvedContext
+    from agent_platform.channels.pipeline import ChannelInboundPipeline, _ResolvedContext
 
     d = scope_env
     db_session.add_all([CronJob(id=uuid4(), tenant_id=t.id, user_id=d.user.id,
@@ -147,7 +147,7 @@ async def test_channel_commands_use_channel_tenant(scope_env, db_session):
 
 @pytest.mark.postgres
 async def test_channel_switch_cannot_rebind_to_another_tenant(scope_env, db_session):
-    from aio_agent_platform.channels.pipeline import ChannelInboundPipeline, _ResolvedContext
+    from agent_platform.channels.pipeline import ChannelInboundPipeline, _ResolvedContext
 
     d = scope_env
     foreign = Agent(id=uuid4(), tenant_id=d.b.id, created_by=d.user.id, name="other")
@@ -175,7 +175,7 @@ async def test_channel_switch_cannot_rebind_to_another_tenant(scope_env, db_sess
 
 @pytest.mark.postgres
 async def test_room_monitor_survives_ui_switch_but_stops_on_revocation(scope_env, db_session, monkeypatch):
-    from aio_agent_platform.rooms import runtime
+    from agent_platform.rooms import runtime
 
     d = scope_env
     room = ChatRoom(id=uuid4(), tenant_id=d.a.id, user_id=d.user.id, workspace_id=uuid4(),
@@ -204,8 +204,8 @@ async def test_room_monitor_survives_ui_switch_but_stops_on_revocation(scope_env
 
 @pytest.mark.postgres
 async def test_delayed_memory_uses_source_tenant_for_model_and_write(scope_env, db_session, monkeypatch):
-    from aio_agent_platform import llm
-    from aio_agent_platform.memory.service import MemoryService
+    from agent_platform import llm
+    from agent_platform.memory.service import MemoryService
 
     d = scope_env
     complete = AsyncMock(return_value=SimpleNamespace(content='{"l3_summary":"source summary"}'))
@@ -221,7 +221,7 @@ async def test_delayed_memory_uses_source_tenant_for_model_and_write(scope_env, 
 
 @pytest.mark.postgres
 async def test_daily_batch_uses_agent_tenant_and_skips_ambiguous_history(scope_env, db_session, monkeypatch):
-    from aio_agent_platform import llm
+    from agent_platform import llm
 
     d = scope_env
     day = local_today() - timedelta(days=1)
@@ -254,7 +254,7 @@ async def test_background_rejects_mismatched_snapshot(scope_env, db_session):
 
 
 def test_nested_scope_clears_agent_and_restores_parent():
-    from aio_agent_platform.core.context import current_agent_id
+    from agent_platform.core.context import current_agent_id
 
     user_id, tenant_id, agent_id = uuid4(), uuid4(), uuid4()
     with bind_execution_scope(user_id, tenant_id, agent_id=agent_id):
@@ -265,8 +265,8 @@ def test_nested_scope_clears_agent_and_restores_parent():
 
 
 async def test_loop_requires_scope_and_cleans_it_on_cancel(monkeypatch):
-    from aio_agent_platform.llm import LLMChunk
-    from aio_agent_platform.observation.recorder import get_obs_context
+    from agent_platform.llm import LLMChunk
+    from agent_platform.observation.recorder import get_obs_context
 
     user_id, tenant_id, agent_id = uuid4(), uuid4(), uuid4()
     started = asyncio.Event()
@@ -306,8 +306,8 @@ async def test_identity_auth_ignores_disabled_ui_tenant_but_management_does_not(
     from fastapi import HTTPException
     from fastapi.security import HTTPAuthorizationCredentials
 
-    from aio_agent_platform.auth.dependencies import get_current_user, get_execution_user
-    from aio_agent_platform.auth.jwt_handler import create_access_token
+    from agent_platform.auth.dependencies import get_current_user, get_execution_user
+    from agent_platform.auth.jwt_handler import create_access_token
 
     d = scope_env
     d.b.is_active = False
@@ -327,7 +327,7 @@ async def test_identity_auth_ignores_disabled_ui_tenant_but_management_does_not(
 async def test_room_access_uses_room_tenant_and_rechecks_membership(scope_env, db_session):
     from fastapi import HTTPException
 
-    from aio_agent_platform.rooms.service import owned_room
+    from agent_platform.rooms.service import owned_room
     d = scope_env
     room = ChatRoom(id=uuid4(), tenant_id=d.a.id, user_id=d.user.id, workspace_id=uuid4(),
                     title="room", goal="goal", default_member_id=uuid4())
@@ -345,11 +345,11 @@ async def test_room_access_uses_room_tenant_and_rechecks_membership(scope_env, d
 
 @pytest.mark.postgres
 async def test_portrait_and_compact_use_command_execution_tenant(scope_env, db_session, monkeypatch):
-    from aio_agent_platform.db.models import UserProfile
-    from aio_agent_platform.interface.commands.handlers import context
-    from aio_agent_platform.interface.commands.handlers.skills_memory import cmd_portrait
-    from aio_agent_platform.interface.commands.models import CommandContext
-    from aio_agent_platform.llm import LLMMessage
+    from agent_platform.db.models import UserProfile
+    from agent_platform.interface.commands.handlers import context
+    from agent_platform.interface.commands.handlers.skills_memory import cmd_portrait
+    from agent_platform.interface.commands.models import CommandContext
+    from agent_platform.llm import LLMMessage
     d = scope_env
     db_session.add_all([UserProfile(user_id=d.user.id, tenant_id=t.id, personal_portrait=t.name)
                         for t in (d.a, d.b)])
@@ -367,7 +367,7 @@ async def test_portrait_and_compact_use_command_execution_tenant(scope_env, db_s
 
 @pytest.mark.postgres
 async def test_cron_creation_validates_scope_and_deduplicates(scope_env, db_session):
-    from aio_agent_platform.cron_jobs.service import CronJobConflict, CronJobService
+    from agent_platform.cron_jobs.service import CronJobConflict, CronJobService
     d = scope_env
     kwargs = {"db": db_session, "tenant_id": d.a.id, "user_id": d.user.id, "agent_id": d.parent.id,
               "name": "weekly", "task_config": {}, "cron_expr": "0 18 * * 0", "request_id": uuid4()}
@@ -398,7 +398,7 @@ async def test_cron_creation_validates_scope_and_deduplicates(scope_env, db_sess
 
 @pytest.mark.postgres
 async def test_room_events_survive_ui_switch_and_end_when_access_revoked(scope_env, db_session, monkeypatch):
-    from aio_agent_platform.interface.routes import rooms
+    from agent_platform.interface.routes import rooms
     d = scope_env
     room = ChatRoom(id=uuid4(), tenant_id=d.a.id, user_id=d.user.id, workspace_id=uuid4(),
                     title="room", goal="goal", default_member_id=uuid4())
@@ -423,7 +423,7 @@ async def test_room_events_survive_ui_switch_and_end_when_access_revoked(scope_e
 
 @pytest.mark.postgres
 async def test_concurrent_cron_retries_create_one_row(scope_env, db_session):
-    from aio_agent_platform.cron_jobs.service import CronJobService
+    from agent_platform.cron_jobs.service import CronJobService
     d = scope_env
     request_id = uuid4()
     async def create():

@@ -5,13 +5,13 @@ from uuid import uuid4
 
 import pytest
 
-from aio_agent_platform.delegation.handler import (
+from agent_platform.delegation.handler import (
     _build_child_tools,
     _build_dynamic_agent,
     handle_delegate_task,
 )
-from aio_agent_platform.tools.executor import ToolExecutor
-from aio_agent_platform.tools.registry import Tool, ToolRegistry
+from agent_platform.tools.executor import ToolExecutor
+from agent_platform.tools.registry import Tool, ToolRegistry
 
 
 def executor():

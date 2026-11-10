@@ -2,9 +2,9 @@
 
 import time
 
-from aio_agent_platform.core.config import WebSettings
-from aio_agent_platform.tools.web.cache import TTLCache
-from aio_agent_platform.tools.web.config import WebConfigService, overlay
+from agent_platform.core.config import WebSettings
+from agent_platform.tools.web.cache import TTLCache
+from agent_platform.tools.web.config import WebConfigService, overlay
 
 # ---- overlay ----
 

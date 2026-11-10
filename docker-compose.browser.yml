@@ -7,9 +7,9 @@ services:
       BROWSER_SECRET_KEY: ${BROWSER_SECRET_KEY:?Set an independent random browser key of at least 32 characters}
       BROWSER_PUBLIC_WSS_URL: ${BROWSER_PUBLIC_WSS_URL:?Set wss://browser.example.com/extension}
   browser-gateway:
-    image: ${BACKEND_IMAGE:-crpi-yvha9coypdedaafa.cn-beijing.personal.cr.aliyuncs.com/lys1313013/aio-agent-platform-backend:latest}
+    image: ${BACKEND_IMAGE:-crpi-yvha9coypdedaafa.cn-beijing.personal.cr.aliyuncs.com/lys1313013/agent-platform-backend:latest}
     restart: unless-stopped
-    command: ["uv", "run", "uvicorn", "aio_agent_platform.browser.app:app", "--host", "0.0.0.0", "--port", "8101", "--workers", "1", "--ws-max-size", "8388608", "--no-access-log"]
+    command: ["uv", "run", "uvicorn", "agent_platform.browser.app:app", "--host", "0.0.0.0", "--port", "8101", "--workers", "1", "--ws-max-size", "8388608", "--no-access-log"]
     environment:
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL}
       BROWSER_ENABLED: "true"

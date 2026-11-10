@@ -11,11 +11,11 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from aio_agent_platform.auth.dependencies import CurrentUser, DbSession
-from aio_agent_platform.auth.jwt_handler import create_access_token
-from aio_agent_platform.db import connection
-from aio_agent_platform.db.models import Base, MemoryVersion
-from aio_agent_platform.interface.routes.memories import router
+from agent_platform.auth.dependencies import CurrentUser, DbSession
+from agent_platform.auth.jwt_handler import create_access_token
+from agent_platform.db import connection
+from agent_platform.db.models import Base, MemoryVersion
+from agent_platform.interface.routes.memories import router
 
 pytestmark = pytest.mark.postgres
 

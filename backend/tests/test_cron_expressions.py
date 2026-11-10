@@ -3,7 +3,7 @@ from datetime import datetime
 import pytest
 from apscheduler.triggers.cron import CronTrigger
 
-from aio_agent_platform.cron_jobs.expressions import TIMEZONE, normalize_cron
+from agent_platform.cron_jobs.expressions import TIMEZONE, normalize_cron
 
 
 @pytest.mark.parametrize(('input_day', 'expected'), [

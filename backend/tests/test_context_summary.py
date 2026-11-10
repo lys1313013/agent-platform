@@ -2,8 +2,8 @@
 
 from types import SimpleNamespace
 
-from aio_agent_platform.core.context import generate_summary
-from aio_agent_platform.llm import LLMMessage
+from agent_platform.core.context import generate_summary
+from agent_platform.llm import LLMMessage
 
 
 class _CapturingProvider:

@@ -13,11 +13,11 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.ext.compiler import compiles
 
-from aio_agent_platform.core.agent import AgentStep
-from aio_agent_platform.core.chat_history import ChatTurnRecorder
-from aio_agent_platform.db.connection import current_user_id
-from aio_agent_platform.db.models import Message
-from aio_agent_platform.db.models import Session as ChatSession
+from agent_platform.core.agent import AgentStep
+from agent_platform.core.chat_history import ChatTurnRecorder
+from agent_platform.db.connection import current_user_id
+from agent_platform.db.models import Message
+from agent_platform.db.models import Session as ChatSession
 
 
 @compiles(JSONB, "sqlite")
@@ -125,7 +125,7 @@ async def test_interruption_retains_partial_history(history_factory, with_result
 
 
 async def test_rescue_updates_existing_row_and_keeps_interactive_metadata(history_factory, monkeypatch):
-    monkeypatch.setattr("aio_agent_platform.db.connection.get_session_factory", lambda: history_factory)
+    monkeypatch.setattr("agent_platform.db.connection.get_session_factory", lambda: history_factory)
     turn = ChatTurnRecorder(uuid4(), uuid4())
     async with history_factory() as db:
         await turn.process('tool_call:delegate:delegate_task:{"task":"check"}', db)
@@ -166,9 +166,9 @@ async def test_plain_answer_and_invalid_json(history_factory):
 @pytest.mark.parametrize("channel_type", ["feishu", "wecom", "wecom_bot"])
 @pytest.mark.parametrize("outcome", ["success", "failed", "cancelled"])
 async def test_channel_pipeline_uses_shared_history(history_factory, monkeypatch, channel_type, outcome):
-    from aio_agent_platform.channels import pipeline
-    from aio_agent_platform.channels.adapter import InboundEvent
-    from aio_agent_platform.channels.file_send import current_channel_send_ctx
+    from agent_platform.channels import pipeline
+    from agent_platform.channels.adapter import InboundEvent
+    from agent_platform.channels.file_send import current_channel_send_ctx
 
     channel = SimpleNamespace(
         id=uuid4(), agent_id=uuid4(), tenant_id=uuid4(), channel_type=channel_type,
@@ -186,7 +186,7 @@ async def test_channel_pipeline_uses_shared_history(history_factory, monkeypatch
     )
     pipe = pipeline.ChannelInboundPipeline(channel, adapter, tool_executor=None)
     monkeypatch.setattr(pipe, "_resolve_vision_capability", AsyncMock(return_value=(False, "openai")))
-    monkeypatch.setattr("aio_agent_platform.db.connection.get_session_factory", lambda: history_factory)
+    monkeypatch.setattr("agent_platform.db.connection.get_session_factory", lambda: history_factory)
     monkeypatch.setattr(pipeline, "load_agent", AsyncMock(return_value=agent))
     monkeypatch.setattr(pipeline, "require_execution_user", AsyncMock(return_value=SimpleNamespace()))
     monkeypatch.setattr(pipeline, "refresh_mcp_tools_for_agent", AsyncMock())

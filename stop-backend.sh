@@ -6,16 +6,16 @@
 pid=$(lsof -tnP -iTCP:8100 -sTCP:LISTEN 2>/dev/null || true)
 [ -n "$pid" ] && kill $pid 2>/dev/null || true
 
-# 杀 uv run / aio-api 包装进程
-pkill -f "aio-api$" 2>/dev/null || true
-pkill -f "uv run aio-api" 2>/dev/null || true
+# 杀 uv run / agent-api 包装进程
+pkill -f "agent-api$" 2>/dev/null || true
+pkill -f "uv run agent-api" 2>/dev/null || true
 
 sleep 1
-if pgrep -f "aio-api" >/dev/null 2>&1; then
-  pkill -9 -f "aio-api" 2>/dev/null || true
+if pgrep -f "agent-api" >/dev/null 2>&1; then
+  pkill -9 -f "agent-api" 2>/dev/null || true
 fi
 
-# reload 子进程的命令行只有 spawn_main,不会匹配 aio-api。
+# reload 子进程的命令行只有 spawn_main,不会匹配 agent-api。
 # SIGTERM 未完成退出时,按实际监听端口兜底清理,再确认端口释放。
 for attempt in 1 2 3 4 5; do
   remaining=$(lsof -tnP -iTCP:8100 -sTCP:LISTEN 2>/dev/null || true)

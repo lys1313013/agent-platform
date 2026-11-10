@@ -11,13 +11,13 @@ from uuid import uuid4
 
 import pytest
 
-from aio_agent_platform.core.agent import AgentLoop
-from aio_agent_platform.core.ui_action import (
+from agent_platform.core.agent import AgentLoop
+from agent_platform.core.ui_action import (
     REF_FAILURE_BREAKER_THRESHOLD,
     UiActionManager,
 )
-from aio_agent_platform.llm import LLMChunk, ToolCall
-from aio_agent_platform.tools.registry import Tool, ToolRegistry
+from agent_platform.llm import LLMChunk, ToolCall
+from agent_platform.tools.registry import Tool, ToolRegistry
 
 
 def _make_manager() -> UiActionManager:
@@ -184,7 +184,7 @@ async def test_ui_action_happy_path():
         while True:
             ev = await queue.get()
             if ev.get("type") == "ui_action_required":
-                from aio_agent_platform.core.ui_action import ui_action_manager
+                from agent_platform.core.ui_action import ui_action_manager
                 ui_action_manager.resolve(
                     ev["action_id"],
                     {"status": "ok", "result": {"navigated_to": "/agents"},
@@ -219,7 +219,7 @@ async def _aiter(items):
 
 
 def _make_executor_with_builtin_tools():
-    from aio_agent_platform.tools.builtin import register_builtin_tools
+    from agent_platform.tools.builtin import register_builtin_tools
 
     registry = ToolRegistry()
     register_builtin_tools(registry)
@@ -240,8 +240,8 @@ def _make_agent(enabled_tools=None):
 
 def test_ui_tools_not_injected_outside_agent_whitelist():
     """有浏览器不代表获得未配置的页面操作权限。"""
-    from aio_agent_platform.core.chat import filter_tools_by_agent
-    from aio_agent_platform.tools.builtin import FRONTEND_TOOL_NAMES
+    from agent_platform.core.chat import filter_tools_by_agent
+    from agent_platform.tools.builtin import FRONTEND_TOOL_NAMES
 
     executor = _make_executor_with_builtin_tools()
     agent = _make_agent(enabled_tools=["run_shell"])
@@ -254,8 +254,8 @@ def test_ui_tools_not_injected_outside_agent_whitelist():
 
 
 def test_only_explicitly_selected_ui_tools_are_available():
-    from aio_agent_platform.core.chat import filter_tools_by_agent
-    from aio_agent_platform.tools.builtin import FRONTEND_TOOL_NAMES
+    from agent_platform.core.chat import filter_tools_by_agent
+    from agent_platform.tools.builtin import FRONTEND_TOOL_NAMES
 
     tools, schema = filter_tools_by_agent(
         _make_executor_with_builtin_tools(),
@@ -267,16 +267,16 @@ def test_only_explicitly_selected_ui_tools_are_available():
 
 @pytest.mark.parametrize("enabled_tools", [None, []])
 def test_legacy_all_tools_default_is_preserved(enabled_tools):
-    from aio_agent_platform.core.chat import filter_tools_by_agent
-    from aio_agent_platform.tools.builtin import FRONTEND_TOOL_NAMES
+    from agent_platform.core.chat import filter_tools_by_agent
+    from agent_platform.tools.builtin import FRONTEND_TOOL_NAMES
 
     _, schema = filter_tools_by_agent(_make_executor_with_builtin_tools(), _make_agent(enabled_tools))
     assert set(FRONTEND_TOOL_NAMES) <= {s["function"]["name"] for s in schema}
 
 
 async def test_unconfigured_ui_call_is_denied_before_browser_dispatch(monkeypatch):
-    import aio_agent_platform.core.agent as agent_module
-    from aio_agent_platform.core.chat import filter_tools_by_agent
+    import agent_platform.core.agent as agent_module
+    from agent_platform.core.chat import filter_tools_by_agent
 
     # This permission regression tests the real agent/tool boundary, not
     # background accounting or observability I/O against a database.
@@ -307,7 +307,7 @@ async def test_unconfigured_ui_call_is_denied_before_browser_dispatch(monkeypatc
 
 @pytest.mark.parametrize("allowed", [set(), {"run_shell"}, {"ui_read_screen"}])
 def test_page_context_does_not_advertise_unavailable_click_actions(allowed):
-    from aio_agent_platform.interface.routes.chat import _format_page_context_section
+    from agent_platform.interface.routes.chat import _format_page_context_section
 
     section = _format_page_context_section({"page_path": "/agents", "actions": [
         {"name": "nav.goto_skills", "description": "查看技能"},
@@ -318,7 +318,7 @@ def test_page_context_does_not_advertise_unavailable_click_actions(allowed):
 
 
 def test_page_context_advertises_authorized_click_actions():
-    from aio_agent_platform.interface.routes.chat import _format_page_context_section
+    from agent_platform.interface.routes.chat import _format_page_context_section
 
     section = _format_page_context_section({"actions": [
         {"name": "nav.goto_skills", "description": "查看技能"},
@@ -328,8 +328,8 @@ def test_page_context_advertises_authorized_click_actions():
 
 def test_ui_tools_excluded_by_blacklist():
     """非 SSE 调用方经 extra_blacklist 排除 ui_*（cron/渠道/预览/非流式）。"""
-    from aio_agent_platform.core.chat import filter_tools_by_agent
-    from aio_agent_platform.tools.builtin import FRONTEND_TOOL_NAMES
+    from agent_platform.core.chat import filter_tools_by_agent
+    from agent_platform.tools.builtin import FRONTEND_TOOL_NAMES
 
     executor = _make_executor_with_builtin_tools()
     tools_list, tools_schema = filter_tools_by_agent(

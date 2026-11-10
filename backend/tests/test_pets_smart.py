@@ -10,9 +10,9 @@ import pytest_asyncio
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from aio_agent_platform.db.models import Agent, PetPackage, UserPet
-from aio_agent_platform.pets.service import PetService, build_actions
-from aio_agent_platform.pets.smart import parse_bubble_output
+from agent_platform.db.models import Agent, PetPackage, UserPet
+from agent_platform.pets.service import PetService, build_actions
+from agent_platform.pets.smart import parse_bubble_output
 from tests.test_pets_api import (
     OWNER_ID,
     TENANT_A,
@@ -34,13 +34,13 @@ def fake_storage(monkeypatch):
     from tests.test_pets_api import FakeStorage
 
     FakeStorage.objects = {}
-    monkeypatch.setattr("aio_agent_platform.pets.service.ObjectStorage", FakeStorage)
+    monkeypatch.setattr("agent_platform.pets.service.ObjectStorage", FakeStorage)
 
 
 @pytest_asyncio.fixture(autouse=True)
 async def _cleanup_records(db_session: AsyncSession):
     yield
-    from aio_agent_platform.db.models import (
+    from agent_platform.db.models import (
         PetExpLog,
         PetPackage,
         Session,

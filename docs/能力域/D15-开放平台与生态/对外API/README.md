@@ -485,7 +485,7 @@ POST /api/sessions/{session_id}/messages/{message_id}/feedback
 
 ### 8.1 新增路由
 
-在 `backend/src/aio_agent/interface/routes/` 下新增 `agent_api.py`：
+在 `backend/src/agent_platform/interface/routes/` 下新增 `agent_api.py`：
 
 | 路由 | 方法 | 说明 | 认证 |
 |------|------|------|------|

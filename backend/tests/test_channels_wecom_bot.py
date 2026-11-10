@@ -13,12 +13,12 @@ from uuid import uuid4
 import pytest
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-from aio_agent_platform.channels.adapter import ChatKind, InboundEvent
-from aio_agent_platform.channels.registry import get_channel_spec
-from aio_agent_platform.channels.wecom_bot import ws_transport as _ws_mod
-from aio_agent_platform.channels.wecom_bot.adapter import WeComBotAdapter, _decrypt_file
-from aio_agent_platform.channels.wecom_bot.events import normalize_event
-from aio_agent_platform.channels.wecom_bot.ws_transport import (
+from agent_platform.channels.adapter import ChatKind, InboundEvent
+from agent_platform.channels.registry import get_channel_spec
+from agent_platform.channels.wecom_bot import ws_transport as _ws_mod
+from agent_platform.channels.wecom_bot.adapter import WeComBotAdapter, _decrypt_file
+from agent_platform.channels.wecom_bot.events import normalize_event
+from agent_platform.channels.wecom_bot.ws_transport import (
     StreamExpiredError,
     WeComBotTransport,
 )

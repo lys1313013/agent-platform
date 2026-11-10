@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from aio_agent_platform.db import connection
+from agent_platform.db import connection
 
 
 class _ConnectionContext:

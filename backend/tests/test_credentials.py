@@ -1,6 +1,6 @@
 """Credential encryption round-trips and tolerates legacy plaintext rows."""
 
-from aio_agent_platform.core.credentials import decrypt_secret, encrypt_secret
+from agent_platform.core.credentials import decrypt_secret, encrypt_secret
 
 
 def test_encrypt_roundtrip():

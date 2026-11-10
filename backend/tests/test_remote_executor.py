@@ -6,9 +6,9 @@ from uuid import uuid4
 import httpx
 import pytest
 
-from aio_agent_platform.tools.registry import ToolRegistry
-from aio_agent_platform.tools.remote.executor import RemoteToolExecutor, _split_path
-from aio_agent_platform.tools.remote.manager import RemoteToolConfig, RemoteToolManager
+from agent_platform.tools.registry import ToolRegistry
+from agent_platform.tools.remote.executor import RemoteToolExecutor, _split_path
+from agent_platform.tools.remote.manager import RemoteToolConfig, RemoteToolManager
 
 
 def make_config(**kwargs):
@@ -281,7 +281,7 @@ class TestCall:
             mock_client.__aexit__ = AsyncMock(return_value=None)
             mock_client_cls.return_value = mock_client
 
-            from aio_agent_platform.tools.remote.executor import RemoteToolError
+            from agent_platform.tools.remote.executor import RemoteToolError
             with pytest.raises(RemoteToolError, match="HTTP 404"):
                 await executor.call("error_tool", {})
 
@@ -298,7 +298,7 @@ class TestCall:
             mock_client.__aexit__ = AsyncMock(return_value=None)
             mock_client_cls.return_value = mock_client
 
-            from aio_agent_platform.tools.remote.executor import RemoteToolError
+            from agent_platform.tools.remote.executor import RemoteToolError
             with pytest.raises(RemoteToolError, match="timed out"):
                 await executor.call("timeout_tool", {})
 
@@ -306,7 +306,7 @@ class TestCall:
     async def test_tool_not_found(self, setup):
         _manager, executor = setup
 
-        from aio_agent_platform.tools.remote.executor import RemoteToolError
+        from agent_platform.tools.remote.executor import RemoteToolError
         with pytest.raises(RemoteToolError, match="not found"):
             await executor.call("nonexistent", {})
 

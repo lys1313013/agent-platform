@@ -2,9 +2,9 @@
 
 import pytest
 
-from aio_agent_platform.core.config import WebSettings
-from aio_agent_platform.tools.web import ssrf
-from aio_agent_platform.tools.web.fetch import WebFetcher
+from agent_platform.core.config import WebSettings
+from agent_platform.tools.web import ssrf
+from agent_platform.tools.web.fetch import WebFetcher
 
 
 @pytest.fixture(autouse=True)
@@ -224,7 +224,7 @@ async def test_summary_replaces_truncation_when_enabled(monkeypatch, pinned):
     from contextlib import nullcontext
     from uuid import UUID
 
-    from aio_agent_platform.core.execution_scope import bind_execution_scope
+    from agent_platform.core.execution_scope import bind_execution_scope
 
     user_id = UUID("00000000-0000-0000-0000-000000000002")
     job_tenant = UUID("00000000-0000-0000-0000-000000000003")
@@ -259,10 +259,10 @@ async def test_summary_replaces_truncation_when_enabled(monkeypatch, pinned):
 
     monkeypatch.setattr(fetcher, "_fetch", fake_fetch)
     monkeypatch.setattr(
-        "aio_agent_platform.tools.web.summarize.summarize_content", fake_summarize
+        "agent_platform.tools.web.summarize.summarize_content", fake_summarize
     )
     monkeypatch.setattr(
-        "aio_agent_platform.tools.web.fetch.get_session_factory", FakeFactory
+        "agent_platform.tools.web.fetch.get_session_factory", FakeFactory
     )
 
     with bind_execution_scope(user_id, job_tenant) if pinned else nullcontext():
@@ -286,7 +286,7 @@ async def test_summary_falls_back_to_truncation_on_failure(monkeypatch):
 
     monkeypatch.setattr(fetcher, "_fetch", fake_fetch)
     monkeypatch.setattr(
-        "aio_agent_platform.tools.web.summarize.summarize_content", fake_summarize
+        "agent_platform.tools.web.summarize.summarize_content", fake_summarize
     )
 
     out = await fetcher.handle({"url": "http://example.com", "max_chars": 1000})

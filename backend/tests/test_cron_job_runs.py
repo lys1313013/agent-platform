@@ -11,9 +11,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import sessionmaker
 
-from aio_agent_platform.core.execution_scope import bind_execution_scope
-from aio_agent_platform.cron_jobs.scheduler import Scheduler
-from aio_agent_platform.db.models import (
+from agent_platform.core.execution_scope import bind_execution_scope
+from agent_platform.cron_jobs.scheduler import Scheduler
+from agent_platform.db.models import (
     DEFAULT_TENANT_ID,
     Agent,
     ChannelConfig,
@@ -23,14 +23,14 @@ from aio_agent_platform.db.models import (
     TenantMembership,
     User,
 )
-from aio_agent_platform.interface.api import app
+from agent_platform.interface.api import app
 
 
 @pytest.fixture(autouse=True)
 def allow_occurrence_claim(monkeypatch):
     """Run-log tests isolate Redis; real contention is covered in test_cron_claims."""
     monkeypatch.setattr(
-        "aio_agent_platform.cron_jobs.claims.OccurrenceClaims.claim",
+        "agent_platform.cron_jobs.claims.OccurrenceClaims.claim",
         AsyncMock(return_value=True),
     )
 
@@ -38,7 +38,7 @@ def allow_occurrence_claim(monkeypatch):
 @pytest_asyncio.fixture
 async def cron_client(client: AsyncClient, db_session: AsyncSession, engine):
     """HTTP client with auth bypassed and a real Scheduler on app.state."""
-    from aio_agent_platform.auth.dependencies import get_current_user, get_execution_user
+    from agent_platform.auth.dependencies import get_current_user, get_execution_user
 
     db_session.add(Tenant(id=DEFAULT_TENANT_ID, name="default", slug="default"))
     user = User(
@@ -390,7 +390,7 @@ async def test_rest_manual_run_now(cron_client, db_session: AsyncSession):
 
 async def test_cron_job_tenant_isolation(client, db_session: AsyncSession):
     """A user must not see or manage a cron job belonging to another tenant."""
-    from aio_agent_platform.auth.dependencies import get_current_user, get_execution_user
+    from agent_platform.auth.dependencies import get_current_user, get_execution_user
 
     tenant_a = Tenant(name="tenant-a", slug="cron-iso-a")
     tenant_b = Tenant(name="tenant-b", slug="cron-iso-b")
@@ -456,7 +456,7 @@ def _test_factory(engine):
 
 
 async def test_handler_create_cron_job_sets_tenant_id(engine, db_session, monkeypatch):
-    from aio_agent_platform.cron_jobs.handlers import handle_create_cron_job
+    from agent_platform.cron_jobs.handlers import handle_create_cron_job
 
     tenant = Tenant(name="handler-tenant", slug="cron-handler-create")
     db_session.add(tenant)
@@ -473,7 +473,7 @@ async def test_handler_create_cron_job_sets_tenant_id(engine, db_session, monkey
 
     factory = _test_factory(engine)
     monkeypatch.setattr(
-        "aio_agent_platform.cron_jobs.handlers.get_session_factory",
+        "agent_platform.cron_jobs.handlers.get_session_factory",
         lambda: factory,
     )
 
@@ -500,7 +500,7 @@ async def test_handler_create_cron_job_derives_tenant_from_agent(
 
     曾出现创建路径漏传 tenant_id、静默回退到默认租户导致任务在管理页不可见。
     """
-    from aio_agent_platform.cron_jobs.handlers import handle_create_cron_job
+    from agent_platform.cron_jobs.handlers import handle_create_cron_job
 
     tenant = Tenant(name="handler-agent-tenant", slug="cron-handler-agent")
     db_session.add(tenant)
@@ -523,7 +523,7 @@ async def test_handler_create_cron_job_derives_tenant_from_agent(
 
     factory = _test_factory(engine)
     monkeypatch.setattr(
-        "aio_agent_platform.cron_jobs.handlers.get_session_factory",
+        "agent_platform.cron_jobs.handlers.get_session_factory",
         lambda: factory,
     )
 
@@ -553,11 +553,11 @@ async def test_handler_create_cron_job_autobinds_channel(engine, db_session, mon
     """渠道会话中创建任务且未显式传 channel_id 时，自动绑定当前渠道。"""
     from types import SimpleNamespace
 
-    from aio_agent_platform.channels.file_send import (
+    from agent_platform.channels.file_send import (
         ChannelSendContext,
         current_channel_send_ctx,
     )
-    from aio_agent_platform.cron_jobs.handlers import handle_create_cron_job
+    from agent_platform.cron_jobs.handlers import handle_create_cron_job
 
     tenant = Tenant(name="handler-tenant-ch", slug="cron-handler-ch")
     db_session.add(tenant)
@@ -574,7 +574,7 @@ async def test_handler_create_cron_job_autobinds_channel(engine, db_session, mon
 
     factory = _test_factory(engine)
     monkeypatch.setattr(
-        "aio_agent_platform.cron_jobs.handlers.get_session_factory",
+        "agent_platform.cron_jobs.handlers.get_session_factory",
         lambda: factory,
     )
 
@@ -608,11 +608,11 @@ async def test_handler_create_cron_job_explicit_channel_wins(engine, db_session,
     """显式传入 channel_id 时不被渠道上下文覆盖。"""
     from types import SimpleNamespace
 
-    from aio_agent_platform.channels.file_send import (
+    from agent_platform.channels.file_send import (
         ChannelSendContext,
         current_channel_send_ctx,
     )
-    from aio_agent_platform.cron_jobs.handlers import handle_create_cron_job
+    from agent_platform.cron_jobs.handlers import handle_create_cron_job
 
     tenant = Tenant(name="handler-tenant-ch2", slug="cron-handler-ch2")
     db_session.add(tenant)
@@ -629,7 +629,7 @@ async def test_handler_create_cron_job_explicit_channel_wins(engine, db_session,
 
     factory = _test_factory(engine)
     monkeypatch.setattr(
-        "aio_agent_platform.cron_jobs.handlers.get_session_factory",
+        "agent_platform.cron_jobs.handlers.get_session_factory",
         lambda: factory,
     )
 
@@ -667,7 +667,7 @@ async def test_handler_create_cron_job_explicit_channel_wins(engine, db_session,
 
 
 async def test_handler_list_cron_jobs_scoped_to_tenant(engine, db_session, monkeypatch):
-    from aio_agent_platform.cron_jobs.handlers import handle_list_cron_jobs
+    from agent_platform.cron_jobs.handlers import handle_list_cron_jobs
 
     tenant_a = Tenant(name="ta", slug="cron-handler-list-a")
     tenant_b = Tenant(name="tb", slug="cron-handler-list-b")
@@ -689,7 +689,7 @@ async def test_handler_list_cron_jobs_scoped_to_tenant(engine, db_session, monke
 
     factory = _test_factory(engine)
     monkeypatch.setattr(
-        "aio_agent_platform.cron_jobs.handlers.get_session_factory",
+        "agent_platform.cron_jobs.handlers.get_session_factory",
         lambda: factory,
     )
     async with factory() as db:
@@ -711,7 +711,7 @@ async def test_handler_list_cron_jobs_scoped_to_tenant(engine, db_session, monke
 
 
 async def test_handler_delete_cron_job_scoped_to_tenant(engine, db_session, monkeypatch):
-    from aio_agent_platform.cron_jobs.handlers import handle_delete_cron_job
+    from agent_platform.cron_jobs.handlers import handle_delete_cron_job
 
     tenant_a = Tenant(name="ta", slug="cron-handler-del-a")
     tenant_b = Tenant(name="tb", slug="cron-handler-del-b")
@@ -733,7 +733,7 @@ async def test_handler_delete_cron_job_scoped_to_tenant(engine, db_session, monk
 
     factory = _test_factory(engine)
     monkeypatch.setattr(
-        "aio_agent_platform.cron_jobs.handlers.get_session_factory",
+        "agent_platform.cron_jobs.handlers.get_session_factory",
         lambda: factory,
     )
     async with factory() as db:
@@ -770,7 +770,7 @@ async def _add_channel(db, channel_id, tenant_id):
 
 
 async def test_rest_model_override_create_update_clear(cron_client, db_session):
-    from aio_agent_platform.db.models import LLMModel, LLMProvider
+    from agent_platform.db.models import LLMModel, LLMProvider
 
     client, _, user = cron_client
     provider = LLMProvider(id=uuid4(), tenant_id=user.tenant_id, name="models", provider_type="openai")
@@ -804,7 +804,7 @@ async def test_rest_model_override_create_update_clear(cron_client, db_session):
 
 @pytest.mark.parametrize("unavailable", ["missing", "tenant", "inactive", "provider_inactive", "provider_tenant", "provider_missing"])
 async def test_rest_rejects_unavailable_model(cron_client, db_session, unavailable):
-    from aio_agent_platform.db.models import LLMModel, LLMProvider
+    from agent_platform.db.models import LLMModel, LLMProvider
 
     client, _, user = cron_client
     other_tenant = Tenant(id=uuid4(), name="other", slug=str(uuid4()))

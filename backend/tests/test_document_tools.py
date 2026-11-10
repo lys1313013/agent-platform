@@ -21,14 +21,14 @@ from pptx import Presentation
 from pptx.util import Inches
 from reportlab.pdfgen import canvas
 
-from aio_agent_platform.core.agent import AgentLoop
-from aio_agent_platform.core.chat_history import ChatTurnRecorder
-from aio_agent_platform.core.task_scope import call_key, completed_calls
-from aio_agent_platform.llm.client import LLMChunk, ToolCall, sanitize_messages_for_trace
-from aio_agent_platform.tools.document_runtime import run
-from aio_agent_platform.tools.document_tools import DOCUMENT_TOOLS
-from aio_agent_platform.tools.executor import ToolExecutor
-from aio_agent_platform.tools.registry import ToolRegistry
+from agent_platform.core.agent import AgentLoop
+from agent_platform.core.chat_history import ChatTurnRecorder
+from agent_platform.core.task_scope import call_key, completed_calls
+from agent_platform.llm.client import LLMChunk, ToolCall, sanitize_messages_for_trace
+from agent_platform.tools.document_runtime import run
+from agent_platform.tools.document_tools import DOCUMENT_TOOLS
+from agent_platform.tools.executor import ToolExecutor
+from agent_platform.tools.registry import ToolRegistry
 
 
 @pytest.fixture
@@ -131,7 +131,7 @@ def test_pptx_slide_selection(documents):
 
 
 def test_lightweight_mode_reads_office_without_libreoffice(documents, monkeypatch):
-    monkeypatch.setattr("aio_agent_platform.tools.document_runtime.shutil.which", lambda _: None)
+    monkeypatch.setattr("agent_platform.tools.document_runtime.shutil.which", lambda _: None)
     for filename in ["contract.docx", "budget.xlsx", "slides.pptx"]:
         assert call(documents, path=filename)["blocks"]
         with pytest.raises(ValueError, match="optional and not installed"):
@@ -212,8 +212,8 @@ def test_path_escape_symlinks_and_bad_selectors(documents, tmp_path_factory):
 @pytest.fixture
 def executor(documents, monkeypatch):
     hooks, recorder = MagicMock(), MagicMock()
-    monkeypatch.setattr("aio_agent_platform.tools.executor.get_hook_manager", lambda: hooks)
-    monkeypatch.setattr("aio_agent_platform.tools.executor.get_recorder", lambda: recorder)
+    monkeypatch.setattr("agent_platform.tools.executor.get_hook_manager", lambda: hooks)
+    monkeypatch.setattr("agent_platform.tools.executor.get_recorder", lambda: recorder)
 
     async def execute(_sandbox, command):
         argv = shlex.split(command)

@@ -1,6 +1,6 @@
 """Auto session-title unit tests."""
 
-from aio_agent_platform.core.auto_title import DEFAULT_PROMPT, MAX_TITLE_LENGTH, _clean_title
+from agent_platform.core.auto_title import DEFAULT_PROMPT, MAX_TITLE_LENGTH, _clean_title
 
 
 def test_default_prompt_has_message_placeholder():

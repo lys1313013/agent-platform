@@ -1,6 +1,6 @@
 """Regression coverage for persisted assistant reasoning."""
 
-from aio_agent_platform.core.chat_history import _append_reasoning_chunk
+from agent_platform.core.chat_history import _append_reasoning_chunk
 
 
 def test_reasoning_chunks_keep_iteration_order() -> None:
@@ -26,7 +26,7 @@ def test_empty_reasoning_chunk_is_ignored() -> None:
 def test_recorder_keeps_reasoning_between_parallel_tool_batches():
     from uuid import uuid4
 
-    from aio_agent_platform.core.chat_history import ChatTurnRecorder
+    from agent_platform.core.chat_history import ChatTurnRecorder
 
     turn = ChatTurnRecorder(uuid4(), uuid4())
     for event in [
@@ -39,7 +39,7 @@ def test_recorder_keeps_reasoning_between_parallel_tool_batches():
 
 
 def test_old_reasoning_order_is_restored_only_with_complete_event_evidence():
-    from aio_agent_platform.core.chat_history import restore_reasoning_order
+    from agent_platform.core.chat_history import restore_reasoning_order
 
     old = [{'id': 'thinking-0', 'content': '先搜索'}, {'id': 'thinking-1', 'content': '再读取'}]
     events = [
@@ -54,7 +54,7 @@ def test_old_reasoning_order_is_restored_only_with_complete_event_evidence():
 
 
 def test_snapshot_retains_positions_for_interruption_and_legacy_done():
-    from aio_agent_platform.core.chat_runs import snapshot_event
+    from agent_platform.core.chat_runs import snapshot_event
 
     snapshot = {}
     for event in [

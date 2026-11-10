@@ -18,16 +18,16 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from aio_agent_platform.channels.adapter import InboundEvent
-from aio_agent_platform.channels.feishu.events import normalize_recall_event
-from aio_agent_platform.channels.pipeline import (
+from agent_platform.channels.adapter import InboundEvent
+from agent_platform.channels.feishu.events import normalize_recall_event
+from agent_platform.channels.pipeline import (
     ChannelInboundPipeline,
     _BufferedEventLogger,
     _recalled_messages,
     _ResolvedContext,
     _StreamingReply,
 )
-from aio_agent_platform.core.chat_history import ChatTurnRecorder
+from agent_platform.core.chat_history import ChatTurnRecorder
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -355,7 +355,7 @@ async def test_finalize_interrupted_persists_partial_and_marks_card(
 ) -> None:
     fake_db = _FakeDB()
     monkeypatch.setattr(
-        "aio_agent_platform.db.connection.get_session_factory",
+        "agent_platform.db.connection.get_session_factory",
         lambda: (lambda: _FakeDBCtx(fake_db)),
     )
     logged: list[dict] = []
@@ -364,7 +364,7 @@ async def test_finalize_interrupted_persists_partial_and_marks_card(
         logged.append(event)
 
     monkeypatch.setattr(
-        "aio_agent_platform.channels.pipeline.log_event", fake_log_event
+        "agent_platform.channels.pipeline.log_event", fake_log_event
     )
 
     pipe = _make_pipeline()

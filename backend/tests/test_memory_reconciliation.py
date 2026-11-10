@@ -9,9 +9,9 @@ from uuid import uuid4
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from aio_agent_platform.db.models import Memory
-from aio_agent_platform.memory.reconciliation import reconcile_memory
-from aio_agent_platform.memory.service import MemoryService
+from agent_platform.db.models import Memory
+from agent_platform.memory.reconciliation import reconcile_memory
+from agent_platform.memory.service import MemoryService
 
 
 @pytest.fixture
@@ -34,7 +34,7 @@ def model(monkeypatch):
     provider = SimpleNamespace(complete=AsyncMock())
     factory = AsyncMock(return_value=provider)
     monkeypatch.setattr(
-        "aio_agent_platform.memory.reconciliation.create_default_provider_for_user", factory
+        "agent_platform.memory.reconciliation.create_default_provider_for_user", factory
     )
     return provider
 
@@ -171,7 +171,7 @@ async def test_revisions_bounded(db_session, model):
 
 
 async def test_tool_and_extraction_call_reconciliation_without_database(monkeypatch):
-    from aio_agent_platform.memory.handlers import handle_memory_write
+    from agent_platform.memory.handlers import handle_memory_write
 
     uid, agent, session_id, tenant = uuid4(), uuid4(), uuid4(), uuid4()
     memory = Memory(id=uuid4(), content='英语初学者')
@@ -180,12 +180,12 @@ async def test_tool_and_extraction_call_reconciliation_without_database(monkeypa
     db.scalar.return_value = agent
     db.scalars.return_value = SimpleNamespace(all=lambda: [memory])
     factory = MagicMock(return_value=db)
-    monkeypatch.setattr('aio_agent_platform.memory.handlers.get_session_factory', lambda: factory)
-    monkeypatch.setattr('aio_agent_platform.memory.handlers._active_agent', AsyncMock(return_value=agent))
-    monkeypatch.setattr('aio_agent_platform.db.connection.get_session_factory', lambda: factory)
+    monkeypatch.setattr('agent_platform.memory.handlers.get_session_factory', lambda: factory)
+    monkeypatch.setattr('agent_platform.memory.handlers._active_agent', AsyncMock(return_value=agent))
+    monkeypatch.setattr('agent_platform.db.connection.get_session_factory', lambda: factory)
     reconcile = AsyncMock(return_value=(memory, 'skipped'))
-    monkeypatch.setattr('aio_agent_platform.memory.handlers.reconcile_memory', reconcile)
-    monkeypatch.setattr('aio_agent_platform.memory.reconciliation.reconcile_memory', reconcile)
+    monkeypatch.setattr('agent_platform.memory.handlers.reconcile_memory', reconcile)
+    monkeypatch.setattr('agent_platform.memory.reconciliation.reconcile_memory', reconcile)
     result = await handle_memory_write({'layer': 'L2', 'content': '刚入门'}, str(uid), str(session_id))
     assert 'skipped' in result
     assert reconcile.call_args.args[:4] == (db, uid, 'L2', '刚入门')
@@ -197,14 +197,14 @@ async def test_tool_and_extraction_call_reconciliation_without_database(monkeypa
     provider = SimpleNamespace(complete=AsyncMock(return_value=SimpleNamespace(content=json.dumps({
         'l2_memories': [{'content': '正在学英语'}], 'l3_summary': '',
     }))))
-    from aio_agent_platform.core.execution_scope import execution_tenant_id
+    from agent_platform.core.execution_scope import execution_tenant_id
 
     async def get_provider(user_id):
         assert user_id == uid
         assert execution_tenant_id(uid) == tenant
         return provider
 
-    monkeypatch.setattr('aio_agent_platform.memory.service.create_default_provider_for_user',
+    monkeypatch.setattr('agent_platform.memory.service.create_default_provider_for_user',
                         get_provider)
     rows = await MemoryService.extract_memories_from_conversation(uid, session_id, [], agent_id=agent)
     assert rows == [memory]

@@ -14,9 +14,9 @@ from alembic import context
 load_dotenv()
 
 # Import our models and Base so alembic can detect schema changes
-from aio_agent_platform.core.config import settings  # noqa: E402
-from aio_agent_platform.db.models import Base  # noqa: E402
-from aio_agent_platform.db.schema import (  # noqa: E402
+from agent_platform.core.config import settings  # noqa: E402
+from agent_platform.db.models import Base  # noqa: E402
+from agent_platform.db.schema import (  # noqa: E402
     database_schema_state,
     require_known_tenant_ownership,
 )

@@ -30,7 +30,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from aio_agent_platform.db.models import Base
+from agent_platform.db.models import Base
 
 
 def _all_models():

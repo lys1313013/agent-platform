@@ -8,7 +8,7 @@ echo ">> 同步依赖..."
 (cd "$ROOT/backend" && uv sync --all-extras)
 
 # 启动后端（后台运行）
-(cd "$ROOT/backend" && uv run aio-api) &
+(cd "$ROOT/backend" && uv run agent-api) &
 BACKEND_PID=$!
 
 # 启动前端（后台运行）

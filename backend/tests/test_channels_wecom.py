@@ -15,14 +15,14 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-from aio_agent_platform.channels.adapter import InboundEvent
-from aio_agent_platform.channels.registry import get_channel_spec
-from aio_agent_platform.channels.webhook import _webhook_registry, build_webhook_router
-from aio_agent_platform.channels.wecom.adapter import WeComAdapter
-from aio_agent_platform.channels.wecom.client import WeComClient
-from aio_agent_platform.channels.wecom.crypto import decrypt, verify_signature
-from aio_agent_platform.channels.wecom.events import normalize_event
-from aio_agent_platform.channels.wecom.webhook_transport import WeComWebhookTransport
+from agent_platform.channels.adapter import InboundEvent
+from agent_platform.channels.registry import get_channel_spec
+from agent_platform.channels.webhook import _webhook_registry, build_webhook_router
+from agent_platform.channels.wecom.adapter import WeComAdapter
+from agent_platform.channels.wecom.client import WeComClient
+from agent_platform.channels.wecom.crypto import decrypt, verify_signature
+from agent_platform.channels.wecom.events import normalize_event
+from agent_platform.channels.wecom.webhook_transport import WeComWebhookTransport
 
 _CORPID = "ww1234567890"
 _TOKEN = "wecom_callback_token"
@@ -66,7 +66,7 @@ def test_wecom_spec_registered() -> None:
 async def test_wecom_spec_build_wires_transport_and_registers() -> None:
     from types import SimpleNamespace
 
-    from aio_agent_platform.channels.wecom.webhook_transport import WeComWebhookTransport
+    from agent_platform.channels.wecom.webhook_transport import WeComWebhookTransport
 
     channel = SimpleNamespace(
         id=uuid4(),

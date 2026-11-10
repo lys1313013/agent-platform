@@ -9,16 +9,16 @@ from uuid import uuid4
 import pytest
 from fastapi import FastAPI
 
-from aio_agent_platform.channels import connection_manager
-from aio_agent_platform.channels.adapter import InboundEvent
-from aio_agent_platform.channels.pipeline import ChannelInboundPipeline
-from aio_agent_platform.core.task_events import TaskEventBroker
-from aio_agent_platform.cron_jobs import scheduler as scheduler_module
-from aio_agent_platform.hooks.manager import HookManager
-from aio_agent_platform.interface import bootstrap, lifecycle
-from aio_agent_platform.observation.recorder import Recorder
-from aio_agent_platform.tools.mcp import manager as mcp_module
-from aio_agent_platform.tools.mcp.manager import MCPManager
+from agent_platform.channels import connection_manager
+from agent_platform.channels.adapter import InboundEvent
+from agent_platform.channels.pipeline import ChannelInboundPipeline
+from agent_platform.core.task_events import TaskEventBroker
+from agent_platform.cron_jobs import scheduler as scheduler_module
+from agent_platform.hooks.manager import HookManager
+from agent_platform.interface import bootstrap, lifecycle
+from agent_platform.observation.recorder import Recorder
+from agent_platform.tools.mcp import manager as mcp_module
+from agent_platform.tools.mcp.manager import MCPManager
 
 
 @pytest.fixture

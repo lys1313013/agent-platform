@@ -1,5 +1,5 @@
 {
-  "name": "aio-agent-platform-web",
+  "name": "agent-platform-web",
   "private": true,
   "version": "0.1.0",
   "type": "module",

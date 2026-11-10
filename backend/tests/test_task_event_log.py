@@ -6,7 +6,7 @@ import uuid
 
 import pytest
 
-from aio_agent_platform.core import task_event_log
+from agent_platform.core import task_event_log
 
 
 async def _skip_if_no_redis() -> None:

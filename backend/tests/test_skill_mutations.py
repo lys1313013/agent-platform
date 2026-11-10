@@ -9,14 +9,14 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from aio_agent_platform.db.models import Skill, SkillMutation, SkillVersion
-from aio_agent_platform.skills.contracts import SkillError, normalize_files
-from aio_agent_platform.skills.mutations import mutate_skill
-from aio_agent_platform.skills.service import SkillService
-from aio_agent_platform.skills.storage import SkillStorage
-from aio_agent_platform.tools.builtin import UPDATE_SKILL
-from aio_agent_platform.tools.executor import ToolExecutor
-from aio_agent_platform.tools.registry import ToolRegistry
+from agent_platform.db.models import Skill, SkillMutation, SkillVersion
+from agent_platform.skills.contracts import SkillError, normalize_files
+from agent_platform.skills.mutations import mutate_skill
+from agent_platform.skills.service import SkillService
+from agent_platform.skills.storage import SkillStorage
+from agent_platform.tools.builtin import UPDATE_SKILL
+from agent_platform.tools.executor import ToolExecutor
+from agent_platform.tools.registry import ToolRegistry
 
 
 class Storage:
@@ -71,7 +71,7 @@ def test_duplicate_and_oversize_files_rejected():
 
 
 async def test_executor_uses_business_failure_status():
-    from aio_agent_platform.skills.mutations import SkillToolOutput
+    from agent_platform.skills.mutations import SkillToolOutput
     registry = ToolRegistry()
     registry.register(UPDATE_SKILL)
     executor = ToolExecutor(registry, SimpleNamespace())
@@ -209,7 +209,7 @@ async def test_concurrent_create_deduplicates(db_session, engine):
 async def test_mutation_receipt_replay_after_later_version(db_session, engine):
     uid, session_id = uuid4(), uuid4()
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    with patch("aio_agent_platform.skills.mutations.get_session_factory", return_value=factory):
+    with patch("agent_platform.skills.mutations.get_session_factory", return_value=factory):
         created = json.loads(await mutate_skill("create", {"name": "agent", "content": "old"}, str(uid), str(session_id), None))
         args = {"skill_id": created["skill_id"], "expected_version": 1, "content": "new", "change_summary": "改正文", "request_id": "update-one"}
         result = json.loads(await mutate_skill("update", args, str(uid), str(session_id), None))
@@ -253,15 +253,15 @@ async def test_bound_skills_survive_when_search_fills_budget(db_session):
 
 @pytest.mark.postgres
 async def test_http_manual_edit_conflict_and_attachment_history(client, db_session):
-    from aio_agent_platform.auth.dependencies import get_current_user
-    from aio_agent_platform.db.models import User
-    from aio_agent_platform.interface.api import app
+    from agent_platform.auth.dependencies import get_current_user
+    from agent_platform.db.models import User
+    from agent_platform.interface.api import app
     user = User(id=uuid4(), username="skill-editor", email="skill-editor@test.local", password_hash="test", tenant_id=uuid4(), is_active=True)
     db_session.add(user)
     await db_session.flush()
     app.dependency_overrides[get_current_user] = lambda: user
     storage = Storage()
-    with patch("aio_agent_platform.interface.routes.skills._get_storage", return_value=storage):
+    with patch("agent_platform.interface.routes.skills._get_storage", return_value=storage):
         created = await client.post("/api/skills", json={"name": "API 技能", "content": "正文"})
         assert created.status_code == 201
         sid = created.json()["id"]
@@ -310,7 +310,7 @@ async def test_inactive_edit_and_source_preservation(db_session):
 
 @pytest.mark.postgres
 async def test_verification_requires_real_scoped_evidence(db_session, engine):
-    from aio_agent_platform.skills.handlers import handle_report_skill_result
+    from agent_platform.skills.handlers import handle_report_skill_result
     uid, sid = uuid4(), uuid4()
     storage = Storage()
     skill = await SkillService.create_skill(db_session, uid, "verify", content="run", files=files(), storage=storage)
@@ -320,7 +320,7 @@ async def test_verification_requires_real_scoped_evidence(db_session, engine):
     arguments = {"skill_id": str(skill_id), "success": True, "version": 1,
                  "evidence_tool_call_id": "test-run", "expected_output": "PASS"}
     executor = SimpleNamespace(skill_execution_evidence={})
-    with patch("aio_agent_platform.skills.handlers.get_session_factory", return_value=factory):
+    with patch("agent_platform.skills.handlers.get_session_factory", return_value=factory):
         forged = json.loads(await handle_report_skill_result(arguments, str(uid), str(sid), tool_executor=executor))
         assert not forged["success"] and forged["code"] == "invalid_evidence"
         executor.skill_execution_evidence[(str(uid), str(sid), "test-run")] = {
@@ -340,14 +340,14 @@ async def test_verification_requires_real_scoped_evidence(db_session, engine):
 
 @pytest.mark.postgres
 async def test_partial_verification_evidence_is_rejected(db_session, engine):
-    from aio_agent_platform.skills.handlers import handle_report_skill_result
+    from agent_platform.skills.handlers import handle_report_skill_result
     uid, sid = uuid4(), uuid4()
     skill = await SkillService.create_skill(db_session, uid, "partial verify", content="run")
     await db_session.commit()
     skill_id = skill.id
     factory = async_sessionmaker(engine, expire_on_commit=False)
     executor = SimpleNamespace(skill_execution_evidence={})
-    with patch("aio_agent_platform.skills.handlers.get_session_factory", return_value=factory):
+    with patch("agent_platform.skills.handlers.get_session_factory", return_value=factory):
         for partial in ({"version": 1}, {"evidence_tool_call_id": "test-run"}, {"expected_output": "PASS"},
                         {"version": 1, "expected_output": "PASS"}):
             result = json.loads(await handle_report_skill_result(
@@ -365,15 +365,15 @@ async def test_partial_verification_evidence_is_rejected(db_session, engine):
 
 @pytest.mark.postgres
 async def test_http_atomic_create_and_edit_with_files(client, db_session):
-    from aio_agent_platform.auth.dependencies import get_current_user
-    from aio_agent_platform.db.models import User
-    from aio_agent_platform.interface.api import app
+    from agent_platform.auth.dependencies import get_current_user
+    from agent_platform.db.models import User
+    from agent_platform.interface.api import app
     user = User(id=uuid4(), username="atomic-editor", email="atomic@test.local", password_hash="test", tenant_id=uuid4(), is_active=True)
     db_session.add(user)
     await db_session.flush()
     app.dependency_overrides[get_current_user] = lambda: user
     storage = Storage()
-    with patch("aio_agent_platform.interface.routes.skills._get_storage", return_value=storage):
+    with patch("agent_platform.interface.routes.skills._get_storage", return_value=storage):
         created = await client.post("/api/skills", json={"name": "atomic", "content": "original", "files": [{"path": "assets/binary", "content_base64": "AP8="}]})
         assert created.status_code == 201 and len(created.json()["files"]) == 1
         sid = created.json()["id"]

@@ -9,9 +9,9 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from aio_agent_platform.db.models import ChatRoom, ChatRoomTask
-from aio_agent_platform.rooms import service
-from aio_agent_platform.rooms.schemas import RoomRetry, RoomSend
+from agent_platform.db.models import ChatRoom, ChatRoomTask
+from agent_platform.rooms import service
+from agent_platform.rooms.schemas import RoomRetry, RoomSend
 
 
 @pytest.fixture

@@ -7,10 +7,10 @@ from uuid import uuid4
 
 import pytest
 
-from aio_agent_platform.db.models import PetPackage, Session, UserPet
-from aio_agent_platform.pets.smart import ensure_pet_tools_registered
-from aio_agent_platform.tools.executor import ToolExecutor
-from aio_agent_platform.tools.registry import ToolRegistry
+from agent_platform.db.models import PetPackage, Session, UserPet
+from agent_platform.pets.smart import ensure_pet_tools_registered
+from agent_platform.tools.executor import ToolExecutor
+from agent_platform.tools.registry import ToolRegistry
 
 
 @pytest.fixture
@@ -28,7 +28,7 @@ def pet_tool(monkeypatch):
     db.get.side_effect = lambda model, key: records.get((model, key))
     db.__aenter__.return_value = db
     factory = Mock(return_value=db)
-    monkeypatch.setattr("aio_agent_platform.pets.smart.get_session_factory", lambda: factory)
+    monkeypatch.setattr("agent_platform.pets.smart.get_session_factory", lambda: factory)
     executor = ToolExecutor(ToolRegistry(), SimpleNamespace())
     ensure_pet_tools_registered(executor)
     return executor, str(user_id), str(session_id), factory

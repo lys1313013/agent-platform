@@ -11,16 +11,16 @@ import pytest_asyncio
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from aio_agent_platform.core import chat
-from aio_agent_platform.core.context import current_agent_id
-from aio_agent_platform.core.execution_scope import (
+from agent_platform.core import chat
+from agent_platform.core.context import current_agent_id
+from agent_platform.core.execution_scope import (
     bind_execution_scope,
     execution_tenant_id,
     resolve_execution_tenant,
 )
-from aio_agent_platform.cron_jobs.executor import execute_cron_job
-from aio_agent_platform.cron_jobs.scheduler import Scheduler
-from aio_agent_platform.db.models import (
+from agent_platform.cron_jobs.executor import execute_cron_job
+from agent_platform.cron_jobs.scheduler import Scheduler
+from agent_platform.db.models import (
     Agent,
     AgentKnowledgeBase,
     CronJob,
@@ -84,8 +84,8 @@ async def test_cron_uses_job_tenant_after_ui_switch(cron_data, db_session, monke
             async with d.factory() as db:
                 assert await resolve_execution_tenant(db, d.user.id) == d.tenant.id
                 # Memory writes/default-model resolution and cron tools share this resolver.
-                from aio_agent_platform.cron_jobs.handlers import _get_tenant_id
-                from aio_agent_platform.memory.service import resolve_tenant_id
+                from agent_platform.cron_jobs.handlers import _get_tenant_id
+                from agent_platform.memory.service import resolve_tenant_id
                 assert await _get_tenant_id(db, d.user.id) == d.tenant.id
                 assert await resolve_tenant_id(db, d.user.id) == d.tenant.id
             seen.append(kwargs)
@@ -101,7 +101,7 @@ async def test_cron_uses_job_tenant_after_ui_switch(cron_data, db_session, monke
     monkeypatch.setattr(chat, "build_agent_loop", build_loop)
     monkeypatch.setattr(chat, "refresh_mcp_tools_for_agent", AsyncMock())
     monkeypatch.setattr(chat, "filter_tools_by_agent", lambda *a, **kw: ([], []))
-    monkeypatch.setattr("aio_agent_platform.core.context.prepare_context",
+    monkeypatch.setattr("agent_platform.core.context.prepare_context",
                         AsyncMock(return_value=([], None)))
     scheduler = Scheduler(d.factory, executor=partial(
         execute_cron_job, tool_executor=object(), push_to_channel=AsyncMock()))
@@ -211,13 +211,13 @@ async def test_scopes_isolate_concurrent_jobs_and_restore_on_error(error_type):
 @pytest.mark.postgres
 @pytest.mark.parametrize("kind", ["knowledge", "graph"])
 async def test_retrieval_tools_keep_job_tenant_and_visibility(cron_data, db_session, monkeypatch, kind):
-    from aio_agent_platform.db.models import (
+    from agent_platform.db.models import (
         AgentGraphKnowledgeBase,
         GraphKnowledgeBase,
         SystemConfig,
     )
-    from aio_agent_platform.graph_knowledge import handlers as graph
-    from aio_agent_platform.knowledge import handlers as knowledge
+    from agent_platform.graph_knowledge import handlers as graph
+    from agent_platform.knowledge import handlers as knowledge
 
     d = cron_data
     model = KnowledgeBase if kind == "knowledge" else GraphKnowledgeBase
@@ -254,8 +254,8 @@ async def test_retrieval_tools_keep_job_tenant_and_visibility(cron_data, db_sess
 
 @pytest.mark.postgres
 async def test_tool_writes_do_not_follow_ui_tenant(cron_data, monkeypatch):
-    from aio_agent_platform.memory.service import MemoryService
-    from aio_agent_platform.portrait import handlers
+    from agent_platform.memory.service import MemoryService
+    from agent_platform.portrait import handlers
 
     d = cron_data
     monkeypatch.setattr(handlers, "get_session_factory", lambda: d.factory)
@@ -278,7 +278,7 @@ async def test_tool_writes_do_not_follow_ui_tenant(cron_data, monkeypatch):
 @pytest.mark.postgres
 @pytest.mark.parametrize("mode", ["default", "silent", "notify", "delivery_failed"])
 async def test_cron_persists_report_and_delivery_separately(cron_data, db_session, monkeypatch, mode):
-    from aio_agent_platform.channels.cron_notify import (
+    from agent_platform.channels.cron_notify import (
         current_cron_notify_ctx,
         handle_cron_respond,
     )
@@ -316,7 +316,7 @@ async def test_cron_persists_report_and_delivery_separately(cron_data, db_sessio
     monkeypatch.setattr(chat, "build_agent_loop", AsyncMock(return_value=Loop()))
     monkeypatch.setattr(chat, "refresh_mcp_tools_for_agent", AsyncMock())
     monkeypatch.setattr(chat, "filter_tools_by_agent", lambda *a, **kw: ([], []))
-    monkeypatch.setattr("aio_agent_platform.core.context.prepare_context",
+    monkeypatch.setattr("agent_platform.core.context.prepare_context",
                         AsyncMock(return_value=([], None)))
     scheduler = Scheduler(d.factory, executor=partial(
         execute_cron_job, tool_executor=object(), push_to_channel=push))

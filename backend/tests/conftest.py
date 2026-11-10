@@ -41,8 +41,8 @@ os.environ.setdefault("STORAGE_ACCESS_KEY", "ci-test-access-key")
 os.environ.setdefault("STORAGE_SECRET_KEY", "ci-test-secret-key")
 
 # Application imports must follow the test connection override above.
-from aio_agent_platform.db.models import Base  # noqa: E402
-from aio_agent_platform.interface.api import app  # noqa: E402
+from agent_platform.db.models import Base  # noqa: E402
+from agent_platform.interface.api import app  # noqa: E402
 
 
 def get_test_database_url():
@@ -116,7 +116,7 @@ async def client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient]:
     async def override_get_db():
         yield db_session
 
-    from aio_agent_platform.db.connection import get_db
+    from agent_platform.db.connection import get_db
     app.dependency_overrides[get_db] = override_get_db
 
     async with AsyncClient(

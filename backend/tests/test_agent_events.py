@@ -7,8 +7,8 @@ from uuid import uuid4
 
 import pytest
 
-from aio_agent_platform.core.agent import AgentLoop
-from aio_agent_platform.core.agent_events import (
+from agent_platform.core.agent import AgentLoop
+from agent_platform.core.agent_events import (
     ControlEvent,
     FileChangesEvent,
     TextEvent,
@@ -17,13 +17,13 @@ from aio_agent_platform.core.agent_events import (
     decode_agent_event,
     encode_agent_event,
 )
-from aio_agent_platform.core.chat_history import ChatTurnRecorder
-from aio_agent_platform.core.context import current_agent_id
-from aio_agent_platform.core.execution_scope import bind_execution_scope, execution_tenant_id
-from aio_agent_platform.core.turn_metadata import InteractiveTurnMetadata
-from aio_agent_platform.delegation.handler import _proxy_child_event
-from aio_agent_platform.llm import LLMChunk, LLMStreamError
-from aio_agent_platform.rooms.runtime import Output
+from agent_platform.core.chat_history import ChatTurnRecorder
+from agent_platform.core.context import current_agent_id
+from agent_platform.core.execution_scope import bind_execution_scope, execution_tenant_id
+from agent_platform.core.turn_metadata import InteractiveTurnMetadata
+from agent_platform.delegation.handler import _proxy_child_event
+from agent_platform.llm import LLMChunk, LLMStreamError
+from agent_platform.rooms.runtime import Output
 
 EVENTS = [
     TextEvent("reasoning_delta", "检查：https://example.test/a:b\n下一行"),
@@ -119,8 +119,8 @@ async def test_disabled_provider_retry_is_respected_by_agent_loop(monkeypatch):
         yield  # pragma: no cover
 
     provider.stream = stream
-    monkeypatch.setattr("aio_agent_platform.core.agent.get_hook_manager", Mock(return_value=Mock()))
-    monkeypatch.setattr("aio_agent_platform.core.agent.get_recorder", Mock(return_value=Mock()))
+    monkeypatch.setattr("agent_platform.core.agent.get_hook_manager", Mock(return_value=Mock()))
+    monkeypatch.setattr("agent_platform.core.agent.get_recorder", Mock(return_value=Mock()))
     loop = AgentLoop(provider, Mock(), execution_tenant_id=uuid4())
     loop.execution_agent_id = uuid4()
     with pytest.raises(LLMStreamError, match="before output"):
@@ -143,9 +143,9 @@ async def test_closing_stream_closes_provider_in_its_own_execution_context(monke
             closed.append((asyncio.current_task() is owner, execution_tenant_id(user), current_agent_id.get()))
 
     provider.stream = stream
-    monkeypatch.setattr("aio_agent_platform.core.agent.get_hook_manager", Mock(return_value=Mock()))
-    monkeypatch.setattr("aio_agent_platform.core.agent.get_recorder", Mock(return_value=Mock()))
-    monkeypatch.setattr("aio_agent_platform.core.agent._resolve_agent_id", AsyncMock(return_value=agent))
+    monkeypatch.setattr("agent_platform.core.agent.get_hook_manager", Mock(return_value=Mock()))
+    monkeypatch.setattr("agent_platform.core.agent.get_recorder", Mock(return_value=Mock()))
+    monkeypatch.setattr("agent_platform.core.agent._resolve_agent_id", AsyncMock(return_value=agent))
     loop = AgentLoop(provider, Mock(), execution_tenant_id=tenant)
     with bind_execution_scope(user, caller_tenant):
         events = loop.run("hello", user, uuid4(), [], [])

@@ -8,10 +8,10 @@ from uuid import uuid4
 
 import pytest
 
-from aio_agent_platform.core.chat import filter_tools_by_agent, refresh_mcp_tools_for_agent
-from aio_agent_platform.tools.mcp.adapter import MCPServerConnection, MCPToolInfo
-from aio_agent_platform.tools.mcp.manager import MCPManager
-from aio_agent_platform.tools.registry import ToolRegistry
+from agent_platform.core.chat import filter_tools_by_agent, refresh_mcp_tools_for_agent
+from agent_platform.tools.mcp.adapter import MCPServerConnection, MCPToolInfo
+from agent_platform.tools.mcp.manager import MCPManager
+from agent_platform.tools.registry import ToolRegistry
 
 
 def tool(name, parameter="query"):

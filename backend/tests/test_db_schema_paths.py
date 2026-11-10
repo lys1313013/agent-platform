@@ -8,9 +8,9 @@ from alembic.config import Config
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
-from aio_agent_platform.db.connection import _local_alembic_heads
-from aio_agent_platform.db.models import Base
-from aio_agent_platform.db.schema import database_schema_state
+from agent_platform.db.connection import _local_alembic_heads
+from agent_platform.db.models import Base
+from agent_platform.db.schema import database_schema_state
 from alembic import command
 
 pytestmark = pytest.mark.postgres

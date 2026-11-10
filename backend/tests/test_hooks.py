@@ -11,11 +11,11 @@ import uuid
 import httpx
 import pytest
 
-from aio_agent_platform.core.config import settings
-from aio_agent_platform.hooks import dispatcher
-from aio_agent_platform.hooks.manager import HookDef, HookManager, _hook_action_ctx
-from aio_agent_platform.hooks.masking import mask_payload
-from aio_agent_platform.hooks.signing import sign_hook, verify_hook_signature
+from agent_platform.core.config import settings
+from agent_platform.hooks import dispatcher
+from agent_platform.hooks.manager import HookDef, HookManager, _hook_action_ctx
+from agent_platform.hooks.masking import mask_payload
+from agent_platform.hooks.signing import sign_hook, verify_hook_signature
 
 T = uuid.uuid4
 
@@ -138,7 +138,7 @@ def test_build_ctx_without_context_returns_none_not_str():
 def test_is_missing_table_detects_undefined_table():
     from sqlalchemy.exc import ProgrammingError
 
-    from aio_agent_platform.hooks.manager import _is_missing_table
+    from agent_platform.hooks.manager import _is_missing_table
 
     err = ProgrammingError("stmt", {}, Exception('relation "hooks" does not exist'))
     assert _is_missing_table(err)

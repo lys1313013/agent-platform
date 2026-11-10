@@ -7,7 +7,7 @@ from uuid import uuid4
 import pytest
 from fastapi import HTTPException
 
-from aio_agent_platform.interface.routes import channels
+from agent_platform.interface.routes import channels
 
 
 @pytest.mark.asyncio

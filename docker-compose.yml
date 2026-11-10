@@ -1,4 +1,4 @@
-name: aio-agent-platform
+name: agent-platform
 
 # Application deployment (independently managed PostgreSQL, Redis and object storage):
 #   1. Create a .env file with DATABASE_URL, JWT_SECRET and STORAGE_* settings.
@@ -10,7 +10,7 @@ services:
   # Pre-pull the image into the host Docker daemon. The backend later creates
   # ephemeral containers from the same image through /var/run/docker.sock.
   sandbox-image:
-    image: ${SANDBOX_IMAGE:-crpi-yvha9coypdedaafa.cn-beijing.personal.cr.aliyuncs.com/lys1313013/aio-agent-platform-sandbox:latest}
+    image: ${SANDBOX_IMAGE:-crpi-yvha9coypdedaafa.cn-beijing.personal.cr.aliyuncs.com/lys1313013/agent-platform-sandbox:latest}
     pull_policy: always
     command: ["/bin/true"]
     restart: "no"
@@ -38,7 +38,7 @@ services:
       - app-network
 
   backend:
-    image: ${BACKEND_IMAGE:-crpi-yvha9coypdedaafa.cn-beijing.personal.cr.aliyuncs.com/lys1313013/aio-agent-platform-backend:latest}
+    image: ${BACKEND_IMAGE:-crpi-yvha9coypdedaafa.cn-beijing.personal.cr.aliyuncs.com/lys1313013/agent-platform-backend:latest}
     pull_policy: always
     restart: unless-stopped
     environment:
@@ -57,11 +57,11 @@ services:
       AGENT_TEMPERATURE: ${AGENT_TEMPERATURE:-0.7}
       AGENT_TRUST_LEVEL: ${AGENT_TRUST_LEVEL:-ask_dangerous}
       AGENT_MEMORY_TOP_K: ${AGENT_MEMORY_TOP_K:-5}
-      SANDBOX_IMAGE: ${SANDBOX_IMAGE:-crpi-yvha9coypdedaafa.cn-beijing.personal.cr.aliyuncs.com/lys1313013/aio-agent-platform-sandbox:latest}
+      SANDBOX_IMAGE: ${SANDBOX_IMAGE:-crpi-yvha9coypdedaafa.cn-beijing.personal.cr.aliyuncs.com/lys1313013/agent-platform-sandbox:latest}
       SANDBOX_CPU_LIMIT: ${SANDBOX_CPU_LIMIT:-1.0}
       SANDBOX_MEMORY_LIMIT: ${SANDBOX_MEMORY_LIMIT:-512m}
       SANDBOX_SESSION_TTL: ${SANDBOX_SESSION_TTL:-3600}
-      SANDBOX_NAMESPACE: ${SANDBOX_NAMESPACE:-${COMPOSE_PROJECT_NAME:-aio-agent-platform}}
+      SANDBOX_NAMESPACE: ${SANDBOX_NAMESPACE:-${COMPOSE_PROJECT_NAME:-agent-platform}}
       SANDBOX_LOCK_DIR: /var/lib/aio-sandbox-locks
       SANDBOX_COMMAND_TIMEOUT: ${SANDBOX_COMMAND_TIMEOUT:-60}
       SANDBOX_WORKSPACE_QUOTA_MB: ${SANDBOX_WORKSPACE_QUOTA_MB:-500}
@@ -98,7 +98,7 @@ services:
       - infra-network
 
   frontend:
-    image: ${FRONTEND_IMAGE:-crpi-yvha9coypdedaafa.cn-beijing.personal.cr.aliyuncs.com/lys1313013/aio-agent-platform-frontend:latest}
+    image: ${FRONTEND_IMAGE:-crpi-yvha9coypdedaafa.cn-beijing.personal.cr.aliyuncs.com/lys1313013/agent-platform-frontend:latest}
     pull_policy: always
     restart: unless-stopped
     ports:
@@ -123,4 +123,4 @@ networks:
     driver: bridge
   infra-network:
     external: true
-    name: ${INFRA_NETWORK_NAME:-aio-agent-platform-infra}
+    name: ${INFRA_NETWORK_NAME:-agent-platform-infra}

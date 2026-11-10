@@ -2,14 +2,14 @@
 
 Non-ASCII filenames used to crash Starlette with UnicodeEncodeError
 (HTTP headers are latin-1 only), breaking file downloads. See
-``aio_agent_platform.interface.headers.attachment_disposition``.
+``agent_platform.interface.headers.attachment_disposition``.
 """
 
 from urllib.parse import unquote
 
 from starlette.responses import Response, StreamingResponse
 
-from aio_agent_platform.interface.headers import attachment_disposition
+from agent_platform.interface.headers import attachment_disposition
 
 
 def _parse_filename_star(disposition: str) -> str:

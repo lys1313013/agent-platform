@@ -4,7 +4,7 @@
 
 ## MCP (Model Context Protocol) 需求文档
 
-> 本文档定义 AIO Agent Platform 的 MCP 协议集成需求，覆盖功能、安全、运维和用户体验。
+> 本文档定义 Agent Platform 的 MCP 协议集成需求，覆盖功能、安全、运维和用户体验。
 
 ---
 
@@ -347,7 +347,7 @@
 
 ### 4. 工具 Schema 校验与故障隔离
 
-- 在 OpenAI 兼容接口及 Anthropic 的 LLM 请求边界统一处理工具定义，覆盖流式、非流式调用，适用于内置、MCP 和自定义 HTTP 工具。实现位于 `backend/src/aio_agent_platform/llm/tool_schema.py`。
+- 在 OpenAI 兼容接口及 Anthropic 的 LLM 请求边界统一处理工具定义，覆盖流式、非流式调用，适用于内置、MCP 和自定义 HTTP 工具。实现位于 `backend/src/agent_platform/llm/tool_schema.py`。
 - 仅修改本次请求的副本：将 Schema 数值约束（如 `minimum: "1"`）转换为数值；长度、数量约束要求非负整数。递归处理 `properties`、`$defs`、组合及数组子 Schema，不转换 `default`、`enum`、`const`、示例和扩展字段中的业务值。缺失根 `type` 时补为 `object`，空 Schema 补为空对象参数定义。
 - 使用 `jsonschema` 校验 Schema 自身；声明标准 `$schema` 时使用对应草案，否则使用 Draft 2020-12。无法修复的定义从本次模型请求排除，其他工具与对话继续，不回写数据库和 MCP 缓存。
 - 服务端仍返回明确的 `Invalid schema for function/tool '<工具名>'` 400 时，仅剔除请求中匹配的工具并重发；每次剔除一个工具，最多恢复本次请求的工具数量次。全部剔除后不携带工具。流式恢复仅限获取流之前；Anthropic 在进入流上下文时处理。输出开始后不重放，无明确工具名的错误和其他请求错误按原流程传播。

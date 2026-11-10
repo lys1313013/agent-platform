@@ -7,8 +7,8 @@ from uuid import uuid4
 
 import pytest
 
-from aio_agent_platform.core import agent as agent_module
-from aio_agent_platform.observation.recorder import (
+from agent_platform.core import agent as agent_module
+from agent_platform.observation.recorder import (
     ObsContext,
     get_obs_context,
     set_obs_context,

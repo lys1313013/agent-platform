@@ -6,10 +6,10 @@ from uuid import uuid4
 
 import pytest
 
-from aio_agent_platform.core.agent import AgentLoop
-from aio_agent_platform.core.context import current_agent_id
-from aio_agent_platform.core.execution_scope import bind_execution_scope, execution_tenant_id
-from aio_agent_platform.observation.recorder import get_obs_context, set_obs_context
+from agent_platform.core.agent import AgentLoop
+from agent_platform.core.context import current_agent_id
+from agent_platform.core.execution_scope import bind_execution_scope, execution_tenant_id
+from agent_platform.observation.recorder import get_obs_context, set_obs_context
 
 
 @pytest.mark.parametrize("finish", ["exhaust", "close", "cancel", "error"])

@@ -8,16 +8,16 @@ from uuid import UUID, uuid4
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from aio_agent_platform.core.config import settings
-from aio_agent_platform.db.models import Workspace
-from aio_agent_platform.sandbox import SandboxManager
-from aio_agent_platform.skills.contracts import SkillError
-from aio_agent_platform.skills.mutations import mutate_skill
-from aio_agent_platform.skills.service import SkillService
-from aio_agent_platform.skills.storage import SkillStorage
-from aio_agent_platform.skills.workspace import read_workspace_file
-from aio_agent_platform.storage.client import ObjectStorage
-from aio_agent_platform.storage.workspace import WorkspaceStorage
+from agent_platform.core.config import settings
+from agent_platform.db.models import Workspace
+from agent_platform.sandbox import SandboxManager
+from agent_platform.skills.contracts import SkillError
+from agent_platform.skills.mutations import mutate_skill
+from agent_platform.skills.service import SkillService
+from agent_platform.skills.storage import SkillStorage
+from agent_platform.skills.workspace import read_workspace_file
+from agent_platform.storage.client import ObjectStorage
+from agent_platform.storage.workspace import WorkspaceStorage
 
 pytestmark = [pytest.mark.postgres, pytest.mark.skipif(os.environ.get("SKILL_DOCKER_SMOKE") != "1", reason="requires dedicated MinIO and Docker")]
 
@@ -38,7 +38,7 @@ async def test_real_package_survives_source_deletion_and_sandbox_recreation(db_s
         args = {"name": "真实文件测试", "content": "执行 `scripts/check.py`，模板 `assets/template.bin`。", "files": [
             {"path": "scripts/check.py", "content": "print('skill-v1-ok')"},
             {"path": "assets/template.bin", "source_path": "template.bin"}]}
-        with patch("aio_agent_platform.skills.mutations.get_session_factory", return_value=factory):
+        with patch("agent_platform.skills.mutations.get_session_factory", return_value=factory):
             created = json.loads(await mutate_skill("create", args, str(uid), str(sid), storage,
                 tool_executor=SimpleNamespace(sandbox_mgr=manager), workspace_id=str(wid), workspace_slug="default"))
             assert created["success"], created

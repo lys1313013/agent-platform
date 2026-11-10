@@ -1,4 +1,4 @@
-name: aio-agent-platform-base
+name: agent-platform-base
 
 services:
   postgres:
@@ -61,7 +61,7 @@ services:
     build:
       context: ./backend/sandbox
       dockerfile: Dockerfile
-    image: crpi-yvha9coypdedaafa.cn-beijing.personal.cr.aliyuncs.com/lys1313013/aio-agent-platform-sandbox:latest
+    image: crpi-yvha9coypdedaafa.cn-beijing.personal.cr.aliyuncs.com/lys1313013/agent-platform-sandbox:latest
     profiles: ["build"]
 
 volumes:
@@ -73,5 +73,5 @@ volumes:
 
 networks:
   infra-network:
-    name: ${INFRA_NETWORK_NAME:-aio-agent-platform-infra}
+    name: ${INFRA_NETWORK_NAME:-agent-platform-infra}
     driver: bridge

@@ -9,9 +9,9 @@ from uuid import uuid4
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from aio_agent_platform.db.models import Memory, Session, Tenant, TenantMembership, User
-from aio_agent_platform.memory import daily as daily_module
-from aio_agent_platform.memory.daily import (
+from agent_platform.db.models import Memory, Session, Tenant, TenantMembership, User
+from agent_platform.memory import daily as daily_module
+from agent_platform.memory.daily import (
     DailyMemoryService,
     day_range_utc,
     extract_dates,
@@ -183,7 +183,7 @@ def use_test_session_factory(monkeypatch, engine):
     """
     from sqlalchemy.orm import sessionmaker
 
-    import aio_agent_platform.db.connection as connection
+    import agent_platform.db.connection as connection
 
     factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     monkeypatch.setattr(connection, "_async_session_factory", factory)

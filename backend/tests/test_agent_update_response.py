@@ -7,7 +7,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from aio_agent_platform.db.models import (
+from agent_platform.db.models import (
     Agent,
     GraphKnowledgeBase,
     KnowledgeBase,
@@ -17,7 +17,7 @@ from aio_agent_platform.db.models import (
     Tenant,
     User,
 )
-from aio_agent_platform.interface.routes.agents import AgentUpdate, admin_update_agent
+from agent_platform.interface.routes.agents import AgentUpdate, admin_update_agent
 
 pytestmark = pytest.mark.postgres
 

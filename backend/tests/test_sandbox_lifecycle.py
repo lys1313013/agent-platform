@@ -10,9 +10,9 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from docker.errors import APIError, DockerException, NotFound
 
-from aio_agent_platform.core.config import settings
-from aio_agent_platform.sandbox.models import SandboxManager, SandboxUnavailableError
-from aio_agent_platform.storage.workspace import SyncStats, WorkspaceStorage
+from agent_platform.core.config import settings
+from agent_platform.sandbox.models import SandboxManager, SandboxUnavailableError
+from agent_platform.storage.workspace import SyncStats, WorkspaceStorage
 
 
 class Container:
@@ -87,7 +87,7 @@ class Daemon:
 @pytest.fixture
 def setup(monkeypatch, tmp_path):
     daemon = Daemon()
-    monkeypatch.setattr("aio_agent_platform.sandbox.models.docker.from_env", lambda **kwargs: daemon)
+    monkeypatch.setattr("agent_platform.sandbox.models.docker.from_env", lambda **kwargs: daemon)
     monkeypatch.setattr(settings.sandbox, "lock_dir", str(tmp_path))
     monkeypatch.setattr(settings.sandbox, "namespace", "test-deployment")
     storage = SimpleNamespace(
@@ -130,7 +130,7 @@ async def test_result_file_is_synced_before_write_returns(setup, monkeypatch):
         return True
 
     storage.put_file = Mock(side_effect=lambda *_: writes.append("storage"))
-    monkeypatch.setattr("aio_agent_platform.storage.workspace.WorkspaceStorage.write_file_live", live_write)
+    monkeypatch.setattr("agent_platform.storage.workspace.WorkspaceStorage.write_file_live", live_write)
     assert await manager.write_workspace_file(sandbox, "workspace", "default", "result.txt", b"full")
     assert writes == ["sandbox", "storage"]
     storage.put_file.assert_called_once_with("workspace", "result.txt", b"full")
@@ -142,7 +142,7 @@ async def test_result_file_storage_failure_is_propagated(setup, monkeypatch):
     sandbox = await obtain(manager)
     storage.put_file = Mock(side_effect=RuntimeError("storage failed"))
     monkeypatch.setattr(
-        "aio_agent_platform.storage.workspace.WorkspaceStorage.write_file_live", AsyncMock(return_value=True),
+        "agent_platform.storage.workspace.WorkspaceStorage.write_file_live", AsyncMock(return_value=True),
     )
     with pytest.raises(RuntimeError, match="storage failed"):
         await manager.write_workspace_file(sandbox, "workspace", "default", "result.txt", b"full")
@@ -384,7 +384,7 @@ async def test_cleanup_scheduler_runs_without_storage(setup, monkeypatch):
 async def test_docker_offline_allows_degraded_startup_and_later_recovery(setup, monkeypatch):
     daemon, storage = setup
     connect = Mock(side_effect=[DockerException("offline"), DockerException("offline"), daemon])
-    monkeypatch.setattr("aio_agent_platform.sandbox.models.docker.from_env", connect)
+    monkeypatch.setattr("agent_platform.sandbox.models.docker.from_env", connect)
     manager = SandboxManager(storage)
     connect.assert_not_called()
     await manager.start_periodic_sync()
@@ -418,7 +418,7 @@ async def test_docker_disconnect_during_recovery_allows_startup(setup):
 
 async def test_shutdown_without_docker_does_not_connect(setup, monkeypatch):
     connect = Mock(side_effect=DockerException("offline"))
-    monkeypatch.setattr("aio_agent_platform.sandbox.models.docker.from_env", connect)
+    monkeypatch.setattr("agent_platform.sandbox.models.docker.from_env", connect)
     manager = SandboxManager()
     await manager.start_periodic_sync()
     await manager.shutdown()
@@ -434,7 +434,7 @@ async def test_cancelled_lazy_connection_retains_client_and_releases_lock(setup,
         assert released.wait(5)
         return daemon
 
-    monkeypatch.setattr("aio_agent_platform.sandbox.models.docker.from_env", connect)
+    monkeypatch.setattr("agent_platform.sandbox.models.docker.from_env", connect)
     manager = SandboxManager()
     task = asyncio.create_task(manager._ensure_client())
     try:

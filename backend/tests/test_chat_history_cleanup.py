@@ -14,10 +14,10 @@ import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from aio_agent_platform.core.chat import drop_orphan_tool_messages, load_conversation_history
-from aio_agent_platform.db.connection import current_user_id
-from aio_agent_platform.db.models import Message, Session, User
-from aio_agent_platform.llm.client import LLMMessage, ToolCall
+from agent_platform.core.chat import drop_orphan_tool_messages, load_conversation_history
+from agent_platform.db.connection import current_user_id
+from agent_platform.db.models import Message, Session, User
+from agent_platform.llm.client import LLMMessage, ToolCall
 
 
 def _tool(role: str, call_id: str | None = None, tool_calls=None) -> LLMMessage:
@@ -142,8 +142,8 @@ async def test_truncation_cut_at_tool_calls_drops_orphan_tools(db_session: Async
     token = current_user_id.set(str(_USER_ID))
     try:
         await db_session.execute(text(f"SET LOCAL app.current_user_id = '{_USER_ID}'"))
-        with patch("aio_agent_platform.core.chat._est_tokens", side_effect=fake_est), patch(
-            "aio_agent_platform.core.chat.ContextBudget.from_settings",
+        with patch("agent_platform.core.chat._est_tokens", side_effect=fake_est), patch(
+            "agent_platform.core.chat.ContextBudget.from_settings",
             return_value=SimpleNamespace(history_budget=60),
         ):
             history, _ = await load_conversation_history(db_session, _SESSION_ID)

@@ -10,12 +10,12 @@ from uuid import uuid4
 
 import pytest
 
-from aio_agent_platform.core.config import WebSettings
-from aio_agent_platform.tools.builtin import register_builtin_tools
-from aio_agent_platform.tools.executor import ToolExecutor
-from aio_agent_platform.tools.registry import ToolRegistry
-from aio_agent_platform.tools.web.fetch import WebFetcher
-from aio_agent_platform.tools.web.search import SearchRouter
+from agent_platform.core.config import WebSettings
+from agent_platform.tools.builtin import register_builtin_tools
+from agent_platform.tools.executor import ToolExecutor
+from agent_platform.tools.registry import ToolRegistry
+from agent_platform.tools.web.fetch import WebFetcher
+from agent_platform.tools.web.search import SearchRouter
 
 
 class FakeConfig:

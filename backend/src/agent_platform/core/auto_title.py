@@ -1,0 +1,178 @@
+"""Auto session-title generation — model/prompt in system_config, enable switch per agent."""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from uuid import UUID
+
+import structlog
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+
+from agent_platform.db.models import LLMModel, SystemConfig
+from agent_platform.llm import LLMMessage, LLMProvider, create_provider
+
+logger = structlog.get_logger()
+
+KEY_MODEL_ID = "auto_title_model_id"
+KEY_PROMPT = "auto_title_prompt"
+
+DEFAULT_PROMPT = """请根据用户的第一条消息，为这次对话生成一个简短的标题。
+要求：
+- 不超过 20 个字符
+- 直接输出标题本身，不要加引号、书名号或任何前缀后缀
+- 使用与用户消息一致的语言
+
+用户消息：
+{message}"""
+
+MAX_TITLE_LENGTH = 100
+
+
+@dataclass
+class AutoTitleConfig:
+    model_id: UUID | None
+    prompt: str
+
+
+async def load_auto_title_config(db: AsyncSession) -> AutoTitleConfig:
+    result = await db.execute(
+        select(SystemConfig).where(
+            SystemConfig.key.in_([KEY_MODEL_ID, KEY_PROMPT])
+        )
+    )
+    rows = {row.key: row.value for row in result.scalars().all()}
+
+    model_id: UUID | None = None
+    raw_model_id = rows.get(KEY_MODEL_ID, "").strip()
+    if raw_model_id:
+        try:
+            model_id = UUID(raw_model_id)
+        except ValueError:
+            logger.warning("auto_title invalid model_id in system_config", value=raw_model_id)
+
+    return AutoTitleConfig(
+        model_id=model_id,
+        prompt=rows.get(KEY_PROMPT, "").strip() or DEFAULT_PROMPT,
+    )
+
+
+async def save_auto_title_config(
+    db: AsyncSession, *, model_id: UUID | None, prompt: str
+) -> None:
+    values = {
+        KEY_MODEL_ID: str(model_id) if model_id else "",
+        KEY_PROMPT: prompt,
+    }
+    for key, value in values.items():
+        row = await db.scalar(select(SystemConfig).where(SystemConfig.key == key))
+        if row:
+            row.value = value
+        else:
+            db.add(SystemConfig(key=key, value=value))
+    await db.flush()
+
+
+def _clean_title(raw: str) -> str | None:
+    first_line = raw.strip().splitlines()[0].strip() if raw.strip() else ""
+    # Strip trailing punctuation the model may append, then surrounding quotes
+    title = re.sub(r"[。！？!?.]+$", "", first_line).strip()
+    title = title.strip('"\'「」『』《》').strip()
+    if not title:
+        return None
+    return title[:MAX_TITLE_LENGTH]
+
+
+def _fallback_title(message: str, max_len: int = 20) -> str:
+    """Fallback title: first non-empty line of the message, truncated. '新对话' if empty."""
+    first_line = (message or "").strip().splitlines()
+    text = first_line[0].strip() if first_line else ""
+    return text[:max_len] or "新对话"
+
+
+async def resolve_utility_model(db: AsyncSession, tenant_id: UUID) -> LLMModel | None:
+    """Cheap model for background work (titles, summaries).
+
+    Prefers the configured auto-title model, then the tenant default.
+    """
+    config = await load_auto_title_config(db)
+    if config.model_id:
+        model = await db.scalar(
+            select(LLMModel)
+            .options(selectinload(LLMModel.provider))
+            .where(
+                LLMModel.id == config.model_id,
+                LLMModel.is_active,
+                LLMModel.tenant_id == tenant_id,
+            )
+        )
+        if model:
+            return model
+    return await db.scalar(
+        select(LLMModel)
+        .options(selectinload(LLMModel.provider))
+        .where(
+            LLMModel.is_default,
+            LLMModel.is_active,
+            LLMModel.tenant_id == tenant_id,
+        )
+        .limit(1)
+    )
+
+
+def provider_for_model(model: LLMModel) -> LLMProvider | None:
+    if not model.provider:
+        return None
+    return create_provider(
+        provider=model.provider.provider_type,
+        model=model.model_name,
+        base_url=model.provider.base_url,
+        api_key=model.provider.api_key_encrypted,
+    )
+
+
+async def resolve_utility_provider(db: AsyncSession, tenant_id: UUID) -> LLMProvider | None:
+    model = await resolve_utility_model(db, tenant_id)
+    return provider_for_model(model) if model else None
+
+
+async def generate_session_title(message: str, tenant_id: UUID) -> str:
+    """Generate a session title from the first user message.
+
+    Never returns None — on any failure it falls back to a truncated prefix
+    of the message so a session always gets a visible title.
+    """
+    from agent_platform.db.connection import get_session_factory
+
+    try:
+        factory = get_session_factory()
+        async with factory() as db:
+            config = await load_auto_title_config(db)
+            model = await resolve_utility_model(db, tenant_id)
+    except Exception:
+        logger.exception("auto_title skipped: failed to load model config")
+        return _fallback_title(message)
+
+    provider = provider_for_model(model) if model else None
+    if provider is None:
+        logger.warning("auto_title skipped: no usable LLM model")
+        return _fallback_title(message)
+
+    try:
+        prompt = config.prompt.replace("{message}", message[:4000])
+        # temperature 不显式传入：部分模型（如 k3）只允许默认值，硬编码会被网关 400 拒绝
+        response = await provider.complete(
+            messages=[LLMMessage(role="user", content=prompt)],
+            max_tokens=100,
+        )
+    except Exception:
+        logger.exception("auto_title failed: LLM call error")
+        return _fallback_title(message)
+
+    title = _clean_title(response.content)
+    if not title:
+        logger.warning("auto_title returned empty after cleaning", raw=(response.content or "")[:200])
+        return _fallback_title(message)
+    return title

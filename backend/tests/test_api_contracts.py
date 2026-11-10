@@ -9,9 +9,9 @@ from fastapi import FastAPI
 from fastapi.routing import APIRoute
 from httpx import ASGITransport, AsyncClient
 
-from aio_agent_platform.interface.api import create_app
-from aio_agent_platform.interface.routes.agents import AgentUpdate
-from aio_agent_platform.rooms.schemas import RoomMessageOut
+from agent_platform.interface.api import create_app
+from agent_platform.interface.routes.agents import AgentUpdate
+from agent_platform.rooms.schemas import RoomMessageOut
 
 
 def test_routes_are_unique_and_delete_has_one_contract():
@@ -71,9 +71,9 @@ def test_room_message_schema_preserves_payload_extensions():
 async def test_preparation_uses_one_model_for_history_and_execution(monkeypatch):
     from unittest.mock import AsyncMock, Mock
 
-    from aio_agent_platform.core import chat
-    from aio_agent_platform.core.execution import ChatExecutionService
-    from aio_agent_platform.core.runtime_config import AgentRuntimeConfig
+    from agent_platform.core import chat
+    from agent_platform.core.execution import ChatExecutionService
+    from agent_platform.core.runtime_config import AgentRuntimeConfig
 
     uid, tid, live, override, published = [uuid4() for _ in range(5)]
     model = SimpleNamespace(id=override, is_multimodal=True, provider=SimpleNamespace(provider_type="anthropic"))

@@ -10,8 +10,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import selectinload
 
-from aio_agent_platform.core.chat import load_conversation_history
-from aio_agent_platform.db.models import Message, Session
+from agent_platform.core.chat import load_conversation_history
+from agent_platform.db.models import Message, Session
 
 
 @compiles(JSONB, "sqlite")

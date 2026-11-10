@@ -5,8 +5,8 @@ from uuid import uuid4
 
 import pytest
 
-from aio_agent_platform.tools.registry import Tool, ToolRegistry
-from aio_agent_platform.tools.remote.manager import RemoteToolConfig, RemoteToolManager
+from agent_platform.tools.registry import Tool, ToolRegistry
+from agent_platform.tools.remote.manager import RemoteToolConfig, RemoteToolManager
 
 
 def make_config(name="test_tool", is_active=True, **kwargs):

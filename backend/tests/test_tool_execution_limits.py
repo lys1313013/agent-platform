@@ -6,9 +6,9 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from aio_agent_platform.core.config import settings
-from aio_agent_platform.tools.executor import ToolExecutor
-from aio_agent_platform.tools.registry import Tool, ToolRegistry
+from agent_platform.core.config import settings
+from agent_platform.tools.executor import ToolExecutor
+from agent_platform.tools.registry import Tool, ToolRegistry
 
 FILE_INFO_PROBE = (
     "12\n---AIO-META---\ntext/plain\n---AIO-META---\nus-ascii\n---AIO-META---\n2\n"
@@ -18,8 +18,8 @@ FILE_INFO_PROBE = (
 
 @pytest.fixture(autouse=True)
 def quiet_observers(monkeypatch):
-    monkeypatch.setattr("aio_agent_platform.tools.executor.get_hook_manager", lambda: Mock())
-    monkeypatch.setattr("aio_agent_platform.tools.executor.get_recorder", lambda: Mock())
+    monkeypatch.setattr("agent_platform.tools.executor.get_hook_manager", lambda: Mock())
+    monkeypatch.setattr("agent_platform.tools.executor.get_recorder", lambda: Mock())
 
 
 def make_executor(tools, execute, handlers=None):

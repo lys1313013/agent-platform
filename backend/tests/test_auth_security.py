@@ -7,11 +7,11 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
-from aio_agent_platform.auth import password
-from aio_agent_platform.auth.routes import LoginRequest, RegisterRequest
-from aio_agent_platform.core.config import JWTSettings
-from aio_agent_platform.interface.routes.settings import PasswordUpdate
-from aio_agent_platform.interface.routes.users import UserAdminCreate, UserAdminUpdate
+from agent_platform.auth import password
+from agent_platform.auth.routes import LoginRequest, RegisterRequest
+from agent_platform.core.config import JWTSettings
+from agent_platform.interface.routes.settings import PasswordUpdate
+from agent_platform.interface.routes.users import UserAdminCreate, UserAdminUpdate
 
 
 @pytest.mark.parametrize("value", ["a" * 73, "密" * 25])

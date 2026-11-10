@@ -13,8 +13,8 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from aio_agent_platform.db.models import Memory
-from aio_agent_platform.memory.service import MemoryService
+from agent_platform.db.models import Memory
+from agent_platform.memory.service import MemoryService
 
 
 async def _count(db: AsyncSession, user_id, layer: str) -> int:

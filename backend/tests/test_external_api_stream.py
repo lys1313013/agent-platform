@@ -15,12 +15,12 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.ext.compiler import compiles
 
-from aio_agent_platform.core import chat as core_chat
-from aio_agent_platform.core.agent import AgentStep
-from aio_agent_platform.core.execution_scope import execution_tenant_id
-from aio_agent_platform.db.models import Message
-from aio_agent_platform.db.models import Session as ChatSession
-from aio_agent_platform.interface.routes import agent_api
+from agent_platform.core import chat as core_chat
+from agent_platform.core.agent import AgentStep
+from agent_platform.core.execution_scope import execution_tenant_id
+from agent_platform.db.models import Message
+from agent_platform.db.models import Session as ChatSession
+from agent_platform.interface.routes import agent_api
 
 
 @compiles(JSONB, "sqlite")
@@ -42,7 +42,7 @@ async def external_chat(monkeypatch):
         db.add(ChatSession(id=session_id, user_id=user.id, agent_id=agent.id, source="api", context_summary="previous decision"))
         db.add(Message(id=uuid4(), session_id=session_id, user_id=user.id, role="user", content="repeat"))
         await db.commit()
-    monkeypatch.setattr("aio_agent_platform.db.connection.get_session_factory", lambda: factory)
+    monkeypatch.setattr("agent_platform.db.connection.get_session_factory", lambda: factory)
     monkeypatch.setattr(agent_api, "_load_agent_with_relations", AsyncMock(return_value=agent))
     monkeypatch.setattr(agent_api, "_get_active_version", AsyncMock(return_value=SimpleNamespace(config_snapshot={})))
     monkeypatch.setattr(agent_api, "_filter_tools_for_agent", Mock(return_value=([], [])))
@@ -58,10 +58,10 @@ async def external_chat(monkeypatch):
         id=uuid4(), is_multimodal=False, provider=SimpleNamespace(provider_type="openai"))))
     # Transport persistence is isolated from object auth (covered by test_execution_security).
     monkeypatch.setattr(agent_api, "owned_session", AsyncMock())
-    from aio_agent_platform.storage import chat_attachments
+    from agent_platform.storage import chat_attachments
     monkeypatch.setattr(chat_attachments, "ObjectStorage", Mock())
     monkeypatch.setattr(core_chat.SkillService, "get_skills_for_prompt", AsyncMock(return_value=[]))
-    monkeypatch.setattr("aio_agent_platform.workspaces.service.WorkspaceService.get_or_create_default", AsyncMock(return_value=SimpleNamespace(id=uuid4(), slug="default")))
+    monkeypatch.setattr("agent_platform.workspaces.service.WorkspaceService.get_or_create_default", AsyncMock(return_value=SimpleNamespace(id=uuid4(), slug="default")))
     # Only the profile query uses a table absent from this disposable schema.
     real_execute = factory.class_.execute
 

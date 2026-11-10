@@ -15,12 +15,12 @@ from apscheduler.triggers.date import DateTrigger
 from redis.asyncio import Redis
 from redis.exceptions import ConnectionError
 
-from aio_agent_platform.cron_jobs.claims import (
+from agent_platform.cron_jobs.claims import (
     CLAIM_TTL_SECONDS,
     OccurrenceClaims,
     scheduled_run_time,
 )
-from aio_agent_platform.cron_jobs.scheduler import Scheduler
+from agent_platform.cron_jobs.scheduler import Scheduler
 
 
 @pytest_asyncio.fixture

@@ -1,12 +1,12 @@
 [project]
-name = "aio-agent-platform"
+name = "agent-platform"
 version = "0.1.0"
 description = "A self-evolving multi-tenant AI agent platform"
 readme = "README.md"
 requires-python = ">=3.13"
 license = { text = "MIT" }
 authors = [
-    { name = "AIO Agent Platform Team" },
+    { name = "Agent Platform Team" },
 ]
 keywords = ["ai", "agent", "llm", "multi-tenant"]
 
@@ -83,9 +83,9 @@ all = [
 ]
 
 [project.scripts]
-aio-agent = "aio_agent_platform.interface.cli:main"
-aio-api = "aio_agent_platform.interface.api:run"
-aio-manage = "aio_agent_platform.manage:main"
+agent-cli = "agent_platform.interface.cli:main"
+agent-api = "agent_platform.interface.api:run"
+agent-manage = "agent_platform.manage:main"
 
 [[tool.uv.index]]
 url = "https://mirrors.aliyun.com/pypi/simple"
@@ -95,7 +95,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/aio_agent_platform"]
+packages = ["src/agent_platform"]
 
 [dependency-groups]
 dev = [

@@ -6,14 +6,14 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from aio_agent_platform.tools.executor import ToolExecutor
-from aio_agent_platform.tools.registry import Tool, ToolRegistry
+from agent_platform.tools.executor import ToolExecutor
+from agent_platform.tools.registry import Tool, ToolRegistry
 
 
 @pytest.fixture
 def query_executor(monkeypatch):
-    monkeypatch.setattr("aio_agent_platform.tools.executor.get_hook_manager", lambda: Mock())
-    monkeypatch.setattr("aio_agent_platform.tools.executor.get_recorder", lambda: Mock())
+    monkeypatch.setattr("agent_platform.tools.executor.get_hook_manager", lambda: Mock())
+    monkeypatch.setattr("agent_platform.tools.executor.get_recorder", lambda: Mock())
 
     async def execute(_sandbox, command, timeout=None):
         return SimpleNamespace(stdout="", stderr="", exit_code=0)

@@ -7,7 +7,7 @@ import zipfile
 import pytest
 from PIL import Image
 
-from aio_agent_platform.pets.package import (
+from agent_platform.pets.package import (
     PetPackageError,
     parse_pet_package,
 )

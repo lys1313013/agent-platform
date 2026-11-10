@@ -15,9 +15,9 @@ from httpx import AsyncClient
 from PIL import Image
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from aio_agent_platform.auth.dependencies import get_current_user, get_execution_user
-from aio_agent_platform.db.models import Agent, Tenant, TenantMembership, User
-from aio_agent_platform.interface.api import app
+from agent_platform.auth.dependencies import get_current_user, get_execution_user
+from agent_platform.db.models import Agent, Tenant, TenantMembership, User
+from agent_platform.interface.api import app
 
 TENANT_A = uuid.UUID("10000000-0000-0000-0000-00000000000a")
 TENANT_B = uuid.UUID("10000000-0000-0000-0000-00000000000b")
@@ -53,7 +53,7 @@ class FakeStorage:
 def fake_storage(monkeypatch):
     FakeStorage.objects = {}
     monkeypatch.setattr(
-        "aio_agent_platform.pets.service.ObjectStorage", FakeStorage
+        "agent_platform.pets.service.ObjectStorage", FakeStorage
     )
 
 

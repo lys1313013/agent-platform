@@ -2,7 +2,7 @@
 
 from types import SimpleNamespace
 
-from aio_agent_platform.llm.client import AnthropicProvider, OpenAIProvider
+from agent_platform.llm.client import AnthropicProvider, OpenAIProvider
 
 
 def _openai_provider() -> OpenAIProvider:

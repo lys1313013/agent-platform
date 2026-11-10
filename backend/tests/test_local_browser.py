@@ -13,23 +13,23 @@ from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from aio_agent_platform.browser import service
-from aio_agent_platform.browser.context import BrowserRunContext, browser_run
-from aio_agent_platform.browser.gateway import BrowserGateway, Peer
-from aio_agent_platform.browser.models import (
+from agent_platform.browser import service
+from agent_platform.browser.context import BrowserRunContext, browser_run
+from agent_platform.browser.gateway import BrowserGateway, Peer
+from agent_platform.browser.models import (
     BrowserCommand,
     BrowserDevice,
     BrowserPairing,
     BrowserSession,
 )
-from aio_agent_platform.browser.security import now, origin, unseal
-from aio_agent_platform.browser.tools import NAMES, handle, register
-from aio_agent_platform.core import chat_runs
-from aio_agent_platform.core.config import settings
-from aio_agent_platform.core.execution_scope import bind_execution_scope
-from aio_agent_platform.db.models import Agent, Session, Tenant, TenantMembership, User
-from aio_agent_platform.tools.executor import ToolExecutor
-from aio_agent_platform.tools.registry import ToolRegistry
+from agent_platform.browser.security import now, origin, unseal
+from agent_platform.browser.tools import NAMES, handle, register
+from agent_platform.core import chat_runs
+from agent_platform.core.config import settings
+from agent_platform.core.execution_scope import bind_execution_scope
+from agent_platform.db.models import Agent, Session, Tenant, TenantMembership, User
+from agent_platform.tools.executor import ToolExecutor
+from agent_platform.tools.registry import ToolRegistry
 
 
 @pytest.fixture(autouse=True)
@@ -243,7 +243,7 @@ async def test_handler_requires_root_run_context(db_session, monkeypatch):
             await handle('open', {}, str(f.user.id), str(f.chat.id), tool_call_id='call', delegation=SimpleNamespace(delegation_depth=1))
         with bind_execution_scope(f.user.id, f.b.id, agent_id=f.agent.id):
             monkeypatch.setattr(service, 'get_session_factory', lambda: async_sessionmaker(db_session.bind, expire_on_commit=False))
-            import aio_agent_platform.browser.tools as browser_tools
+            import agent_platform.browser.tools as browser_tools
             monkeypatch.setattr(browser_tools, 'get_session_factory', service.get_session_factory)
             with pytest.raises(HTTPException):
                 await handle('open', {}, str(f.user.id), str(f.chat.id), tool_call_id='call')
@@ -284,7 +284,7 @@ async def test_persistent_authorization_requires_owner_and_revocation_never_revi
 
 @pytest.mark.parametrize('persistent', [False, True])
 async def test_persistent_navigate_skips_confirmation_only_after_valid_grant(db_session, monkeypatch, persistent):
-    import aio_agent_platform.browser.tools as browser_tools
+    import agent_platform.browser.tools as browser_tools
     f = await seed(db_session)
     if persistent:
         f.device.persistent_authorized_at = now()
@@ -317,9 +317,9 @@ async def test_persistent_navigate_skips_confirmation_only_after_valid_grant(db_
 
 
 def test_no_implicit_tools_no_private_tracing():
-    from aio_agent_platform.browser.context import private_browser_history
-    from aio_agent_platform.core.chat import filter_tools_by_agent
-    from aio_agent_platform.observation.client import get_langfuse_client
+    from agent_platform.browser.context import private_browser_history
+    from agent_platform.core.chat import filter_tools_by_agent
+    from agent_platform.observation.client import get_langfuse_client
     executor = ToolExecutor(registry=ToolRegistry(), sandbox_mgr=None)
     register(executor)
     assert not filter_tools_by_agent(executor, None)[0]
@@ -332,7 +332,7 @@ def test_no_implicit_tools_no_private_tracing():
 
 
 def test_browser_confirmation_stays_inside_capability_handler():
-    from aio_agent_platform.tools.policy import requires_approval
+    from agent_platform.tools.policy import requires_approval
     executor = ToolExecutor(registry=ToolRegistry(), sandbox_mgr=None)
     register(executor)
     assert not requires_approval(executor, 'local_browser_interact', 'ask_always')
@@ -431,9 +431,9 @@ async def test_gateway_heartbeat_survives_active_session_authorization_refresh(d
 async def test_browser_wait_yields_and_cancel_drains_child(monkeypatch):
     from unittest.mock import Mock
 
-    from aio_agent_platform.core.agent import AgentLoop, AgentStep, ToolContext
-    from aio_agent_platform.core.agent_events import ControlEvent
-    from aio_agent_platform.llm import ToolCall
+    from agent_platform.core.agent import AgentLoop, AgentStep, ToolContext
+    from agent_platform.core.agent_events import ControlEvent
+    from agent_platform.llm import ToolCall
     cancelled = asyncio.Event()
     async def execute(*args):
         try:
@@ -455,9 +455,9 @@ async def test_browser_wait_yields_and_cancel_drains_child(monkeypatch):
 async def test_http_owner_scope_and_original_tenant_after_ui_switch(db_session):
     from httpx import ASGITransport, AsyncClient
 
-    from aio_agent_platform.auth.jwt_handler import create_access_token
-    from aio_agent_platform.browser.routes import router
-    from aio_agent_platform.db.connection import get_db
+    from agent_platform.auth.jwt_handler import create_access_token
+    from agent_platform.browser.routes import router
+    from agent_platform.db.connection import get_db
     f = await seed(db_session)
     f.user.tenant_id = f.b.id
     f.b.is_active = False
@@ -517,7 +517,7 @@ async def test_denied_read_keeps_session_and_redacts_redirect_metadata(db_sessio
 
 
 async def test_retention_erases_content_but_preserves_receipt(db_session):
-    from aio_agent_platform.browser.security import seal
+    from agent_platform.browser.security import seal
     f = await seed(db_session)
     command = await service.enqueue(db_session, f.session, 'open', {}, 'expired-content')
     command.status = 'succeeded'
@@ -533,7 +533,7 @@ async def test_retention_erases_content_but_preserves_receipt(db_session):
 
 
 async def test_gateway_single_owner_lock_is_released_on_shutdown(db_session, monkeypatch):
-    from aio_agent_platform.browser import app as gateway_app
+    from agent_platform.browser import app as gateway_app
     factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
     monkeypatch.setattr(gateway_app, 'get_engine', lambda: db_session.bind)
     monkeypatch.setattr(gateway_app, 'get_session_factory', lambda: factory)

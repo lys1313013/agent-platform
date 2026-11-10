@@ -14,15 +14,15 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.ext.compiler import compiles
 
-from aio_agent_platform.db.models import (
+from agent_platform.db.models import (
     Memory,
     MemoryChange,
     MemoryOrganizePlan,
     MemoryVersion,
     Session,
 )
-from aio_agent_platform.memory import history, organization
-from aio_agent_platform.memory.service import MemoryService, _merge_meta
+from agent_platform.memory import history, organization
+from agent_platform.memory.service import MemoryService, _merge_meta
 
 
 @compiles(JSONB, "sqlite")
@@ -311,7 +311,7 @@ async def test_optimistic_update_cannot_silently_overwrite_concurrent_edit(facto
 
 
 async def test_history_sources_only_link_owned_non_room_sessions(factory):
-    from aio_agent_platform.interface.routes.memories import list_changes, memory_versions
+    from agent_platform.interface.routes.memories import list_changes, memory_versions
 
     user = uuid4()
     async with factory() as db:

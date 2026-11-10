@@ -2,7 +2,7 @@
 
 from uuid import uuid4
 
-from aio_agent_platform.core import throttle
+from agent_platform.core import throttle
 
 
 async def test_allow_once_blocks_repeats_within_ttl():

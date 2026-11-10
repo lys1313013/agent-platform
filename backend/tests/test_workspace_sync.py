@@ -10,8 +10,8 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from aio_agent_platform.storage.client import ObjectInfo, ObjectStorage
-from aio_agent_platform.storage.workspace import WorkspaceStorage
+from agent_platform.storage.client import ObjectInfo, ObjectStorage
+from agent_platform.storage.workspace import WorkspaceStorage
 
 
 def sync_fixture(old: bytes | None, new: bytes):

@@ -11,14 +11,14 @@ import openai
 import pytest
 from structlog.testing import capture_logs
 
-from aio_agent_platform.llm.client import AnthropicProvider, LLMResponse, OpenAIProvider
-from aio_agent_platform.llm.tool_schema import (
+from agent_platform.llm.client import AnthropicProvider, LLMResponse, OpenAIProvider
+from agent_platform.llm.tool_schema import (
     call_with_schema_fallback,
     prepare_tools,
     stream_with_schema_fallback,
 )
-from aio_agent_platform.tools.builtin import register_builtin_tools
-from aio_agent_platform.tools.registry import ToolRegistry
+from agent_platform.tools.builtin import register_builtin_tools
+from agent_platform.tools.registry import ToolRegistry
 
 
 def tool(name="b_video_query", schema=None):
@@ -141,7 +141,7 @@ def rejection(message="Invalid schema for function 'b_video_query': unsupported 
 async def test_provider_boundaries_keep_conversation_running(
     provider_cls, streaming, server_rejects, monkeypatch,
 ):
-    monkeypatch.setattr("aio_agent_platform.llm.client.get_recorder", Mock(return_value=Mock()))
+    monkeypatch.setattr("agent_platform.llm.client.get_recorder", Mock(return_value=Mock()))
     provider = object.__new__(provider_cls)
     provider.model = "test"
     provider.default_temperature = provider.default_max_tokens = provider.langfuse_client = None

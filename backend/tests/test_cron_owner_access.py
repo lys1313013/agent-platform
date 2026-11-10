@@ -12,12 +12,12 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.ext.compiler import compiles
 
-from aio_agent_platform.auth.dependencies import get_execution_user
-from aio_agent_platform.core.execution_scope import ExecutionAccessError
-from aio_agent_platform.cron_jobs.service import CronJobService
-from aio_agent_platform.db.connection import get_db
-from aio_agent_platform.db.models import CronJob, CronJobRun, Tenant, TenantMembership, User
-from aio_agent_platform.interface.routes.cron_jobs import router
+from agent_platform.auth.dependencies import get_execution_user
+from agent_platform.core.execution_scope import ExecutionAccessError
+from agent_platform.cron_jobs.service import CronJobService
+from agent_platform.db.connection import get_db
+from agent_platform.db.models import CronJob, CronJobRun, Tenant, TenantMembership, User
+from agent_platform.interface.routes.cron_jobs import router
 
 
 @compiles(JSONB, "sqlite")

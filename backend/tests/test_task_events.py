@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from aio_agent_platform.core import task_events
+from agent_platform.core import task_events
 
 
 class _FailingPubSub:

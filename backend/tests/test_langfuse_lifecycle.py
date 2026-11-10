@@ -4,7 +4,7 @@ import asyncio
 import threading
 from unittest.mock import Mock
 
-from aio_agent_platform.observation import client as observation
+from agent_platform.observation import client as observation
 
 
 async def test_shutdown_drains_sdk_off_event_loop(monkeypatch):

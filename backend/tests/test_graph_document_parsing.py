@@ -5,8 +5,8 @@ import zipfile
 
 import pytest
 
-from aio_agent_platform.graph_knowledge import mineru
-from aio_agent_platform.graph_knowledge.parsing import (
+from agent_platform.graph_knowledge import mineru
+from agent_platform.graph_knowledge.parsing import (
     DocumentParseError,
     ScannedPDFError,
     extract_text,

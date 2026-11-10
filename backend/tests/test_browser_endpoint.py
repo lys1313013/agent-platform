@@ -1,8 +1,8 @@
 import pytest
 from fastapi import HTTPException
 
-from aio_agent_platform.browser.security import public_endpoint
-from aio_agent_platform.core.config import settings
+from agent_platform.browser.security import public_endpoint
+from agent_platform.core.config import settings
 
 
 @pytest.mark.parametrize("url,allowed,valid", [

@@ -2,7 +2,7 @@
 
 from datetime import datetime, timedelta
 
-from aio_agent_platform.core import prompt as prompt_module
+from agent_platform.core import prompt as prompt_module
 
 
 def test_formatted_current_time_uses_beijing_timezone():

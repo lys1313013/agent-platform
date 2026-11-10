@@ -7,15 +7,15 @@ import httpx
 import pytest
 from sqlalchemy import select
 
-from aio_agent_platform.auth.dependencies import get_current_user
-from aio_agent_platform.db.models import Skill, User
-from aio_agent_platform.interface.api import app
-from aio_agent_platform.skills import sh_client
+from agent_platform.auth.dependencies import get_current_user
+from agent_platform.db.models import Skill, User
+from agent_platform.interface.api import app
+from agent_platform.skills import sh_client
 
 # The routes import the functions directly, so patch at the route module level.
-ROUTE_FETCH = "aio_agent_platform.interface.routes.skills.fetch_skill"
-ROUTE_SEARCH = "aio_agent_platform.interface.routes.skills.search_skills_sh"
-ROUTE_STORAGE = "aio_agent_platform.interface.routes.skills._get_storage"
+ROUTE_FETCH = "agent_platform.interface.routes.skills.fetch_skill"
+ROUTE_SEARCH = "agent_platform.interface.routes.skills.search_skills_sh"
+ROUTE_STORAGE = "agent_platform.interface.routes.skills._get_storage"
 
 
 def _make_user(user_id: UUID, tenant_id: UUID) -> User:

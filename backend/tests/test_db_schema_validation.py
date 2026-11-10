@@ -14,7 +14,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from aio_agent_platform.db.models import Base
+from agent_platform.db.models import Base
 
 
 async def _db_column_names(db: AsyncSession, table_name: str) -> set[str]:

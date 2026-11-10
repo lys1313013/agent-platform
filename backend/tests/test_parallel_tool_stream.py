@@ -7,10 +7,10 @@ from uuid import uuid4
 
 import pytest
 
-from aio_agent_platform.core.agent import AgentLoop
-from aio_agent_platform.llm.client import AnthropicProvider, LLMChunk, OpenAIProvider, ToolCall
-from aio_agent_platform.tools.executor import ToolResult
-from aio_agent_platform.tools.registry import Tool
+from agent_platform.core.agent import AgentLoop
+from agent_platform.llm.client import AnthropicProvider, LLMChunk, OpenAIProvider, ToolCall
+from agent_platform.tools.executor import ToolResult
+from agent_platform.tools.registry import Tool
 
 
 def call(index, name=None, arguments=None):
@@ -26,9 +26,9 @@ def event(calls=(), *, content=None, reasoning=None, finish=None):
 
 @pytest.fixture
 def quiet_observers(monkeypatch):
-    monkeypatch.setattr("aio_agent_platform.core.agent.get_hook_manager", Mock(return_value=Mock()))
-    monkeypatch.setattr("aio_agent_platform.core.agent.get_recorder", Mock(return_value=Mock()))
-    monkeypatch.setattr("aio_agent_platform.llm.client.get_recorder", Mock(return_value=Mock()))
+    monkeypatch.setattr("agent_platform.core.agent.get_hook_manager", Mock(return_value=Mock()))
+    monkeypatch.setattr("agent_platform.core.agent.get_recorder", Mock(return_value=Mock()))
+    monkeypatch.setattr("agent_platform.llm.client.get_recorder", Mock(return_value=Mock()))
 
 
 def make_loop(chunks):

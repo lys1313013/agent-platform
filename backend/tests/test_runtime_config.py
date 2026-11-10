@@ -9,13 +9,13 @@ import pytest_asyncio
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from aio_agent_platform.core import chat
-from aio_agent_platform.core.runtime_config import AgentRuntimeConfig
-from aio_agent_platform.db.models import Agent, LLMModel, LLMProvider
-from aio_agent_platform.delegation import handler as delegation
-from aio_agent_platform.interface.routes import agent_api
-from aio_agent_platform.tools.mcp.adapter import MCPToolInfo
-from aio_agent_platform.tools.registry import Tool, ToolRegistry
+from agent_platform.core import chat
+from agent_platform.core.runtime_config import AgentRuntimeConfig
+from agent_platform.db.models import Agent, LLMModel, LLMProvider
+from agent_platform.delegation import handler as delegation
+from agent_platform.interface.routes import agent_api
+from agent_platform.tools.mcp.adapter import MCPToolInfo
+from agent_platform.tools.registry import Tool, ToolRegistry
 
 
 @pytest_asyncio.fixture

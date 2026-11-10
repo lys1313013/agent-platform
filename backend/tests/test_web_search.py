@@ -2,8 +2,8 @@
 
 import pytest
 
-from aio_agent_platform.core.config import WebSettings
-from aio_agent_platform.tools.web.search import (
+from agent_platform.core.config import WebSettings
+from agent_platform.tools.web.search import (
     BraveProvider,
     DuckDuckGoProvider,
     SearchRouter,
@@ -134,7 +134,7 @@ async def test_searxng_search_parses_results(monkeypatch):
     }
     captured = {}
     monkeypatch.setattr(
-        "aio_agent_platform.tools.web.search.httpx.AsyncClient",
+        "agent_platform.tools.web.search.httpx.AsyncClient",
         lambda **kw: _FakeClient(payload, captured, **kw),
     )
     provider = SearXNGProvider("http://searxng.internal:8888/", timeout=30)

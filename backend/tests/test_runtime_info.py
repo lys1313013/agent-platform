@@ -11,18 +11,18 @@ from uuid import uuid4
 import pytest
 from docker.errors import DockerException, NotFound
 
-from aio_agent_platform.core.context import current_agent_id
-from aio_agent_platform.core.execution_scope import bind_execution_scope, execution_tenant_id
-from aio_agent_platform.tools import runtime_info
-from aio_agent_platform.tools.builtin import register_builtin_tools
-from aio_agent_platform.tools.executor import ToolExecutor
-from aio_agent_platform.tools.registry import ToolRegistry
+from agent_platform.core.context import current_agent_id
+from agent_platform.core.execution_scope import bind_execution_scope, execution_tenant_id
+from agent_platform.tools import runtime_info
+from agent_platform.tools.builtin import register_builtin_tools
+from agent_platform.tools.executor import ToolExecutor
+from agent_platform.tools.registry import ToolRegistry
 
 
 @pytest.fixture
 def executor(monkeypatch):
-    monkeypatch.setattr("aio_agent_platform.tools.executor.get_hook_manager", Mock())
-    monkeypatch.setattr("aio_agent_platform.tools.executor.get_recorder", Mock())
+    monkeypatch.setattr("agent_platform.tools.executor.get_hook_manager", Mock())
+    monkeypatch.setattr("agent_platform.tools.executor.get_recorder", Mock())
     registry = ToolRegistry()
     register_builtin_tools(registry)
     executor = ToolExecutor(registry, None)

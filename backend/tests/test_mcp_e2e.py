@@ -35,14 +35,14 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.ext.compiler import compiles
 
-from aio_agent_platform.core.agent import AgentLoop
-from aio_agent_platform.core.execution_scope import bind_execution_scope
-from aio_agent_platform.db.models import MCPServer, Tenant, TenantMembership, User
-from aio_agent_platform.llm import LLMMessage
-from aio_agent_platform.tools.executor import ToolExecutor
-from aio_agent_platform.tools.mcp.adapter import MCPServerConnection
-from aio_agent_platform.tools.mcp.manager import MCPManager
-from aio_agent_platform.tools.registry import ToolRegistry
+from agent_platform.core.agent import AgentLoop
+from agent_platform.core.execution_scope import bind_execution_scope
+from agent_platform.db.models import MCPServer, Tenant, TenantMembership, User
+from agent_platform.llm import LLMMessage
+from agent_platform.tools.executor import ToolExecutor
+from agent_platform.tools.mcp.adapter import MCPServerConnection
+from agent_platform.tools.mcp.manager import MCPManager
+from agent_platform.tools.registry import ToolRegistry
 
 # --------------------------------------------------------------------------- #
 # Fake MCP Server (SSE transport, one test tool)                              #
@@ -304,7 +304,7 @@ async def mcp_authorization(monkeypatch, fake_mcp_server):
         for model in (User, Tenant, TenantMembership, MCPServer):
             await conn.run_sync(model.__table__.create)
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    monkeypatch.setattr("aio_agent_platform.db.connection.get_session_factory", lambda: factory)
+    monkeypatch.setattr("agent_platform.db.connection.get_session_factory", lambda: factory)
 
     async def register(server_id):
         uid, tid = uuid.uuid4(), uuid.uuid4()
@@ -398,7 +398,7 @@ class _ScriptedLLMProvider:
         # First call: emit the scripted tool calls (if any)
         if self._call_index == 0 and self.scripted_tool_calls:
             for tc in self.scripted_tool_calls:
-                from aio_agent_platform.llm import LLMChunk, ToolCall
+                from agent_platform.llm import LLMChunk, ToolCall
 
                 yield LLMChunk(
                     type="tool_call_start",
@@ -409,7 +409,7 @@ class _ScriptedLLMProvider:
                 )
         else:
             # Subsequent calls (or no scripted tools): emit a final text answer
-            from aio_agent_platform.llm import LLMChunk
+            from agent_platform.llm import LLMChunk
 
             yield LLMChunk(type="text_delta", content="done.")
 
@@ -439,7 +439,7 @@ class TestLLMSeesMCPTools:
         )
 
         # --- Replicate the chat route's tool-building path ---
-        from aio_agent_platform.interface.routes.chat import _filter_tools_by_agent
+        from agent_platform.interface.routes.chat import _filter_tools_by_agent
 
         registry = ToolRegistry()
         executor = ToolExecutor(
@@ -484,7 +484,7 @@ class TestLLMSeesMCPTools:
             },
         )
 
-        from aio_agent_platform.interface.routes.chat import _filter_tools_by_agent
+        from agent_platform.interface.routes.chat import _filter_tools_by_agent
 
         registry = ToolRegistry()
         executor = ToolExecutor(

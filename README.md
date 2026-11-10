@@ -1,4 +1,4 @@
-# AIO Agent Platform
+# Agent Platform
 
 多租户 AI 智能体服务器，支持 LLM 调用、沙箱执行、持久记忆和多智能体委派。
 
@@ -31,9 +31,9 @@
 ## 项目结构
 
 ```
-aio-agent-platform/
+agent-platform/
 ├── backend/                # 后端
-│   ├── src/aio_agent_platform/ # Python 源码
+│   ├── src/agent_platform/ # Python 源码
 │   │   ├── core/           # Agent 循环、配置、提示词
 │   │   ├── delegation/     # 子智能体委派处理器
 │   │   ├── interface/      # FastAPI 路由（对话、会话、智能体...）
@@ -64,7 +64,7 @@ aio-agent-platform/
 
 ```bash
 # 1. 克隆并配置环境
-git clone <repo-url> && cd aio-agent-platform
+git clone <repo-url> && cd agent-platform
 cp backend/.env.example backend/.env
 
 # 2. 启动基础设施 + 装依赖 + 数据库迁移
@@ -86,14 +86,14 @@ docker compose pull
 docker compose up -d --wait
 ```
 
-两者通过 `aio-agent-platform-infra` 网络连接；自定义网络时，在根目录 `.env` 中统一设置 `INFRA_NETWORK_NAME`。应用执行 `docker compose down` 只停止应用，不会停止 PostgreSQL、Redis、MinIO 或删除基础服务网络。
+两者通过 `agent-platform-infra` 网络连接；自定义网络时，在根目录 `.env` 中统一设置 `INFRA_NETWORK_NAME`。应用执行 `docker compose down` 只停止应用，不会停止 PostgreSQL、Redis、MinIO 或删除基础服务网络。
 
 基础服务保留原默认数据卷名 `aio-agent-platform_pgdata` 和 `aio-agent-platform_minio_data`。已有部署若使用过自定义项目名，请先用 `docker volume ls` 核对，并通过 `POSTGRES_VOLUME_NAME`、`MINIO_VOLUME_NAME` 指定原数据卷，再切换基础服务项目；不要同时运行新旧基础服务容器。
 
 ### 启动后端（终端 1）
 
 ```bash
-cd backend && uv run uvicorn aio_agent_platform.interface.api:app --host 0.0.0.0 --port 8100 --reload
+cd backend && uv run uvicorn agent_platform.interface.api:app --host 0.0.0.0 --port 8100 --reload
 ```
 
 后端 API：**http://localhost:8100** ｜ API 文档：**http://localhost:8100/docs**
@@ -109,8 +109,8 @@ cd frontend && pnpm run dev
 ### 其他命令
 
 ```bash
-cd backend && uv run aio-cli          # CLI 对话
-cd backend && uv run aio-manage       # 管理命令
+cd backend && uv run agent-cli          # CLI 对话
+cd backend && uv run agent-manage       # 管理命令
 cd backend && uv run alembic upgrade head  # 数据库迁移
 cd frontend && pnpm run build         # 前端生产构建
 cd frontend && pnpm run lint          # ESLint（JavaScript / TypeScript / React Hooks）
@@ -126,14 +126,14 @@ cd frontend && pnpm run lint          # ESLint（JavaScript / TypeScript / React
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `DATABASE_URL` | `postgresql+asyncpg://agent_user:changeme@localhost:5435/aio_agent_platform` | 数据库连接字符串 |
+| `DATABASE_URL` | `postgresql+asyncpg://agent_user:changeme@localhost:5435/agent_platform` | 数据库连接字符串 |
 | `JWT_SECRET` | *（必填）* | JWT 签名密钥 |
 | `JWT_ACCESS_TOKEN_EXPIRE_MINUTES` | `15` | 访问令牌有效期（分钟） |
 | `JWT_REFRESH_TOKEN_EXPIRE_DAYS` | `7` | 刷新令牌有效期（天） |
 | `HOST` / `PORT` | `0.0.0.0` / `8100` | API 服务绑定地址 |
 | `CORS_ORIGINS` | `http://localhost:1717,http://localhost:3000` | 允许的跨域来源 |
 | `AGENT_TRUST_LEVEL` | `ask_dangerous` | 工具执行信任级别：`ask_always` / `ask_dangerous` / `auto_all` |
-| `SANDBOX_IMAGE` | `crpi-yvha9coypdedaafa.cn-beijing.personal.cr.aliyuncs.com/lys1313013/aio-agent-platform-sandbox:latest` | 沙箱 Docker 镜像 |
+| `SANDBOX_IMAGE` | `crpi-yvha9coypdedaafa.cn-beijing.personal.cr.aliyuncs.com/lys1313013/agent-platform-sandbox:latest` | 沙箱 Docker 镜像 |
 
 JWT 有效期兼容旧的无 `JWT_` 前缀变量；两者同时配置时以带前缀变量为准。修改有效期只影响新签发令牌，旧令牌保留原过期时间；需要立即使全部旧令牌失效时，由运维轮换 `JWT_SECRET`，用户须重新登录。密码至少 8 个字符，UTF-8 编码最多 72 字节（例如最多 24 个常见汉字），超过限制直接拒绝，不截断。API 中 bcrypt 使用最多 4 个并发工作线程，避免阻塞事件循环。
 

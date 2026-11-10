@@ -9,16 +9,16 @@ from uuid import uuid4
 
 import pytest
 
-from aio_agent_platform.channels.adapter import InboundEvent
-from aio_agent_platform.channels.file_send import (
+from agent_platform.channels.adapter import InboundEvent
+from agent_platform.channels.file_send import (
     SEND_FILE_TOOL_NAME,
     ChannelSendContext,
     current_channel_send_ctx,
     handle_send_file,
 )
-from aio_agent_platform.tools.builtin import register_builtin_tools
-from aio_agent_platform.tools.executor import ToolExecutor
-from aio_agent_platform.tools.registry import ToolRegistry
+from agent_platform.tools.builtin import register_builtin_tools
+from agent_platform.tools.executor import ToolExecutor
+from agent_platform.tools.registry import ToolRegistry
 
 pytestmark = pytest.mark.asyncio
 
@@ -66,7 +66,7 @@ async def test_send_file_success(monkeypatch) -> None:
     adapter = MagicMock()
     adapter.send_file = AsyncMock(return_value="om_file")
     monkeypatch.setattr(
-        "aio_agent_platform.channels.file_send._read_workspace_file",
+        "agent_platform.channels.file_send._read_workspace_file",
         AsyncMock(return_value=b"csv-data"),
     )
     output = await _run_with_ctx(adapter, {"file_path": "uploads/a.csv"})
@@ -82,7 +82,7 @@ async def test_send_file_file_name_override(monkeypatch) -> None:
     adapter = MagicMock()
     adapter.send_file = AsyncMock(return_value="om_file")
     monkeypatch.setattr(
-        "aio_agent_platform.channels.file_send._read_workspace_file",
+        "agent_platform.channels.file_send._read_workspace_file",
         AsyncMock(return_value=b"x"),
     )
     await _run_with_ctx(adapter, {"file_path": "uploads/result.csv", "file_name": "处理结果.csv"})
@@ -115,7 +115,7 @@ async def test_file_read_failure(monkeypatch) -> None:
     adapter = MagicMock()
     adapter.send_file = AsyncMock(return_value="om_file")
     monkeypatch.setattr(
-        "aio_agent_platform.channels.file_send._read_workspace_file",
+        "agent_platform.channels.file_send._read_workspace_file",
         AsyncMock(return_value=None),
     )
     output = await _run_with_ctx(adapter, {"file_path": "uploads/missing.csv"})
@@ -128,7 +128,7 @@ async def test_oversize_file_rejected(monkeypatch) -> None:
     adapter.send_file = AsyncMock(return_value="om_file")
     adapter.max_file_size_bytes = 30 * 1024 * 1024
     monkeypatch.setattr(
-        "aio_agent_platform.channels.file_send._read_workspace_file",
+        "agent_platform.channels.file_send._read_workspace_file",
         AsyncMock(return_value=b"0" * (30 * 1024 * 1024 + 1)),
     )
     output = await _run_with_ctx(adapter, {"file_path": "uploads/big.bin"})
@@ -141,7 +141,7 @@ async def test_send_failure(monkeypatch) -> None:
     adapter = MagicMock()
     adapter.send_file = AsyncMock(return_value=None)
     monkeypatch.setattr(
-        "aio_agent_platform.channels.file_send._read_workspace_file",
+        "agent_platform.channels.file_send._read_workspace_file",
         AsyncMock(return_value=b"x"),
     )
     output = await _run_with_ctx(adapter, {"file_path": "uploads/a.csv"})

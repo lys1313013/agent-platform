@@ -7,18 +7,18 @@ from uuid import uuid4
 
 import pytest
 
-from aio_agent_platform.channels.cron_notify import (
+from agent_platform.channels.cron_notify import (
     CronNotifyContext,
     current_cron_notify_ctx,
     handle_cron_respond,
     handle_notify_channel,
 )
-from aio_agent_platform.core import chat
-from aio_agent_platform.core.agent import AgentStep
-from aio_agent_platform.core.chat import filter_tools_by_agent as real_filter_tools
-from aio_agent_platform.core.execution_scope import execution_tenant_id
-from aio_agent_platform.cron_jobs.executor import execute_cron_job
-from aio_agent_platform.interface.routes.cron_jobs import CronJobRunOut
+from agent_platform.core import chat
+from agent_platform.core.agent import AgentStep
+from agent_platform.core.chat import filter_tools_by_agent as real_filter_tools
+from agent_platform.core.execution_scope import execution_tenant_id
+from agent_platform.cron_jobs.executor import execute_cron_job
+from agent_platform.interface.routes.cron_jobs import CronJobRunOut
 
 
 @pytest.fixture
@@ -75,7 +75,7 @@ def execution(monkeypatch):
     monkeypatch.setattr(chat, "filter_tools_by_agent", lambda *a, **kw: ([], []))
     monkeypatch.setattr(chat, "build_system_prompt_with_memories", AsyncMock(return_value="task"))
     monkeypatch.setattr(chat, "build_agent_loop", build_loop)
-    monkeypatch.setattr("aio_agent_platform.core.context.prepare_context",
+    monkeypatch.setattr("agent_platform.core.context.prepare_context",
                         AsyncMock(return_value=([], None)))
     return d
 
@@ -398,17 +398,17 @@ async def test_real_agent_loop_and_tool_executor_report_decision(execution, monk
     import json
     from unittest.mock import Mock
 
-    from aio_agent_platform.core import agent as agent_module
-    from aio_agent_platform.llm import LLMChunk, ToolCall
-    from aio_agent_platform.tools import executor as executor_module
-    from aio_agent_platform.tools.registry import ToolRegistry
+    from agent_platform.core import agent as agent_module
+    from agent_platform.llm import LLMChunk, ToolCall
+    from agent_platform.tools import executor as executor_module
+    from agent_platform.tools.registry import ToolRegistry
 
     d = execution
     calls = 0
     tool_executor = executor_module.ToolExecutor(ToolRegistry(), Mock())
     tool_executor.register_direct_handler("cron_respond", handle_cron_respond, permission_level="write")
     tool_executor.register_direct_handler("notify_channel", handle_notify_channel, permission_level="write")
-    from aio_agent_platform.tools.builtin import register_builtin_tools
+    from agent_platform.tools.builtin import register_builtin_tools
     register_builtin_tools(tool_executor.registry)
 
     # Keep real Tool objects and schemas: an empty mocked filter cannot catch
@@ -452,7 +452,7 @@ async def test_real_agent_loop_and_tool_executor_report_decision(execution, monk
 @pytest.mark.parametrize("custom_prompt", [None, "你是监控智能体。旧约定：执行后调用 notify_channel。"])
 @pytest.mark.parametrize("bound_channel", [False, True])
 async def test_cron_contract_follows_default_or_custom_prompt(execution, monkeypatch, custom_prompt, bound_channel):
-    from aio_agent_platform.core.prompt import build_cron_execution_prompt, build_system_prompt
+    from agent_platform.core.prompt import build_cron_execution_prompt, build_system_prompt
 
     d = execution
     if not bound_channel:
@@ -477,7 +477,7 @@ async def test_cron_contract_follows_default_or_custom_prompt(execution, monkeyp
 async def test_prompt_examples_execute_the_documented_delivery_decision(execution, notify):
     import json
 
-    from aio_agent_platform.core.prompt import build_cron_execution_prompt
+    from agent_platform.core.prompt import build_cron_execution_prompt
 
     d = execution
     examples = [json.loads(line) for line in build_cron_execution_prompt(
@@ -506,7 +506,7 @@ async def test_cron_passes_task_model_or_agent_model(execution, monkeypatch, ove
     agent.model_id = uuid4()
     d.job.model_id = uuid4() if override else None
     validate = AsyncMock()
-    monkeypatch.setattr("aio_agent_platform.cron_jobs.executor.validate_job_model", validate)
+    monkeypatch.setattr("agent_platform.cron_jobs.executor.validate_job_model", validate)
     await execute(d)
     assert d.options["agent_model_id"] == (d.job.model_id or agent.model_id)
     assert d.options["tenant_id"] == d.job.tenant_id
@@ -520,7 +520,7 @@ async def test_cron_passes_task_model_or_agent_model(execution, monkeypatch, ove
 async def test_cron_unavailable_override_fails_without_fallback(execution, monkeypatch):
     d = execution
     d.job.model_id = uuid4()
-    monkeypatch.setattr("aio_agent_platform.cron_jobs.executor.validate_job_model",
+    monkeypatch.setattr("agent_platform.cron_jobs.executor.validate_job_model",
                         AsyncMock(side_effect=ValueError("指定的执行模型已停用")))
     await execute(d)
     assert d.run.status == "failed"

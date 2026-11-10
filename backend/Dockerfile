@@ -24,4 +24,4 @@ RUN uv sync --frozen --no-dev
 
 EXPOSE 8100
 
-CMD ["uv", "run", "aio-api"]
+CMD ["uv", "run", "agent-api"]

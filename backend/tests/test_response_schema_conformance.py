@@ -10,7 +10,7 @@ This runs without a database — it is a pure static contract check.
 
 import pytest
 
-from aio_agent_platform.db.models import (
+from agent_platform.db.models import (
     Agent,
     ChannelBinding,
     ChannelConfig,
@@ -26,16 +26,16 @@ from aio_agent_platform.db.models import (
     Session,
     UserPet,
 )
-from aio_agent_platform.interface.routes.agents import AgentOut
-from aio_agent_platform.interface.routes.channels import ChannelBindingOut, ChannelOut
-from aio_agent_platform.interface.routes.cron_jobs import CronJobOut, CronJobRunOut
-from aio_agent_platform.interface.routes.delegations import DelegationOut
-from aio_agent_platform.interface.routes.knowledge import KnowledgeBaseOut
-from aio_agent_platform.interface.routes.mcp_servers import MCPServerOut
-from aio_agent_platform.interface.routes.memories import MemoryOut
-from aio_agent_platform.interface.routes.pets import PetPackageOut, UserPetOut
-from aio_agent_platform.interface.routes.remote_tools import RemoteToolOut
-from aio_agent_platform.interface.routes.sessions import MessageOut, SessionOut
+from agent_platform.interface.routes.agents import AgentOut
+from agent_platform.interface.routes.channels import ChannelBindingOut, ChannelOut
+from agent_platform.interface.routes.cron_jobs import CronJobOut, CronJobRunOut
+from agent_platform.interface.routes.delegations import DelegationOut
+from agent_platform.interface.routes.knowledge import KnowledgeBaseOut
+from agent_platform.interface.routes.mcp_servers import MCPServerOut
+from agent_platform.interface.routes.memories import MemoryOut
+from agent_platform.interface.routes.pets import PetPackageOut, UserPetOut
+from agent_platform.interface.routes.remote_tools import RemoteToolOut
+from agent_platform.interface.routes.sessions import MessageOut, SessionOut
 
 # (response schema, ORM model it serializes, computed/joined fields to skip)
 REGISTRY = [

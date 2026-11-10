@@ -7,7 +7,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from aio_agent_platform.db.models import Agent
+from agent_platform.db.models import Agent
 
 
 class TestAgentModel:

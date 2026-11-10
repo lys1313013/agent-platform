@@ -8,9 +8,9 @@ import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-from aio_agent_platform.auth.dependencies import get_current_user
-from aio_agent_platform.db.connection import get_db
-from aio_agent_platform.workspaces import routes
+from agent_platform.auth.dependencies import get_current_user
+from agent_platform.db.connection import get_db
+from agent_platform.workspaces import routes
 
 
 @pytest.mark.parametrize("workspace_kind", ["not_owned", "missing", "default", "owned"])

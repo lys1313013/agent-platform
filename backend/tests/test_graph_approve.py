@@ -6,13 +6,13 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from aio_agent_platform.db.models import (
+from agent_platform.db.models import (
     GraphEntity,
     GraphKnowledgeBase,
     GraphRelationship,
     Tenant,
 )
-from aio_agent_platform.graph_knowledge import service
+from agent_platform.graph_knowledge import service
 
 
 async def _make_graph(db: AsyncSession) -> tuple[Tenant, GraphKnowledgeBase, GraphEntity, GraphEntity, GraphRelationship]:

@@ -12,8 +12,8 @@ from uuid import uuid4
 
 import pytest
 
-from aio_agent_platform.core.agent import AgentLoop
-from aio_agent_platform.llm import LLMChunk, LLMStreamError, ToolCall
+from agent_platform.core.agent import AgentLoop
+from agent_platform.llm import LLMChunk, LLMStreamError, ToolCall
 
 
 def _make_loop(stream_side_effects: list) -> AgentLoop:
@@ -168,7 +168,7 @@ class TestStreamDisconnectRetry:
     @pytest.mark.asyncio
     async def test_zero_output_disconnect_retries_and_succeeds(self, monkeypatch):
         """First stream raises before any chunk; retry succeeds, content intact."""
-        monkeypatch.setattr("aio_agent_platform.core.agent.asyncio.sleep", _no_sleep)
+        monkeypatch.setattr("agent_platform.core.agent.asyncio.sleep", _no_sleep)
 
         loop, calls = _make_loop([
             LLMStreamError("LLM 流式连接失败: boom"),
@@ -187,7 +187,7 @@ class TestStreamDisconnectRetry:
     @pytest.mark.asyncio
     async def test_retry_exhaustion_raises(self, monkeypatch):
         """All attempts fail with zero output -> LLMStreamError propagates."""
-        monkeypatch.setattr("aio_agent_platform.core.agent.asyncio.sleep", _no_sleep)
+        monkeypatch.setattr("agent_platform.core.agent.asyncio.sleep", _no_sleep)
 
         loop, calls = _make_loop([
             LLMStreamError("boom 1"),
@@ -203,7 +203,7 @@ class TestStreamDisconnectRetry:
     @pytest.mark.asyncio
     async def test_partial_text_disconnect_does_not_retry(self, monkeypatch):
         """Text already streamed before disconnect -> no retry, error raised."""
-        monkeypatch.setattr("aio_agent_platform.core.agent.asyncio.sleep", _no_sleep)
+        monkeypatch.setattr("agent_platform.core.agent.asyncio.sleep", _no_sleep)
 
         async def gen_partial():
             yield _text_chunk("partial ")
@@ -234,7 +234,7 @@ class TestStreamDisconnectRetry:
     @pytest.mark.asyncio
     async def test_partial_tool_call_disconnect_does_not_retry(self, monkeypatch):
         """A tool_call_start already streamed -> counts as produced, no retry."""
-        monkeypatch.setattr("aio_agent_platform.core.agent.asyncio.sleep", _no_sleep)
+        monkeypatch.setattr("agent_platform.core.agent.asyncio.sleep", _no_sleep)
 
         async def gen_partial():
             yield LLMChunk(
@@ -268,7 +268,7 @@ class TestStreamDisconnectRetry:
     @pytest.mark.asyncio
     async def test_retry_resets_partial_state(self, monkeypatch):
         """After a zero-output retry, no stale partial state leaks into the result."""
-        monkeypatch.setattr("aio_agent_platform.core.agent.asyncio.sleep", _no_sleep)
+        monkeypatch.setattr("agent_platform.core.agent.asyncio.sleep", _no_sleep)
 
         # First attempt disconnects with zero output; second attempt succeeds
         # with a tool call to verify the loop continues normally post-retry.

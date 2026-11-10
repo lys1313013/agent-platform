@@ -3,9 +3,9 @@
 from unittest.mock import MagicMock
 from uuid import uuid4
 
-from aio_agent_platform.core.agent import AgentLoop
-from aio_agent_platform.llm import LLMChunk
-from aio_agent_platform.rooms.runtime import Output
+from agent_platform.core.agent import AgentLoop
+from agent_platform.llm import LLMChunk
+from agent_platform.rooms.runtime import Output
 
 
 async def test_room_exposes_reasoning_before_answer_without_forcing_each_save():

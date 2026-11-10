@@ -1,0 +1,325 @@
+"""System prompt builder — renders Jinja2 template with dynamic context."""
+
+from __future__ import annotations
+
+import logging
+from datetime import datetime
+from pathlib import Path
+from types import SimpleNamespace
+from zoneinfo import ZoneInfo
+
+from jinja2 import Environment, FileSystemLoader
+
+from agent_platform.core.context import ContextBudget, estimate_tokens
+from agent_platform.memory.presentation import format_memory
+from agent_platform.portrait.presentation import format_portrait_section
+
+logger = logging.getLogger(__name__)
+
+# Resolve prompts directory relative to project root
+_PROMPTS_DIR = Path(__file__).resolve().parent.parent.parent.parent / "prompts"
+_env = Environment(
+    loader=FileSystemLoader(str(_PROMPTS_DIR)),
+    autoescape=False,
+    trim_blocks=True,
+    lstrip_blocks=True,
+)
+_env.filters["memory_record"] = format_memory
+_env.globals["portrait_section"] = format_portrait_section
+
+# Max L1 memories to include when under budget pressure
+_MAX_L1_MEMORIES = 10
+
+# User-facing time is interpreted as Beijing time across the platform (cron jobs,
+# daily memories, and natural-language dates).  Keep the model's clock in the
+# same timezone so questions such as "现在几点" and "今天" are unambiguous.
+_MODEL_TIMEZONE = ZoneInfo("Asia/Shanghai")
+
+
+def _format_current_datetime() -> str:
+    """Return a precise, timezone-aware timestamp for the system prompt."""
+    current = datetime.now(_MODEL_TIMEZONE)
+    return f"{current.isoformat(sep=' ', timespec='seconds')} ({_MODEL_TIMEZONE.key})"
+
+
+def build_current_time_context() -> str:
+    """Fresh runtime context appended to each model request, outside saved history."""
+    return (
+        "[平台时间上下文]\n"
+        f"当前时间（北京时间）：{_format_current_datetime()}\n"
+        "涉及“现在、今天、明天”等相对时间时，请以此时间为准，"
+        "不要将历史对话、记忆或先前提示中的时间当作当前时间。"
+        "这是平台自动附加的上下文，请继续处理用户的请求，无需单独回复此提示。"
+    )
+
+
+def build_cron_execution_prompt(*, has_notify_channel: bool) -> str:
+    """Runtime-only contract, appended after default/custom role and memory prompts."""
+    return _env.get_template("cron_execution.j2").render(
+        has_notify_channel=has_notify_channel,
+    ).strip()
+
+
+def build_system_prompt(
+    tools: list | None = None,
+    persistent_memories: list | None = None,
+    relevant_memories: list | None = None,
+    relevant_skills: list | None = None,
+    daily_memories: list | None = None,
+    user_name: str | None = None,
+    user_portrait: str | None = None,
+    agent_prompt: str | None = None,
+    child_agents: list | None = None,
+    workspace_files: list | None = None,
+) -> str:
+    """
+    Build the system prompt for the agent.
+
+    Args:
+        tools: List of Tool objects with .name and .description
+        persistent_memories: List of Memory objects with .content (L1 — always loaded)
+        relevant_memories: List of Memory objects with .content and .layer (L2/L3 — by relevance)
+        daily_memories: List of DailyMemory objects with .date and .content (by day)
+        relevant_skills: List of Skill objects with .name and .description
+        user_name: User's display name
+        agent_prompt: Agent's custom system prompt (overrides default template)
+        child_agents: List of Agent objects with .id, .name, .description for delegation
+        workspace_files: List of dicts with filename, size, mime, workspace_path for
+                         files the user has uploaded to the workspace.
+
+    Returns:
+        Rendered system prompt string.
+    """
+    if agent_prompt:
+        # Use agent's custom prompt as base, then append memories/skills context
+        parts = [agent_prompt, _env.get_template("artifact_delivery.j2").render(), _env.get_template("skill_authoring.j2").render(), _env.get_template("memory_usage.j2").render()]
+
+        parts.append(format_portrait_section(user_portrait))
+
+        if persistent_memories:
+            persistent_memories = _trim_memories(persistent_memories)
+            parts.append("\n## User Context (from memory)")
+            for memory in persistent_memories:
+                parts.append(f"- {format_memory(memory)}")
+
+        if relevant_memories:
+            relevant_memories = _trim_relevant_memories(relevant_memories)
+            parts.append("\n## Relevant Memories")
+            for memory in relevant_memories:
+                parts.append(f"- {format_memory(memory)}")
+
+        if daily_memories:
+            parts.append(_build_daily_section(_trim_daily_memories(daily_memories)))
+
+        if relevant_skills:
+            relevant_skills = _trim_skills(relevant_skills)
+            parts.append("\n## Relevant Experience")
+            for skill in relevant_skills:
+                parts.append(f"### {skill.name} (ID: {getattr(skill, 'id', 'unknown')}, version: {getattr(skill, 'version', 'unknown')})")
+                parts.append(skill.description or "")
+                parts.append(f"Verification: {(getattr(skill, 'verification', None) or {}).get('status', 'unverified')}")
+                if hasattr(skill, "files") and skill.files:
+                    file_summary = []
+                    for f in skill.files:
+                        fname = f.get("path", "").split("/")[-1]
+                        ftype = f.get("type", "")
+                        file_summary.append(f"{fname} ({ftype})")
+                    parts.append(f"  Files: {', '.join(file_summary)}")
+                    parts.append("  Use `view_skill` to read details and auto-deploy files to sandbox.")
+
+        if workspace_files and len(workspace_files) > 0:
+            parts.append(_build_files_section(workspace_files))
+
+        # Inject delegation guidance: pre-configured child agents, or dynamic spawn
+        has_delegate_tool = _has_delegate_tool(tools)
+        if child_agents:
+            parts.append(_build_child_agents_section(child_agents))
+        elif has_delegate_tool:
+            parts.append(_build_dynamic_delegation_section())
+
+        # The clock is injected as a transient request message; keeping it out
+        # of the system prompt is what makes cross-turn prompt caching work.
+        prompt = "\n".join(parts)
+        return _enforce_prompt_budget(prompt)
+
+    # Default: use Jinja2 template
+    # Pre-trim dynamic content to control prompt size
+    persistent_memories = _trim_memories(persistent_memories or [])
+    relevant_memories = _trim_relevant_memories(relevant_memories or [])
+    relevant_skills = _trim_skills(relevant_skills or [])
+    daily_memories = _trim_daily_memories(daily_memories or [])
+
+    template = _env.get_template("system_prompt.j2")
+
+    prompt = template.render(
+        tools=tools or [],
+        persistent_memories=persistent_memories,
+        relevant_memories=relevant_memories,
+        relevant_skills=relevant_skills,
+        daily_memories=daily_memories,
+        child_agents=child_agents or [],
+        user_name=user_name or "User",
+        user_portrait=user_portrait or "",
+    )
+
+    if workspace_files and len(workspace_files) > 0:
+        prompt += "\n" + _build_files_section(workspace_files)
+    if _has_delegate_tool(tools) and not child_agents:
+        prompt += "\n" + _build_dynamic_delegation_section()
+    return _enforce_prompt_budget(prompt)
+
+
+# ---- Budget-aware trimming helpers ----
+
+
+def _build_child_agents_section(child_agents: list) -> str:
+    """Build the child agents section for the system prompt."""
+    lines = ["\n## Available Child Agents",
+             "You can delegate specialized tasks to the following child agents using the `delegate_task` tool:\n"]
+    for child in child_agents:
+        name = getattr(child, "name", "Unknown")
+        cid = getattr(child, "id", "")
+        desc = getattr(child, "description", None) or "Specialized sub-agent"
+        lines.append(f"- **{name}** (ID: `{cid}`): {desc}")
+    lines.append("")
+    lines.append(
+        "**Delegation guidelines**:\n"
+        "- Use delegation when a task matches a child agent's specialization\n"
+        "- Provide clear task descriptions with sufficient context for independent execution\n"
+        "- Child agents share your sandbox environment and can access files you've created\n"
+        "- You can delegate multiple tasks in parallel by calling `delegate_task` multiple times"
+    )
+    return "\n".join(lines)
+
+
+def _has_delegate_tool(tools: list | None) -> bool:
+    """Whether the delegate_task tool is present in the agent's tool list."""
+    return any(getattr(t, "name", None) == "delegate_task" for t in (tools or []))
+
+
+def _build_dynamic_delegation_section() -> str:
+    """Guidance for spawning temporary specialist sub-agents on demand."""
+    return (
+        "\n## 动态子智能体（临时专家）\n"
+        "当某个子任务需要独立专业能力时，你可以通过 `delegate_task` 工具"
+        "**动态创建临时子智能体**来执行，无需预先关联子智能体：\n"
+        "- 调用时提供 `role_name`（角色名）和 `role_description`（职责描述）以及清晰的 `task`，"
+        "系统会自动生成一个该角色的临时专家来完成任务\n"
+        "- 临时专家共享你的沙箱环境，可以读写你创建的文件\n"
+        "- 你可以在同一轮并行创建多个临时专家处理不同子任务\n"
+        "- 临时专家仅在该次任务中存在，不会占用你的智能体列表\n"
+    )
+
+
+def _build_files_section(files: list) -> str:
+    """Build the workspace files section for the system prompt.
+
+    Only includes lightweight metadata (name, size, path) — never file content.
+    The agent should use file_info to get detailed structure before processing.
+    """
+    lines = ["\n## 工作区文件", "以下文件已上传到工作区，可使用大文件工具访问：\n"]
+    for i, f in enumerate(files, 1):
+        name = f.get("filename", "unknown")
+        size = f.get("size", 0)
+        path = f.get("workspace_path", "")
+        mime = f.get("mime", "")
+        size_str = f"{size:,} 字节"
+        if size > 1024 * 1024:
+            size_str = f"{size / (1024*1024):.1f} MB"
+        elif size > 1024:
+            size_str = f"{size / 1024:.1f} KB"
+        lines.append(f"{i}. **{name}** — {size_str}, 路径: `{path}` (相对于 /workspace)")
+        if mime:
+            lines.append(f"   类型: {mime}")
+        lines.append("")
+    lines.append(
+        "使用 `file_info` 查看文件详细结构, 使用 `file_read`/`file_grep`/`file_query` "
+        "按需访问内容。PDF、扫描件、Word、Excel、PPT 优先使用 `read_document`，"
+        "用 `document_search` 检索原文；遵循返回的 coverage、next_page、next_offset 分批读取，"
+        "不要把部分范围的结果当作全文。检查排版时先 `render_document`，再对返回图片 `view_image`。"
+        "普通图片用 `view_image` 查看；非视觉模型可用 `read_document` 做文字 OCR。"
+        "**不要直接读取大文件全文。**"
+    )
+    return "\n".join(lines)
+
+
+def _trim_memories(memories: list) -> list:
+    """Limit L1 memories to a reasonable count."""
+    if len(memories) > _MAX_L1_MEMORIES:
+        logger.info("L1 memories trimmed: %d -> %d", len(memories), _MAX_L1_MEMORIES)
+        return memories[:_MAX_L1_MEMORIES]
+    return memories
+
+
+def _trim_relevant_memories(memories: list) -> list:
+    """Limit L2/L3 relevant memories (lower priority, trim first)."""
+    max_relevant = 5
+    if len(memories) > max_relevant:
+        logger.info("Relevant memories trimmed: %d -> %d", len(memories), max_relevant)
+        return memories[:max_relevant]
+    return memories
+
+
+_MAX_DAILY_MEMORIES = 4
+_MAX_DAILY_CONTENT_CHARS = 800
+
+
+def _trim_daily_memories(memories: list) -> list:
+    """Limit daily memories: at most 4 days, each content capped in length.
+
+    Returns lightweight copies — never mutates ORM objects (dirty-flush risk).
+    """
+    if len(memories) > _MAX_DAILY_MEMORIES:
+        logger.info("Daily memories trimmed: %d -> %d", len(memories), _MAX_DAILY_MEMORIES)
+    return [
+        SimpleNamespace(
+            date=m.date,
+            content=(
+                m.content[:_MAX_DAILY_CONTENT_CHARS] + "…"
+                if len(m.content) > _MAX_DAILY_CONTENT_CHARS
+                else m.content
+            ),
+        )
+        for m in memories[:_MAX_DAILY_MEMORIES]
+    ]
+
+
+def _build_daily_section(daily_memories: list) -> str:
+    """Render the daily-memories prompt section for the custom-prompt branch."""
+    lines = ["\n## Daily Memories (按天的记忆记录)"]
+    lines.append(
+        "Each entry summarizes what the user did on that day. "
+        "Use them for continuity; when the user asks about a specific day, answer from these records."
+    )
+    for memory in daily_memories:
+        lines.append(f"### {memory.date.isoformat()}")
+        lines.append(memory.content)
+    return "\n".join(lines)
+
+
+def _trim_skills(skills: list) -> list:
+    """Limit skills to top 3, only include name + description."""
+    max_skills = 3
+    if len(skills) > max_skills:
+        logger.info("Skills trimmed: %d -> %d", len(skills), max_skills)
+        return skills[:max_skills]
+    return skills
+
+
+def _enforce_prompt_budget(prompt: str) -> str:
+    """Final safety net: truncate prompt if it exceeds system prompt budget."""
+    budget = ContextBudget.from_settings()
+    estimated = estimate_tokens(prompt)
+    if estimated <= budget.system_budget:
+        return prompt
+    # Rough character limit (conservative ~2.5 chars/token)
+    char_limit = int(budget.system_budget * 2.5)
+    if len(prompt) > char_limit:
+        logger.warning(
+            "System prompt exceeds budget (%d chars, ~%d tokens, budget %d tokens), truncating",
+            len(prompt),
+            estimated,
+            budget.system_budget,
+        )
+        return prompt[:char_limit] + "\n\n[... system prompt truncated due to context limits ...]"
+    return prompt

@@ -3,10 +3,10 @@
 from types import SimpleNamespace
 from uuid import uuid4
 
-from aio_agent_platform.core.chat import filter_tools_by_agent
-from aio_agent_platform.tools.mcp.adapter import MCPToolInfo
-from aio_agent_platform.tools.mcp.selection import is_mcp_tool_allowed
-from aio_agent_platform.tools.registry import ToolRegistry
+from agent_platform.core.chat import filter_tools_by_agent
+from agent_platform.tools.mcp.adapter import MCPToolInfo
+from agent_platform.tools.mcp.selection import is_mcp_tool_allowed
+from agent_platform.tools.registry import ToolRegistry
 
 
 def test_all_tools_policy_allows_new_upstream_tool() -> None:

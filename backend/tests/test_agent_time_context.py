@@ -6,11 +6,11 @@ from uuid import uuid4
 
 import pytest
 
-from aio_agent_platform.core import agent as agent_module
-from aio_agent_platform.core import prompt as prompt_module
-from aio_agent_platform.llm import LLMChunk, LLMMessage, LLMStreamError, ToolCall
-from aio_agent_platform.llm.client import AnthropicProvider
-from aio_agent_platform.tools.executor import ToolResult
+from agent_platform.core import agent as agent_module
+from agent_platform.core import prompt as prompt_module
+from agent_platform.llm import LLMChunk, LLMMessage, LLMStreamError, ToolCall
+from agent_platform.llm.client import AnthropicProvider
+from agent_platform.tools.executor import ToolResult
 
 
 @pytest.mark.parametrize("user_input", [

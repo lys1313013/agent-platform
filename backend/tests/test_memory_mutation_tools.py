@@ -13,17 +13,17 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.ext.compiler import compiles
 
-from aio_agent_platform.core import agent as agent_module
-from aio_agent_platform.core.context import current_agent_id
-from aio_agent_platform.core.prompt import build_system_prompt
-from aio_agent_platform.db.models import Memory, MemoryChange, MemoryVersion, Session
-from aio_agent_platform.llm import LLMChunk, ToolCall
-from aio_agent_platform.memory import handlers, history
-from aio_agent_platform.memory.presentation import format_memory, memory_reference
-from aio_agent_platform.memory.service import MemoryService
-from aio_agent_platform.tools.builtin import register_builtin_tools
-from aio_agent_platform.tools.executor import ToolResult
-from aio_agent_platform.tools.registry import ToolRegistry
+from agent_platform.core import agent as agent_module
+from agent_platform.core.context import current_agent_id
+from agent_platform.core.prompt import build_system_prompt
+from agent_platform.db.models import Memory, MemoryChange, MemoryVersion, Session
+from agent_platform.llm import LLMChunk, ToolCall
+from agent_platform.memory import handlers, history
+from agent_platform.memory.presentation import format_memory, memory_reference
+from agent_platform.memory.service import MemoryService
+from agent_platform.tools.builtin import register_builtin_tools
+from agent_platform.tools.executor import ToolResult
+from agent_platform.tools.registry import ToolRegistry
 
 
 @compiles(JSONB, "sqlite")

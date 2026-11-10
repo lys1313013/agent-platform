@@ -8,11 +8,11 @@ import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-from aio_agent_platform.auth.dependencies import get_current_user
-from aio_agent_platform.channels.binding import issue_bind_code
-from aio_agent_platform.db.connection import get_db
-from aio_agent_platform.db.models import Agent, ChannelBinding, User
-from aio_agent_platform.interface.routes import channels
+from agent_platform.auth.dependencies import get_current_user
+from agent_platform.channels.binding import issue_bind_code
+from agent_platform.db.connection import get_db
+from agent_platform.db.models import Agent, ChannelBinding, User
+from agent_platform.interface.routes import channels
 
 
 @pytest.mark.asyncio

@@ -12,27 +12,27 @@ import pytest_asyncio
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from aio_agent_platform.core import agent as agent_module
-from aio_agent_platform.core.execution_scope import ExecutionAccessError, bind_execution_scope
-from aio_agent_platform.core.prompt import build_system_prompt
-from aio_agent_platform.db.connection import current_user_id
-from aio_agent_platform.db.models import (
+from agent_platform.core import agent as agent_module
+from agent_platform.core.execution_scope import ExecutionAccessError, bind_execution_scope
+from agent_platform.core.prompt import build_system_prompt
+from agent_platform.db.connection import current_user_id
+from agent_platform.db.models import (
     PortraitVersion,
     Tenant,
     TenantMembership,
     User,
     UserProfile,
 )
-from aio_agent_platform.llm import LLMChunk, ToolCall
-from aio_agent_platform.portrait import handlers, service
-from aio_agent_platform.portrait.presentation import (
+from agent_platform.llm import LLMChunk, ToolCall
+from agent_platform.portrait import handlers, service
+from agent_platform.portrait.presentation import (
     format_portrait_section,
     refresh_portrait_prompt,
 )
-from aio_agent_platform.portrait.service import PortraitUpdate, update_portrait
-from aio_agent_platform.tools.builtin import register_builtin_tools
-from aio_agent_platform.tools.executor import ToolExecutor, ToolResult
-from aio_agent_platform.tools.registry import ToolRegistry
+from agent_platform.portrait.service import PortraitUpdate, update_portrait
+from agent_platform.tools.builtin import register_builtin_tools
+from agent_platform.tools.executor import ToolExecutor, ToolResult
+from agent_platform.tools.registry import ToolRegistry
 
 OLD = "## 背景\n- 职业：前端开发\n## 偏好\n- 简洁回答"
 

@@ -6,8 +6,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from aio_agent_platform.core.chat import build_agent_loop as _build_agent_loop
-from aio_agent_platform.db.models import LLMModel, LLMProvider
+from agent_platform.core.chat import build_agent_loop as _build_agent_loop
+from agent_platform.db.models import LLMModel, LLMProvider
 
 
 class TestAgentTemperatureIntegration:
@@ -54,7 +54,7 @@ class TestAgentTemperatureIntegration:
         mock_tool_executor = MagicMock()
         mock_provider_instance = MagicMock()
 
-        with patch('aio_agent_platform.core.chat.create_provider') as mock_create:
+        with patch('agent_platform.core.chat.create_provider') as mock_create:
             mock_create.return_value = mock_provider_instance
 
             # Call with agent_temperature=0.3
@@ -78,7 +78,7 @@ class TestAgentTemperatureIntegration:
     @pytest.mark.asyncio
     async def test_build_agent_loop_falls_back_to_global_when_none(self, db_session: AsyncSession):
         """When agent_temperature is None, falls back to global setting."""
-        from aio_agent_platform.core.config import settings
+        from agent_platform.core.config import settings
 
         provider = LLMProvider(
             id=uuid.uuid4(),
@@ -104,7 +104,7 @@ class TestAgentTemperatureIntegration:
         mock_tool_executor = MagicMock()
         mock_provider_instance = MagicMock()
 
-        with patch('aio_agent_platform.core.chat.create_provider') as mock_create:
+        with patch('agent_platform.core.chat.create_provider') as mock_create:
             mock_create.return_value = mock_provider_instance
 
             # Call with agent_temperature=None (should use global)

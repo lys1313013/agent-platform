@@ -9,8 +9,8 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
 
-from aio_agent_platform.core.config import settings
-from aio_agent_platform.db import connection
+from agent_platform.core.config import settings
+from agent_platform.db import connection
 
 
 @pytest.mark.postgres

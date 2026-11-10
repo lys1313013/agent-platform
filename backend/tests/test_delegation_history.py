@@ -7,7 +7,7 @@ from uuid import uuid4
 import pytest
 from fastapi import HTTPException
 
-from aio_agent_platform.interface.routes.delegations import get_session_delegations
+from agent_platform.interface.routes.delegations import get_session_delegations
 
 
 async def test_history_uses_one_name_query_and_stable_pagination(monkeypatch):
@@ -22,7 +22,7 @@ async def test_history_uses_one_name_query_and_stable_pagination(monkeypatch):
         if len(queries) == 1:
             return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: rows))
         return SimpleNamespace(all=lambda: [(parent, "parent")])
-    monkeypatch.setattr("aio_agent_platform.interface.routes.delegations.require_agent_tenant", AsyncMock())
+    monkeypatch.setattr("agent_platform.interface.routes.delegations.require_agent_tenant", AsyncMock())
     session = SimpleNamespace(id=sid, agent_id=parent, source="chat")
     db = SimpleNamespace(scalar=AsyncMock(return_value=session), execute=execute)
     output = await get_session_delegations(sid, SimpleNamespace(id=uid), db, limit=100, offset=20)
@@ -47,7 +47,7 @@ async def authorized_history(tmp_path):
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
     from sqlalchemy.ext.compiler import compiles
 
-    from aio_agent_platform.db.models import (
+    from agent_platform.db.models import (
         Agent,
         Delegation,
         Session,
@@ -80,7 +80,7 @@ async def authorized_history(tmp_path):
 
 
 async def _read_history(env, endpoint):
-    from aio_agent_platform.interface.routes.delegations import get_delegation
+    from agent_platform.interface.routes.delegations import get_delegation
     if endpoint == "list":
         return await get_session_delegations(env.session.id, env.user, env.db, limit=50, offset=0)
     return await get_delegation(env.delegation.id, env.user, env.db)
@@ -99,7 +99,7 @@ async def test_history_uses_actual_tenant_not_disabled_ui_selection(authorized_h
 async def test_history_denies_revoked_or_unknown_execution_scope(authorized_history, endpoint, revocation):
     from sqlalchemy import delete
 
-    from aio_agent_platform.db.models import TenantMembership
+    from agent_platform.db.models import TenantMembership
 
     env = authorized_history
     if revocation == "membership":

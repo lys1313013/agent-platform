@@ -8,15 +8,15 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from aio_agent_platform.tools.executor import ToolExecutor
-from aio_agent_platform.tools.registry import Tool, ToolRegistry
+from agent_platform.tools.executor import ToolExecutor
+from agent_platform.tools.registry import Tool, ToolRegistry
 
 
 @pytest.fixture
 def sandbox_execution(tmp_path, monkeypatch):
     hooks, recorder = Mock(), Mock()
-    monkeypatch.setattr("aio_agent_platform.tools.executor.get_hook_manager", lambda: hooks)
-    monkeypatch.setattr("aio_agent_platform.tools.executor.get_recorder", lambda: recorder)
+    monkeypatch.setattr("agent_platform.tools.executor.get_hook_manager", lambda: hooks)
+    monkeypatch.setattr("agent_platform.tools.executor.get_recorder", lambda: recorder)
 
     async def execute(_sandbox, command, timeout=None):
         command = command.replace("/tmp/_agent_code", str(tmp_path / "code"))

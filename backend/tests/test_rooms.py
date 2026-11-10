@@ -20,11 +20,11 @@ from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from aio_agent_platform.auth.dependencies import get_current_user, get_execution_user
-from aio_agent_platform.core.agent import AgentLoop
-from aio_agent_platform.core.confirmation import ConfirmationManager, confirmation_manager
-from aio_agent_platform.db.connection import get_db
-from aio_agent_platform.db.models import (
+from agent_platform.auth.dependencies import get_current_user, get_execution_user
+from agent_platform.core.agent import AgentLoop
+from agent_platform.core.confirmation import ConfirmationManager, confirmation_manager
+from agent_platform.db.connection import get_db
+from agent_platform.db.models import (
     Agent,
     Base,
     ChatRoomRun,
@@ -32,12 +32,12 @@ from aio_agent_platform.db.models import (
     TenantMembership,
     User,
 )
-from aio_agent_platform.interface.routes import chat, rooms, sessions
-from aio_agent_platform.llm import LLMChunk, LLMResponse, ToolCall
-from aio_agent_platform.rooms import runtime, service
-from aio_agent_platform.rooms.schemas import RoomCreate, RoomSend
-from aio_agent_platform.tools.executor import ToolResult
-from aio_agent_platform.tools.registry import Tool, ToolRegistry
+from agent_platform.interface.routes import chat, rooms, sessions
+from agent_platform.llm import LLMChunk, LLMResponse, ToolCall
+from agent_platform.rooms import runtime, service
+from agent_platform.rooms.schemas import RoomCreate, RoomSend
+from agent_platform.tools.executor import ToolResult
+from agent_platform.tools.registry import Tool, ToolRegistry
 
 
 def test_mention_routing_deduplicates_ids_and_never_parses_text():
@@ -116,7 +116,7 @@ async def room_env(monkeypatch):
     monkeypatch.setattr(runtime, "get_session_factory", lambda: factory)
     monkeypatch.setattr(rooms, "get_session_factory", lambda: factory)
     monkeypatch.setattr(runtime, "record_llm_usage", lambda *a: None)
-    import aio_agent_platform.core.agent as agent_module
+    import agent_platform.core.agent as agent_module
     monkeypatch.setattr(agent_module, "record_llm_usage", lambda *a: None)
     monkeypatch.setattr(agent_module, "get_hook_manager", lambda: MagicMock())
     monkeypatch.setattr(agent_module, "get_recorder", lambda: MagicMock())

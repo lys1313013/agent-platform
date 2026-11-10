@@ -14,9 +14,9 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 # 后端
 cd backend
 uv sync                                  # 安装依赖
-uv run uvicorn aio_agent_platform.interface.api:app --host 0.0.0.0 --port 8100 --reload
-uv run aio-cli                           # CLI 对话
-uv run aio-manage                        # 管理命令
+uv run uvicorn agent_platform.interface.api:app --host 0.0.0.0 --port 8100 --reload
+uv run agent-cli                           # CLI 对话
+uv run agent-manage                        # 管理命令
 uv run alembic upgrade head              # 数据库迁移
 uv run alembic revision --autogenerate -m "描述"  # 创建新迁移
 uv run pytest                            # 运行所有测试

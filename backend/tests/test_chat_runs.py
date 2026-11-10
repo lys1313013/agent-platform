@@ -12,9 +12,9 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.ext.compiler import compiles
 
-from aio_agent_platform.core import chat_runs as runtime
-from aio_agent_platform.core.task_scope import call_key, track_task
-from aio_agent_platform.db.models import ChatRun, ChatRunEvent, Message, Session
+from agent_platform.core import chat_runs as runtime
+from agent_platform.core.task_scope import call_key, track_task
+from agent_platform.db.models import ChatRun, ChatRunEvent, Message, Session
 
 
 @compiles(JSONB, "sqlite")
@@ -243,12 +243,12 @@ async def test_real_chat_route_disconnect_then_reconnect(factory, monkeypatch, l
     from types import SimpleNamespace
     from unittest.mock import AsyncMock, Mock
 
-    from aio_agent_platform.core.agent import AgentStep
-    from aio_agent_platform.db import connection
-    from aio_agent_platform.db.models import LLMModel, LLMProvider
-    from aio_agent_platform.interface.routes import chat
-    from aio_agent_platform.llm import LLMMessage
-    from aio_agent_platform.storage import chat_attachments
+    from agent_platform.core.agent import AgentStep
+    from agent_platform.db import connection
+    from agent_platform.db.models import LLMModel, LLMProvider
+    from agent_platform.interface.routes import chat
+    from agent_platform.llm import LLMMessage
+    from agent_platform.storage import chat_attachments
 
     # Both history loading and the current turn construct attachment storage.
     # Keep the real route/history logic, but isolate this text-only test from MinIO.
@@ -292,7 +292,7 @@ async def test_real_chat_route_disconnect_then_reconnect(factory, monkeypatch, l
         "_update_context_summary": None,
     }.items():
         monkeypatch.setattr(chat, name, AsyncMock(return_value=value))
-    from aio_agent_platform.core.chat import load_conversation_history
+    from agent_platform.core.chat import load_conversation_history
     plan = SimpleNamespace(provider_type="openai", allow_images=False, build_loop=AsyncMock(return_value=FakeLoop()),
                            build_prompt=AsyncMock(return_value="system"), load_history=load_conversation_history)
     monkeypatch.setattr(chat.ChatExecutionService, "prepare", AsyncMock(return_value=plan))
@@ -342,9 +342,9 @@ async def test_real_chat_route_disconnect_then_reconnect(factory, monkeypatch, l
 async def test_resume_reuses_completed_tool_instead_of_executing_again(monkeypatch):
     from unittest.mock import AsyncMock, Mock
 
-    from aio_agent_platform.core import agent as agent_module
-    from aio_agent_platform.core.task_scope import completed_calls
-    from aio_agent_platform.llm import LLMChunk, ToolCall
+    from agent_platform.core import agent as agent_module
+    from agent_platform.core.task_scope import completed_calls
+    from agent_platform.llm import LLMChunk, ToolCall
 
     monkeypatch.setattr(agent_module, "_resolve_tenant_id", AsyncMock(return_value=None))
     monkeypatch.setattr(agent_module, "_resolve_agent_id", AsyncMock(return_value=None))
@@ -403,8 +403,8 @@ async def test_completed_event_survives_crash_before_terminal_commit(factory):
 async def test_session_history_recovers_legacy_action_order_without_rewriting_messages(factory):
     from types import SimpleNamespace
 
-    from aio_agent_platform.db.models import Tenant, TenantMembership, User
-    from aio_agent_platform.interface.routes.sessions import get_session
+    from agent_platform.db.models import Tenant, TenantMembership, User
+    from agent_platform.interface.routes.sessions import get_session
     run = await reserve(factory)
     # History reads now validate the existing session's execution owner.
     tenant_id = uuid4()

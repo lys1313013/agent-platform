@@ -1,11 +1,11 @@
 """Tests for chat attachment upload and multimodal support."""
 
 
-from aio_agent_platform.core.context import (
+from agent_platform.core.context import (
     _light_truncate_message,
     estimate_message_tokens,
 )
-from aio_agent_platform.llm.client import (
+from agent_platform.llm.client import (
     LLMMessage,
     build_user_content,
     supports_vision,

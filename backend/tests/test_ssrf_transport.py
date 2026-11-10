@@ -5,8 +5,8 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
-from aio_agent_platform.tools.web import ssrf
-from aio_agent_platform.tools.web.ssrf import PinnedAsyncTransport, SSRFError
+from agent_platform.tools.web import ssrf
+from agent_platform.tools.web.ssrf import PinnedAsyncTransport, SSRFError
 
 
 class HTTPStream:
@@ -170,8 +170,8 @@ async def test_fallback_only_uses_checked_ips(monkeypatch):
 
 
 async def test_web_fetch_uses_pinned_transport(monkeypatch):
-    from aio_agent_platform.core.config import WebSettings
-    from aio_agent_platform.tools.web.fetch import WebFetcher
+    from agent_platform.core.config import WebSettings
+    from agent_platform.tools.web.fetch import WebFetcher
 
     resolver = AsyncMock(return_value=["93.184.216.34"])
     monkeypatch.setattr(ssrf, "_resolve_host", resolver)
@@ -198,8 +198,8 @@ async def test_hook_delivery_uses_pinned_transport(monkeypatch):
     from types import SimpleNamespace
     from uuid import uuid4
 
-    from aio_agent_platform.core.config import settings
-    from aio_agent_platform.hooks import dispatcher
+    from agent_platform.core.config import settings
+    from agent_platform.hooks import dispatcher
 
     monkeypatch.setattr(settings.hook, "allow_private_urls", False)
     monkeypatch.setattr(settings.hook, "url_allowlist", "")

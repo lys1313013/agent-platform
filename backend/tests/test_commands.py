@@ -10,10 +10,10 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from aio_agent_platform.auth.dependencies import get_current_user, get_execution_user
-from aio_agent_platform.core.chat import load_conversation_history
-from aio_agent_platform.db import Session
-from aio_agent_platform.db.models import (
+from agent_platform.auth.dependencies import get_current_user, get_execution_user
+from agent_platform.core.chat import load_conversation_history
+from agent_platform.db import Session
+from agent_platform.db.models import (
     Agent,
     LLMModel,
     LLMProvider,
@@ -24,12 +24,12 @@ from aio_agent_platform.db.models import (
     TenantMembership,
     User,
 )
-from aio_agent_platform.interface.api import app
-from aio_agent_platform.interface.commands import dispatch
-from aio_agent_platform.interface.commands.models import CommandContext
-from aio_agent_platform.interface.commands.parser import ParseError, parse_command
-from aio_agent_platform.interface.commands.registry import registry
-from aio_agent_platform.memory.service import MemoryService
+from agent_platform.interface.api import app
+from agent_platform.interface.commands import dispatch
+from agent_platform.interface.commands.models import CommandContext
+from agent_platform.interface.commands.parser import ParseError, parse_command
+from agent_platform.interface.commands.registry import registry
+from agent_platform.memory.service import MemoryService
 
 # ---- Parser (no DB) ----
 

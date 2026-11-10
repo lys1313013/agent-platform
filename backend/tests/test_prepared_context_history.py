@@ -5,9 +5,9 @@ from uuid import uuid4
 
 import pytest
 
-from aio_agent_platform.core import agent as agent_module
-from aio_agent_platform.core import context
-from aio_agent_platform.llm import LLMChunk, LLMMessage
+from agent_platform.core import agent as agent_module
+from agent_platform.core import context
+from agent_platform.llm import LLMChunk, LLMMessage
 
 
 @pytest.mark.parametrize("generated", [False, True])

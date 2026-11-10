@@ -8,14 +8,14 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from aio_agent_platform.auth.dependencies import require_admin, require_superadmin
-from aio_agent_platform.db.models import Base, TenantMembership, User, UserProfile
-from aio_agent_platform.interface.routes.tenants import (
+from agent_platform.auth.dependencies import require_admin, require_superadmin
+from agent_platform.db.models import Base, TenantMembership, User, UserProfile
+from agent_platform.interface.routes.tenants import (
     TenantCreate,
     TenantMemberAssign,
     _normalize_slug,
 )
-from aio_agent_platform.interface.routes.users import UserAdminCreate, UserAdminUpdate, list_users
+from agent_platform.interface.routes.users import UserAdminCreate, UserAdminUpdate, list_users
 
 
 @pytest.mark.asyncio

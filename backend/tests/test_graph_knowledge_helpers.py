@@ -2,8 +2,8 @@
 
 import json
 
-from aio_agent_platform.graph_knowledge.chunking import chunk_text
-from aio_agent_platform.graph_knowledge.extraction import _parse_llm_json, normalize_name
+from agent_platform.graph_knowledge.chunking import chunk_text
+from agent_platform.graph_knowledge.extraction import _parse_llm_json, normalize_name
 
 
 def test_chunk_markdown_sections():

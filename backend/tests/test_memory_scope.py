@@ -7,17 +7,17 @@ from uuid import uuid4
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from aio_agent_platform.core.context import current_agent_id
-from aio_agent_platform.db.models import Agent, Memory, Session, Tenant, TenantMembership, User
-from aio_agent_platform.memory.daily import DailyMemoryService, local_today, run_daily_consolidation
-from aio_agent_platform.memory.handlers import handle_memory_read, handle_memory_write
-from aio_agent_platform.memory.service import MemoryService
+from agent_platform.core.context import current_agent_id
+from agent_platform.db.models import Agent, Memory, Session, Tenant, TenantMembership, User
+from agent_platform.memory.daily import DailyMemoryService, local_today, run_daily_consolidation
+from agent_platform.memory.handlers import handle_memory_read, handle_memory_write
+from agent_platform.memory.service import MemoryService
 
 
 @pytest.fixture
 def factory(monkeypatch, engine):
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    monkeypatch.setattr('aio_agent_platform.db.connection._async_session_factory', factory)
+    monkeypatch.setattr('agent_platform.db.connection._async_session_factory', factory)
     return factory
 
 
@@ -113,7 +113,7 @@ async def test_extraction_and_daily_cron_preserve_scope(db_session, factory, mon
     provider = SimpleNamespace(complete=AsyncMock(return_value=SimpleNamespace(content=json.dumps({
         'l2_memories': [{'content': '用户喜欢咖啡'}], 'l3_summary': 'A专属摘要',
     }))))
-    monkeypatch.setattr('aio_agent_platform.memory.service.create_default_provider_for_user', AsyncMock(return_value=provider))
+    monkeypatch.setattr('agent_platform.memory.service.create_default_provider_for_user', AsyncMock(return_value=provider))
     created = await MemoryService.extract_memories_from_conversation(user, sessions[0].id, [])
     assert len(created) == 2 and all(m.agent_id == a for m in created)
     db_session.add(Memory(user_id=user, agent_id=b, layer='L3', content='B专属摘要'))
@@ -135,9 +135,9 @@ async def test_extraction_and_daily_cron_preserve_scope(db_session, factory, mon
 
 @pytest.mark.asyncio
 async def test_management_api_scope_and_promotion(client, db_session):
-    from aio_agent_platform.auth.dependencies import get_current_user
-    from aio_agent_platform.db.models import DEFAULT_TENANT_ID, Agent
-    from aio_agent_platform.interface.api import app
+    from agent_platform.auth.dependencies import get_current_user
+    from agent_platform.db.models import DEFAULT_TENANT_ID, Agent
+    from agent_platform.interface.api import app
 
     user = SimpleNamespace(id=uuid4(), tenant_id=DEFAULT_TENANT_ID)
     agent = Agent(name='scope-test', created_by=user.id, tenant_id=user.tenant_id)

@@ -10,9 +10,9 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from aio_agent_platform.db.models import Memory
-from aio_agent_platform.memory.reconciliation import reconcile_memory
-from aio_agent_platform.memory.service import MemoryService
+from agent_platform.db.models import Memory
+from agent_platform.memory.reconciliation import reconcile_memory
+from agent_platform.memory.service import MemoryService
 
 pytestmark = pytest.mark.postgres
 
@@ -22,7 +22,7 @@ def model(monkeypatch):
     provider = SimpleNamespace(complete=AsyncMock())
     factory = AsyncMock(return_value=provider)
     monkeypatch.setattr(
-        "aio_agent_platform.memory.reconciliation.create_default_provider_for_user", factory
+        "agent_platform.memory.reconciliation.create_default_provider_for_user", factory
     )
     return provider
 
@@ -215,8 +215,8 @@ async def test_revisions_bounded(db_session, model):
 
 @pytest.mark.asyncio
 async def test_tool_and_extraction_share_semantic_policy(db_session, engine, model, monkeypatch):
-    from aio_agent_platform.db.models import Agent, Session, Tenant, TenantMembership, User
-    from aio_agent_platform.memory.handlers import handle_memory_write
+    from agent_platform.db.models import Agent, Session, Tenant, TenantMembership, User
+    from agent_platform.memory.handlers import handle_memory_write
 
     uid, agent = uuid4(), uuid4()
     tenant = Tenant(id=uuid4(), name="reconciliation", slug=str(uuid4()))
@@ -231,7 +231,7 @@ async def test_tool_and_extraction_share_semantic_policy(db_session, engine, mod
     )
     await db_session.commit()
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    monkeypatch.setattr("aio_agent_platform.db.connection._async_session_factory", factory)
+    monkeypatch.setattr("agent_platform.db.connection._async_session_factory", factory)
     model.complete.return_value = SimpleNamespace(
         content=json.dumps(
             {
@@ -259,7 +259,7 @@ async def test_tool_and_extraction_share_semantic_policy(db_session, engine, mod
         )
     )
     monkeypatch.setattr(
-        "aio_agent_platform.memory.service.create_default_provider_for_user",
+        "agent_platform.memory.service.create_default_provider_for_user",
         AsyncMock(return_value=extractor),
     )
     rows = await MemoryService.extract_memories_from_conversation(uid, session.id, [])

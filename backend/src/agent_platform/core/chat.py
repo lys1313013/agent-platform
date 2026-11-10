@@ -1,0 +1,916 @@
+"""Chat orchestration helpers — reusable by routes, cron jobs, and channel adapters.
+
+These functions assemble an AgentLoop: load the Agent row, filter tools by the
+agent's allow-list, build the system prompt with memories, resolve the LLM model,
+and construct the AgentLoop. Kept out of ``interface/routes/chat.py`` so cron
+jobs and channel adapters can drive the same pipeline without importing from
+a router module.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from collections.abc import Collection
+from typing import Any
+from uuid import UUID
+
+import structlog
+from fastapi import HTTPException
+from sqlalchemy import func, or_, select
+from sqlalchemy import update as sql_update
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload, with_loader_criteria
+
+from agent_platform.core.agent import AgentLoop, DelegationContext
+from agent_platform.core.config import settings
+from agent_platform.core.context import (
+    ContextBudget,
+    generate_summary,
+)
+from agent_platform.core.context import (
+    estimate_messages_tokens as _est_tokens,
+)
+from agent_platform.core.execution_scope import (
+    ExecutionAccessError,
+    execution_tenant_id,
+    require_agent_tenant,
+    require_execution_user,
+)
+from agent_platform.core.prompt import build_system_prompt
+from agent_platform.core.runtime_config import AgentRuntimeConfig
+from agent_platform.db import Message, Session
+from agent_platform.db.connection import get_session_factory
+from agent_platform.db.models import (
+    Agent,
+    GraphKnowledgeBase,
+    KnowledgeBase,
+    LLMModel,
+    User,
+    UserConfig,
+    UserProfile,
+)
+from agent_platform.llm import LLMMessage, LLMProvider, ToolCall, create_provider
+from agent_platform.memory.service import MemoryService
+from agent_platform.observation import get_langfuse_client
+from agent_platform.skills.service import SkillService
+from agent_platform.tools.executor import ToolExecutor
+from agent_platform.tools.mcp.selection import is_mcp_tool_allowed
+from agent_platform.tools.registry import Tool
+
+logger = structlog.get_logger()
+
+# Background memory extraction is a full model call; do not run it on every
+# turn of an active conversation. The night cron still refines daily memory.
+_MEMORY_EXTRACTION_INTERVAL_SECONDS = 180
+
+# Background tasks set — keeps references alive until completion.
+background_tasks: set[asyncio.Task] = set()
+
+
+# ---------------------------------------------------------------------------
+# Agent loading
+# ---------------------------------------------------------------------------
+
+
+async def load_agent(
+    db: AsyncSession,
+    agent_id: UUID | None,
+    user: User | None = None,
+    tenant_id: UUID | None = None,
+) -> Agent | None:
+    """Load an Agent with eager-loaded relationships.
+
+    Explicit ``tenant_id`` pins the execution tenant. When ``user`` is also
+    provided, ownership and knowledge-base visibility checks still apply.
+    Background callers must validate membership before overriding the tenant.
+    """
+    if not agent_id:
+        return None
+
+    effective_tenant = tenant_id if tenant_id is not None else (user.tenant_id if user else None)
+    if effective_tenant is None:
+        return None
+
+    stmt = (
+        select(Agent)
+        .options(
+            selectinload(Agent.skills),
+            selectinload(Agent.model),
+            selectinload(Agent.children),
+            selectinload(Agent.knowledge_bases),
+            selectinload(Agent.graph_knowledge_bases),
+        )
+        .where(
+            Agent.id == agent_id,
+            Agent.is_active,
+            Agent.tenant_id == effective_tenant,
+        )
+    )
+
+    if user is not None:
+        # User-scoped: apply knowledge-base visibility and agent ownership filter.
+        stmt = stmt.options(
+            with_loader_criteria(
+                KnowledgeBase,
+                (KnowledgeBase.tenant_id == effective_tenant)
+                & or_(
+                    KnowledgeBase.visibility == "tenant",
+                    KnowledgeBase.created_by == user.id,
+                ),
+                include_aliases=True,
+            ),
+            with_loader_criteria(
+                GraphKnowledgeBase,
+                (GraphKnowledgeBase.tenant_id == effective_tenant)
+                & or_(
+                    GraphKnowledgeBase.visibility == "tenant",
+                    GraphKnowledgeBase.created_by == user.id,
+                ),
+                include_aliases=True,
+            ),
+        ).where(
+            or_(Agent.visibility == "tenant", Agent.created_by == user.id),
+        )
+
+    result = await db.execute(stmt)
+    return result.scalar_one_or_none()
+
+
+async def load_execution_agent(db: AsyncSession, agent_id: UUID | None, user: User) -> Agent | None:
+    if agent_id is None:
+        return None
+    try:
+        tenant_id = await require_agent_tenant(db, user.id, agent_id)
+    except ExecutionAccessError:
+        return None
+    return await load_agent(db, agent_id, user=user, tenant_id=tenant_id)
+
+
+async def load_chat_agent(db: AsyncSession, agent_id: UUID | None, session_id: UUID | None, user: User, *,
+                          pinned_tenant_id: UUID | None = None):
+    if session_id is not None:
+        session = await db.scalar(select(Session).where(
+            Session.id == session_id, Session.user_id == user.id, Session.source != "room",
+        ).with_for_update())
+        if session is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        from agent_platform.core.session_access import authorize_session
+        await authorize_session(db, session, user.id, tenant_id=pinned_tenant_id)
+        if agent_id is not None and agent_id != session.agent_id:
+            raise HTTPException(409, "智能体与会话绑定不一致，请新建会话或显式切换智能体")
+        agent_id = session.agent_id
+    if agent_id is None:
+        try:
+            await require_execution_user(db, user.id, pinned_tenant_id or user.tenant_id)
+        except ExecutionAccessError as error:
+            raise HTTPException(status_code=403, detail=str(error)) from error
+    agent = await load_execution_agent(db, agent_id, user)
+    if agent_id is not None and agent is None:
+        raise HTTPException(status_code=404, detail="Agent not found or inaccessible")
+    return agent
+
+
+# ---------------------------------------------------------------------------
+# Tool filtering
+# ---------------------------------------------------------------------------
+
+
+async def refresh_mcp_tools_for_agent(tool_executor: ToolExecutor, agent: Agent | None) -> None:
+    manager = tool_executor.mcp_manager
+    if manager:
+        server_ids = set()
+        if agent and agent.mcp_server_ids is not None:
+            server_ids = {str(sid) for sid in agent.mcp_server_ids}
+        await manager.ensure_tools_fresh(server_ids)
+
+
+def filter_tools_by_agent(
+    tool_executor: ToolExecutor,
+    agent: Agent | None,
+    delegation_depth: int = 0,
+    extra_blacklist: set[str] | None = None,
+    allow_local_browser: bool = False,
+) -> tuple[list, list]:
+    """Filter tools based on agent's enabled_tools, delegation depth, and blacklist.
+
+    Returns (tools_list, tools_schema).
+    ``extra_blacklist`` lets callers (e.g. channel adapters) drop specific tools
+    on top of the agent's own allow-list.
+    """
+    from agent_platform.tools.executor import visible_registry_tools
+
+    all_tools = visible_registry_tools(tool_executor, getattr(agent, "tenant_id", None))
+    blacklist = set(extra_blacklist or ())
+    from agent_platform.browser.tools import NAMES
+    if not allow_local_browser or delegation_depth > 0:
+        blacklist.update(NAMES)
+    elif not agent or not agent.enabled_tools:
+        blacklist.update(NAMES)
+
+    if agent and agent.enabled_tools:
+        enabled_set = set(agent.enabled_tools)
+        filtered = [
+            t for t in all_tools
+            if t.name in enabled_set
+            and t.name not in {"knowledge_retrieval", "graph_retrieval", "delegate_task"}
+            and t.name not in blacklist
+        ]
+    else:
+        filtered = [
+            t for t in all_tools
+            if t.name not in {"knowledge_retrieval", "graph_retrieval", "delegate_task"}
+            and t.name not in blacklist
+        ]
+
+    # Auto-inject knowledge_retrieval when agent has bound knowledge bases.
+    has_knowledge = bool(agent and agent.knowledge_bases)
+    if has_knowledge and "knowledge_retrieval" not in blacklist:
+        kr_tool = next((t for t in all_tools if t.name == "knowledge_retrieval"), None)
+        if kr_tool and kr_tool not in filtered:
+            filtered.append(kr_tool)
+        kb_names = [kb.name for kb in agent.knowledge_bases] if agent else []
+        logger.info(
+            "knowledge_retrieval_tool_injected",
+            agent_id=str(agent.id) if agent else None,
+            knowledge_bases=kb_names,
+            kb_count=len(kb_names),
+        )
+
+    # Auto-inject graph_retrieval when agent has bound graph knowledge bases.
+    has_graph_kb = bool(agent and agent.graph_knowledge_bases)
+    if has_graph_kb and "graph_retrieval" not in blacklist:
+        gr_tool = next((t for t in all_tools if t.name == "graph_retrieval"), None)
+        if gr_tool and gr_tool not in filtered:
+            filtered.append(gr_tool)
+        gkb_names = [kb.name for kb in agent.graph_knowledge_bases] if agent else []
+        logger.info(
+            "graph_retrieval_tool_injected",
+            agent_id=str(agent.id) if agent else None,
+            graph_knowledge_bases=gkb_names,
+            kb_count=len(gkb_names),
+        )
+
+    # Frontend tools follow the same agent allow-list as other built-ins.
+    # Having an SSE browser connection is an execution prerequisite, not a
+    # permission grant. Non-browser callers additionally blacklist ui_*.
+
+    # Auto-inject delegate_task so the agent can delegate to existing children
+    # OR dynamically spawn temp sub-agents, within the depth limit. Available to
+    # every agent (not just ones with pre-associated children).
+    max_depth = settings.agent.max_delegation_depth
+    if (
+        agent is not None
+        and delegation_depth < max_depth
+        and "delegate_task" not in blacklist
+    ):
+        dt_tool = next((t for t in all_tools if t.name == "delegate_task"), None)
+        if dt_tool and dt_tool not in filtered:
+            filtered.append(dt_tool)
+        child_names = [c.name for c in agent.children] if agent and agent.children else []
+        logger.info(
+            "delegate_task_tool_injected",
+            agent_id=str(agent.id) if agent else None,
+            children=child_names,
+            child_count=len(child_names),
+            dynamic_spawn=True,
+        )
+
+    # No explicit agent binding grants no MCP capability. A process-wide
+    # manager is a transport pool, never an authorization scope.
+    allowed_server_ids = set()
+    if agent and agent.mcp_server_ids is not None:
+        try:
+            allowed_server_ids = {str(sid) for sid in agent.mcp_server_ids}
+        except Exception:
+            allowed_server_ids = set()
+    enabled_set = set(agent.enabled_tools) if agent and agent.enabled_tools else None
+    all_tools_server_ids = {
+        str(server_id)
+        for server_id in (getattr(agent, "mcp_all_tools_server_ids", None) or [])
+    } if agent else set()
+    return filtered, build_tools_schema(
+        tool_executor,
+        filtered,
+        mcp_server_ids=allowed_server_ids,
+        enabled_tools=enabled_set,
+        mcp_all_tools_server_ids=all_tools_server_ids,
+        blacklist=blacklist,
+    )
+
+
+def build_tools_schema(
+    tool_executor: ToolExecutor,
+    tools: list[Tool],
+    *,
+    mcp_server_ids: Collection[str] | None,
+    enabled_tools: Collection[str] | None,
+    mcp_all_tools_server_ids: Collection[str] = (),
+    blacklist: Collection[str] = (),
+) -> list[dict]:
+    """Serialize entry-approved built-ins and apply the shared MCP selection policy.
+
+    Each entry retains its own capability restrictions (e.g. browser tools).
+    ``None`` and an empty server selection deliberately have different meanings.
+    """
+    schema = [
+        {
+            "type": "function",
+            "function": {
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.parameters,
+            },
+        }
+        for tool in tools
+        if tool.name not in blacklist
+    ]
+    manager = tool_executor.mcp_manager
+    if manager:
+        for full_name, tool_info in manager.list_all_tools():
+            if full_name in blacklist or not is_mcp_tool_allowed(
+                server_id=manager._tool_to_server.get(full_name),
+                full_name=full_name,
+                allowed_server_ids=mcp_server_ids,
+                enabled_tools=enabled_tools,
+                all_tools_server_ids=mcp_all_tools_server_ids,
+            ):
+                continue
+            schema.append(tool_info.to_openai_tool(
+                prefix=full_name[:len(full_name) - len(tool_info.name)]
+            ))
+    return schema
+
+
+# ---------------------------------------------------------------------------
+# System prompt
+# ---------------------------------------------------------------------------
+
+
+async def get_memory_top_k(db: AsyncSession, user_id: UUID) -> int:
+    """Get user's memory_top_k setting, falling back to global default."""
+    result = await db.execute(
+        select(UserConfig).where(UserConfig.user_id == user_id)
+    )
+    config = result.scalar_one_or_none()
+    return config.memory_top_k if config else settings.agent.memory_top_k
+
+
+async def build_system_prompt_with_memories(
+    db: AsyncSession,
+    user_id: UUID,
+    user_message: str,
+    tools_list: list,
+    agent: Agent | None = None,
+    workspace_files: list | None = None,
+    tenant_id: UUID | None = None,
+    prompt_config: dict | None = None,
+) -> str:
+    """Build system prompt with L1/L2/L3 memories and relevant skills injected."""
+    memory_top_k = await get_memory_top_k(db, user_id)
+    memory_data = await MemoryService.get_memories_for_prompt(
+        db, user_id, user_message, top_k=memory_top_k, agent_id=agent.id if agent else None
+    )
+
+    matched_skills = await SkillService.get_skills_for_prompt(
+        db, user_id, user_message, top_k=3, bound_skills=agent.skills if agent else None
+    )
+
+    tenant_id = tenant_id or execution_tenant_id(user_id) or (agent.tenant_id if agent else None)
+    if tenant_id is None:
+        raise ValueError("System prompt requires an explicit execution tenant")
+
+    result = await db.execute(
+        select(UserProfile).where(
+            UserProfile.user_id == user_id,
+            UserProfile.tenant_id == tenant_id,
+        )
+    )
+    user_profile = result.scalar_one_or_none()
+    user_portrait = user_profile.personal_portrait if user_profile else None
+
+    return build_system_prompt(
+        tools=tools_list,
+        persistent_memories=memory_data["l1_memories"],
+        relevant_memories=memory_data["l2_memories"] + memory_data["l3_memories"],
+        daily_memories=memory_data["daily_memories"],
+        relevant_skills=matched_skills if matched_skills else None,
+        agent_prompt=(prompt_config or {}).get("system_prompt", agent.system_prompt if agent else None),
+        child_agents=agent.children if agent and agent.children else None,
+        workspace_files=workspace_files,
+        user_portrait=user_portrait,
+    )
+
+
+# ---------------------------------------------------------------------------
+# AgentLoop construction
+# ---------------------------------------------------------------------------
+
+
+def resolve_provider_type(provider_type: str | None) -> str:
+    name = (provider_type or "").lower()
+    if "anthropic" in name or "claude" in name:
+        return "anthropic"
+    return "openai"
+
+
+class ModelUnavailableError(RuntimeError):
+    """The execution tenant has no usable configured model."""
+
+
+async def resolve_model(
+    db: AsyncSession,
+    tenant_id: UUID,
+    model_id: UUID | None = None,
+) -> LLMModel:
+    """Resolve an LLMModel from a specific id, else the tenant default.
+
+    Returns a model with its ``provider`` relationship loaded. Raises
+    ``RuntimeError`` when no usable model exists (callers outside HTTP context
+    shouldn't raise HTTPException).
+    """
+    model_to_use = None
+    if model_id:
+        result = await db.execute(
+            select(LLMModel)
+            .options(selectinload(LLMModel.provider))
+            .where(LLMModel.id == model_id, LLMModel.is_active, LLMModel.tenant_id == tenant_id)
+        )
+        model_to_use = result.scalar_one_or_none()
+
+    if not model_to_use:
+        result = await db.execute(
+            select(LLMModel)
+            .options(selectinload(LLMModel.provider))
+            .where(LLMModel.is_default, LLMModel.is_active, LLMModel.tenant_id == tenant_id)
+            .limit(1)
+        )
+        model_to_use = result.scalar_one_or_none()
+
+    if not model_to_use or not model_to_use.provider:
+        raise ModelUnavailableError("没有可用的模型，请在管理后台配置模型并为智能体绑定模型")
+    return model_to_use
+
+
+async def build_agent_provider(
+    db: AsyncSession, *, tenant_id: UUID, config: AgentRuntimeConfig, resolved_model: LLMModel | None = None,
+) -> LLMProvider:
+    """Resolve and build providers consistently for root and delegated execution."""
+    model_to_use = resolved_model or await resolve_model(db, tenant_id=tenant_id, model_id=config.model_id)
+    if model_to_use.tenant_id != tenant_id:
+        raise ModelUnavailableError("模型与执行租户不一致")
+
+    provider = create_provider(
+        provider=model_to_use.provider.provider_type,
+        model=model_to_use.model_name,
+        base_url=model_to_use.provider.base_url,
+        api_key=model_to_use.provider.api_key_encrypted,
+        temperature=config.temperature if config.temperature is not None else settings.llm.temperature,
+        enable_retry=config.enable_retry,
+        langfuse_client=get_langfuse_client(),
+        supports_vision=bool(model_to_use.is_multimodal),
+    )
+    logger.info(
+        "使用模型",
+        model=model_to_use.model_name,
+        provider=model_to_use.provider.name,
+    )
+
+    return provider
+
+
+async def build_agent_loop(
+    tool_executor: ToolExecutor,
+    system_prompt: str,
+    db: AsyncSession,
+    tenant_id: UUID,
+    agent_model_id: UUID | None = None,
+    agent_temperature: float | None = None,
+    agent_max_iterations: int | None = None,
+    agent_enable_retry: bool = True,
+    delegation: DelegationContext | None = None,
+    event_queue: asyncio.Queue | None = None,
+    workspace_id: UUID | None = None,
+    workspace_slug: str | None = None,
+    allowed_tools: set[str] | None = None,
+    *,
+    runtime_config: AgentRuntimeConfig | None = None,
+    user_id: UUID | None = None,
+    resolved_model: LLMModel | None = None,
+) -> AgentLoop:
+    """Build every execution provider through the same tenant-scoped factory.
+
+    Scalar settings remain supported by existing interactive/background callers.
+    Published versions pass their snapshot-derived configuration instead.
+    """
+    config = runtime_config or AgentRuntimeConfig(
+        model_id=agent_model_id,
+        temperature=agent_temperature,
+        max_iterations=agent_max_iterations,
+        enable_retry=agent_enable_retry if agent_enable_retry is not None else True,
+    )
+    provider = await build_agent_provider(db, tenant_id=tenant_id, config=config, resolved_model=resolved_model)
+
+    return AgentLoop(
+        execution_tenant_id=tenant_id,
+        provider=provider,
+        tool_executor=tool_executor,
+        system_prompt=system_prompt,
+        max_iterations=config.max_iterations if config.max_iterations is not None else settings.agent.max_iterations,
+        trust_level=await resolve_trust_level(db, user_id),
+        delegation=delegation,
+        event_queue=event_queue,
+        workspace_id=workspace_id,
+        workspace_slug=workspace_slug,
+        allowed_tools=allowed_tools,
+    )
+
+
+async def resolve_trust_level(db: AsyncSession, user_id: UUID | None) -> str:
+    if user_id is None:
+        return settings.agent.trust_level
+    value = await db.scalar(select(UserConfig.trust_level).where(UserConfig.user_id == user_id))
+    return value if value in {"ask_always", "ask_dangerous", "auto_all"} else settings.agent.trust_level
+
+
+# ---------------------------------------------------------------------------
+# Workspace resolution
+# ---------------------------------------------------------------------------
+
+
+async def resolve_workspace(
+    db: AsyncSession,
+    session: Session,
+    user_id: UUID,
+):
+    """Resolve the workspace for a chat session.
+
+    Returns (workspace_id, workspace_slug). Sandbox is user-bound: all sessions
+    use the user's default workspace. Always uses the default workspace,
+    overriding any previously assigned value.
+    """
+    from agent_platform.workspaces.service import WorkspaceService
+
+    workspace = await WorkspaceService.get_or_create_default(db=db, user_id=user_id)
+
+    if session.workspace_id != workspace.id:
+        session.workspace_id = workspace.id
+        await db.flush()
+
+    return workspace.id, workspace.slug
+
+
+# ---------------------------------------------------------------------------
+# Conversation history
+# ---------------------------------------------------------------------------
+
+
+async def load_conversation_history(
+    db: AsyncSession,
+    session_id: UUID,
+    limit: int | None = None,
+    provider_type: str = "openai",
+    allow_images: bool = True,
+    exclude_message_id: UUID | None = None,
+) -> tuple[list[LLMMessage], str | None]:
+    """Load recent messages from DB as LLMMessage list, plus session context_summary.
+
+    Adaptive loading: if no explicit limit is given, uses the configured soft
+    limit and further reduces it if the loaded messages exceed the history
+    token budget. When ``allow_images`` is False, image attachments are skipped
+    so non-vision models never receive image blocks.
+    """
+    from agent_platform.llm import build_image_url_refs, build_user_content
+    from agent_platform.storage.chat_attachments import (
+        AttachmentAccessError,
+        ChatAttachmentStorage,
+        validate_attachment_refs,
+    )
+
+    soft_limit = limit or settings.agent.context_history_soft_limit
+
+    result = await db.execute(
+        select(Message)
+        .where(Message.session_id == session_id)
+        .where(Message.id != exclude_message_id if exclude_message_id else True)
+        .order_by(*Message.chronological_order(descending=True))
+        .limit(soft_limit)
+    )
+    messages = list(reversed(result.scalars().all()))
+
+    session_result = await db.execute(
+        select(Session).where(Session.id == session_id)
+    )
+    session = session_result.scalar_one_or_none()
+    context_summary = session.context_summary if session else None
+
+    llm_messages: list[LLMMessage] = []
+    attachment_storage = None
+    for msg in messages:
+        # A reserved/background turn may have failed before producing anything.
+        if msg.role == "assistant" and not (msg.content or msg.tool_calls):
+            continue
+        if msg.role in ("user", "assistant"):
+            if msg.attachments and msg.role == "user":
+                if session is None:
+                    raise AttachmentAccessError("附件会话不存在")
+                attachments = validate_attachment_refs(
+                    msg.attachments, user_id=str(session.user_id), session_id=str(session.id),
+                )
+                if allow_images:
+                    if attachment_storage is None:
+                        attachment_storage = ChatAttachmentStorage()
+                    # MinIO download + Pillow compression are blocking; resolve
+                    # each image off the event loop instead of stalling the turn.
+                    data_uris = {
+                        attachment["key"]: await asyncio.to_thread(
+                            attachment_storage.to_data_uri,
+                            attachment["key"], attachment["mime"],
+                            user_id=str(session.user_id), session_id=str(session.id),
+                        )
+                        for attachment in (attachments or [])
+                    }
+                    content = build_user_content(
+                        text=msg.content or "",
+                        attachments=attachments,
+                        provider_type=provider_type,
+                        to_data_uri=lambda key, _mime, _uris=data_uris: _uris[key],
+                    )
+                else:
+                    refs = build_image_url_refs(attachments)
+                    text = msg.content or ""
+                    content = f"{text}\n\n{refs}" if text and refs else (text or refs)
+            else:
+                content = msg.content or ""
+
+            stored_tool_calls = msg.tool_calls
+            if msg.role == "assistant" and stored_tool_calls and isinstance(stored_tool_calls, list):
+                tc_objects: list[ToolCall] = []
+                for tc in stored_tool_calls:
+                    if isinstance(tc, dict) and "id" in tc and "name" in tc:
+                        tc_objects.append(ToolCall(
+                            id=tc["id"],
+                            name=tc["name"],
+                            arguments=tc.get("arguments", {}),
+                        ))
+                llm_messages.append(LLMMessage(
+                    role="assistant",
+                    content=content,
+                    tool_calls=tc_objects if tc_objects else None,
+                ))
+                emitted_ids = {tc.id for tc in tc_objects}
+                for tc in stored_tool_calls:
+                    if (
+                        isinstance(tc, dict)
+                        and tc.get("id") in emitted_ids
+                        and "result" in tc
+                        and tc["result"]
+                    ):
+                        r = tc["result"]
+                        r_str = json.dumps(r, ensure_ascii=False) if not isinstance(r, str) else r
+                        llm_messages.append(LLMMessage(
+                            role="tool",
+                            content=r_str,
+                            tool_call_id=tc.get("id", ""),
+                        ))
+                # Interrupted calls still require a tool message in provider
+                # history. Unknown is not failure and must never imply retry.
+                for tc in stored_tool_calls:
+                    if isinstance(tc, dict) and tc.get("id") in emitted_ids and not tc.get("result"):
+                        llm_messages.append(LLMMessage(
+                            role="tool", tool_call_id=tc["id"],
+                            content="Execution outcome unknown after interruption. Do not repeat this operation; ask the user to verify its external result first.",
+                        ))
+            else:
+                llm_messages.append(LLMMessage(role=msg.role, content=content))
+
+    # Adaptive: reduce loaded history if it exceeds the token budget.
+    budget = ContextBudget.from_settings()
+    total = _est_tokens(llm_messages)
+    if total > budget.history_budget and len(llm_messages) > 4:
+        kept: list[LLMMessage] = []
+        used = 0
+        for m in reversed(llm_messages):
+            mt = _est_tokens([m])
+            if used + mt > budget.history_budget:
+                break
+            kept.append(m)
+            used += mt
+        kept.reverse()
+        logger.info(
+            "Adaptive history load: %d -> %d messages (~%d -> ~%d tokens, budget %d)",
+            len(llm_messages), len(kept), total, used, budget.history_budget,
+        )
+        # The truncation keeps a contiguous tail window; the budget boundary may cut
+        # at an assistant's tool_calls while its (newer) tool results survive, leaving
+        # orphan role='tool' messages at the window head. LLM APIs reject those.
+        llm_messages = drop_orphan_tool_messages(kept)
+
+    return llm_messages, context_summary
+
+
+def drop_orphan_tool_messages(messages: list[LLMMessage]) -> list[LLMMessage]:
+    """Drop role='tool' messages whose tool_call_id has no preceding assistant tool_calls.
+
+    Can arise after token-budget truncation (assistant cut at the boundary) or from
+    stored tool_calls lacking id/name. LLM providers reject orphan tool messages.
+    """
+    cleaned: list[LLMMessage] = []
+    pending_tool_ids: set[str] = set()
+    for m in messages:
+        if m.role == "assistant":
+            pending_tool_ids = {tc.id for tc in m.tool_calls} if m.tool_calls else set()
+            cleaned.append(m)
+        elif m.role == "tool":
+            if m.tool_call_id in pending_tool_ids:
+                pending_tool_ids.discard(m.tool_call_id)
+                cleaned.append(m)
+        else:
+            cleaned.append(m)
+    dropped = len(messages) - len(cleaned)
+    if dropped:
+        logger.info("History cleanup: dropped %d orphan tool messages", dropped)
+    return cleaned
+
+
+# ---------------------------------------------------------------------------
+# Fire-and-forget helpers
+# ---------------------------------------------------------------------------
+
+
+def fire_memory_extraction(
+    user_id: UUID,
+    session_id: UUID,
+    history: list[LLMMessage],
+    user_message: str,
+    assistant_output: str,
+    enable: bool = True,
+    tenant_id: UUID | None = None,
+    agent_id: UUID | None = None,
+) -> None:
+    """Fire-and-forget memory extraction as a background task."""
+    from agent_platform.browser.context import is_private_browser_run
+    if not enable or is_private_browser_run():
+        return
+    if len(history) < 2:
+        return
+    if len(user_message.strip()) < 10 or len(assistant_output.strip()) < 20:
+        return
+
+    messages = []
+    for msg in history[-6:]:
+        messages.append({"role": msg.role, "content": msg.content or ""})
+    messages.append({"role": "user", "content": user_message})
+    messages.append({"role": "assistant", "content": assistant_output})
+
+    async def _extract_and_merge_daily() -> None:
+        from agent_platform.core.throttle import allow_once
+
+        if not await allow_once(
+            f"aio:memory_extract:{session_id}", _MEMORY_EXTRACTION_INTERVAL_SECONDS,
+        ):
+            return
+        created = await MemoryService.extract_memories_from_conversation(
+            user_id=user_id,
+            session_id=session_id,
+            messages=messages,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+        )
+        # 实时追加:把本次会话的 L3 摘要合并进今天的每日记忆(凌晨 cron 会再精修)
+        l3_memory = next((m for m in created if m.layer == "L3"), None)
+        if l3_memory is not None:
+            from agent_platform.memory.daily import DailyMemoryService
+
+            await DailyMemoryService.append_session_summary(
+                user_id, session_id, l3_memory.content, agent_id=l3_memory.agent_id,
+                tenant_id=tenant_id
+            )
+
+    task = asyncio.create_task(_extract_and_merge_daily())
+    background_tasks.add(task)
+    task.add_done_callback(background_tasks.discard)
+
+
+async def update_context_summary(
+    session_id: UUID,
+    history: list[LLMMessage],
+    user_message: str,
+    assistant_output: str,
+    provider: Any,
+    *,
+    user_id: UUID | None = None,
+    tenant_id: UUID | None = None,
+) -> None:
+    """Update the session summary incrementally, once per few new messages.
+
+    The summary is folded forward from the previous version plus only the
+    messages added since then, and prefers the tenant's cheap utility model.
+    """
+    all_messages = [
+        *list(history),
+        LLMMessage(role="user", content=user_message),
+        LLMMessage(role="assistant", content=assistant_output),
+    ]
+    if len(all_messages) < 10:
+        return
+
+    from agent_platform.core.throttle import claim_message_batch
+    from agent_platform.db.connection import set_db_user
+
+    try:
+        factory = get_session_factory()
+        async with factory() as db:
+            if user_id is not None:
+                await set_db_user(db, user_id)
+            total_messages = int(await db.scalar(
+                select(func.count(Message.id)).where(Message.session_id == session_id)
+            ) or 0)
+            existing = await db.scalar(
+                select(Session.context_summary).where(Session.id == session_id)
+            )
+            utility = None
+            if tenant_id is not None:
+                from agent_platform.core.auto_title import resolve_utility_provider
+
+                utility = await resolve_utility_provider(db, tenant_id)
+
+        # The loaded history is capped by the soft limit, so throttle on the
+        # session's absolute message count instead of len(history).
+        previous = await claim_message_batch(
+            f"aio:context_summary_at:{session_id}", total_messages, min_delta=4,
+        )
+        if previous is None:
+            return
+        new_count = max(total_messages - previous, 2)
+        new_messages = all_messages[-min(new_count, len(all_messages)):]
+        if not new_messages:
+            return
+
+        summary = await generate_summary(
+            new_messages[-20:], utility or provider, existing_summary=existing,
+        )
+        if not summary:
+            return
+        async with factory() as db:
+            if user_id is not None:
+                await set_db_user(db, user_id)
+            await db.execute(
+                sql_update(Session)
+                .where(Session.id == session_id)
+                .values(context_summary=summary)
+            )
+            await db.commit()
+            logger.info(f"Context summary updated for session {session_id}: {len(summary)} chars")
+    except Exception:
+        logger.exception(f"Failed to update context summary for session {session_id}")
+
+
+# ---------------------------------------------------------------------------
+# File-attachment helpers (used by chat routes)
+# ---------------------------------------------------------------------------
+
+
+def file_refs_to_dicts(refs: list | None) -> list | None:
+    """Convert FileAttachmentRef list to plain dicts for the prompt builder."""
+    if not refs:
+        return None
+    return [r.model_dump() if hasattr(r, "model_dump") else r for r in refs]
+
+
+def inject_file_refs_into_message(message: str, file_refs: list | None) -> str:
+    """Prepend file references to the user message so the agent knows about them."""
+    if not file_refs:
+        return message
+    refs = file_refs_to_dicts(file_refs)
+    if not refs:
+        return message
+    lines = ["[用户上传了以下文件到工作区：]"]
+    for f in refs:
+        name = f.get("filename", "unknown")
+        size = f.get("size", 0)
+        path = f.get("workspace_path", "")
+        size_str = f"{size / (1024 * 1024):.1f} MB" if size > 1024 * 1024 else f"{size:,} 字节"
+        lines.append(f"- {name} ({size_str}) → {path} (相对路径，使用时直接传此路径)")
+    lines.append(f"\n用户消息：{message}")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Back-compat aliases — keep routes/chat.py's internal imports working while
+# we migrate call sites.
+# ---------------------------------------------------------------------------
+
+_load_agent = load_agent
+_filter_tools_by_agent = filter_tools_by_agent
+_build_system_prompt_with_memories = build_system_prompt_with_memories
+_build_agent_loop = build_agent_loop
+_resolve_workspace = resolve_workspace
+_get_memory_top_k = get_memory_top_k
+_resolve_provider_type = resolve_provider_type
+_fire_memory_extraction = fire_memory_extraction
+_update_context_summary = update_context_summary
+_load_conversation_history = load_conversation_history
+_file_refs_to_dicts = file_refs_to_dicts
+_inject_file_refs_into_message = inject_file_refs_into_message
+_background_tasks = background_tasks

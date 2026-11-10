@@ -8,7 +8,7 @@ from tests import conftest
 
 
 @pytest.mark.parametrize("url", [
-    "postgresql+asyncpg://user:password@localhost:5435/aio_agent_platform",
+    "postgresql+asyncpg://user:password@localhost:5435/agent_platform",
     "postgresql+asyncpg://user:password@example.com/aio_test",
     "postgresql+asyncpg://user:password@localhost/postgres",
     "postgresql+asyncpg://user:password@localhost/aio_test?host=example.com",

@@ -30,8 +30,8 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
-from aio_agent_platform.channels.adapter import ChatKind, InboundEvent
-from aio_agent_platform.channels.binding import (
+from agent_platform.channels.adapter import ChatKind, InboundEvent
+from agent_platform.channels.binding import (
     BindCodeInvalid,
     BindCodeRateLimited,
     _generate_code,
@@ -40,19 +40,19 @@ from aio_agent_platform.channels.binding import (
     resolve_external_user,
     unbind_external,
 )
-from aio_agent_platform.channels.connection_manager import ChannelConnectionManager
-from aio_agent_platform.channels.feishu.adapter import FeishuAdapter
-from aio_agent_platform.channels.feishu.client import FeishuClient
-from aio_agent_platform.channels.feishu.crypto import decrypt_event, verify_signature
-from aio_agent_platform.channels.feishu.events import normalize_event
-from aio_agent_platform.channels.feishu.webhook_transport import (
+from agent_platform.channels.connection_manager import ChannelConnectionManager
+from agent_platform.channels.feishu.adapter import FeishuAdapter
+from agent_platform.channels.feishu.client import FeishuClient
+from agent_platform.channels.feishu.crypto import decrypt_event, verify_signature
+from agent_platform.channels.feishu.events import normalize_event
+from agent_platform.channels.feishu.webhook_transport import (
     FeishuWebhookTransport,
     _webhook_registry,
     build_webhook_router,
     register_webhook,
 )
-from aio_agent_platform.channels.feishu.ws_transport import FeishuWebSocketTransport
-from aio_agent_platform.channels.pipeline import (
+from agent_platform.channels.feishu.ws_transport import FeishuWebSocketTransport
+from agent_platform.channels.pipeline import (
     _STREAM_INITIAL_TEXT,
     _STREAM_UPDATE_INTERVAL_SECONDS,
     _BufferedEventLogger,
@@ -69,8 +69,8 @@ from aio_agent_platform.channels.pipeline import (
     _StreamingReply,
     _strip_internal_keys,
 )
-from aio_agent_platform.db.models import ChannelBinding, User
-from aio_agent_platform.interface.routes.channels import (
+from agent_platform.db.models import ChannelBinding, User
+from agent_platform.interface.routes.channels import (
     ChannelCreate,
     ChannelUpdate,
     _sensitive_config_changed,
@@ -424,7 +424,7 @@ async def test_buffered_event_logger_coalesces_text_deltas(
         written.append(event)
 
     monkeypatch.setattr(
-        "aio_agent_platform.channels.pipeline.log_event", fake_log_event
+        "agent_platform.channels.pipeline.log_event", fake_log_event
     )
     logger = _BufferedEventLogger(uuid4(), uuid4())
     logger.submit({"type": "text_delta", "content": "你"})
@@ -1466,7 +1466,7 @@ async def test_consume_bind_code_rejects_invalid(db_session) -> None:
 
 
 async def test_consume_bind_code_rejects_expired(db_session) -> None:
-    from aio_agent_platform.db.models import ChannelBindCode
+    from agent_platform.db.models import ChannelBindCode
 
     tenant_id = uuid4()
     channel_id = uuid4()

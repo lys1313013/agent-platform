@@ -8,18 +8,18 @@ from uuid import uuid4
 import pytest
 from fastapi import HTTPException
 
-from aio_agent_platform.core.chat import load_conversation_history
-from aio_agent_platform.interface.routes import chat
-from aio_agent_platform.llm.client import build_user_content
-from aio_agent_platform.rooms import service
-from aio_agent_platform.rooms.schemas import RoomSend
-from aio_agent_platform.storage.chat_attachments import (
+from agent_platform.core.chat import load_conversation_history
+from agent_platform.interface.routes import chat
+from agent_platform.llm.client import build_user_content
+from agent_platform.rooms import service
+from agent_platform.rooms.schemas import RoomSend
+from agent_platform.storage.chat_attachments import (
     AttachmentAccessError,
     ChatAttachmentStorage,
     validate_attachment_key,
     validate_attachment_refs,
 )
-from aio_agent_platform.storage.client import ObjectInfo
+from agent_platform.storage.client import ObjectInfo
 
 OWNER, SESSION, FOREIGN = str(uuid4()), str(uuid4()), str(uuid4())
 
@@ -126,7 +126,7 @@ def history_db(attachment, owner=OWNER):
 @pytest.mark.parametrize("allow_images", [True, False])
 async def test_polluted_history_is_not_rehydrated_or_rendered_as_url(allow_images, monkeypatch):
     objects = Mock(side_effect=AssertionError("storage must not be initialized"))
-    monkeypatch.setattr("aio_agent_platform.storage.chat_attachments.ChatAttachmentStorage", objects)
+    monkeypatch.setattr("agent_platform.storage.chat_attachments.ChatAttachmentStorage", objects)
     db = history_db(ref(BAD_KEYS[0]))
     with pytest.raises(AttachmentAccessError):
         await load_conversation_history(db, SESSION, allow_images=allow_images)
@@ -134,7 +134,7 @@ async def test_polluted_history_is_not_rehydrated_or_rendered_as_url(allow_image
 
 
 async def test_text_model_history_uses_canonical_url_without_storage(monkeypatch):
-    monkeypatch.setattr("aio_agent_platform.storage.client.ObjectStorage.__init__",
+    monkeypatch.setattr("agent_platform.storage.client.ObjectStorage.__init__",
                         Mock(side_effect=AssertionError("storage must not be initialized")))
     history, _ = await load_conversation_history(history_db(ref()), SESSION, allow_images=False)
     assert "untrusted.invalid" not in history[0].content

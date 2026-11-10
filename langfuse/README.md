@@ -43,7 +43,7 @@ LANGFUSE_BIND_HOST=0.0.0.0
 
 其他机器能否连接还取决于网络路由、防火墙和服务器安全组是否允许对应端口。
 
-## 接入 aio-agent-platform
+## 接入 agent-platform
 
 在主应用的环境配置中填写：
 

@@ -1,7 +1,7 @@
 """Tests for remote tools template engine."""
 
 
-from aio_agent_platform.tools.remote.template import render_body, render_url
+from agent_platform.tools.remote.template import render_body, render_url
 
 
 class TestRenderUrl:
