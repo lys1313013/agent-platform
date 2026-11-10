@@ -16,6 +16,36 @@ from agent_platform.portrait.presentation import format_portrait_section
 
 logger = logging.getLogger(__name__)
 
+
+class SystemPrompt(str):
+    """Rendered system prompt that records where its cacheable prefix ends.
+
+    Only the instruction prefix is stable across turns; memories, portrait and
+    workspace files change with every request. Providers with explicit cache
+    breakpoints split there so dynamic context cannot evict the prefix.
+    """
+
+    stable_length: int
+
+    def __new__(cls, text: str, stable_length: int = 0) -> SystemPrompt:
+        obj = super().__new__(cls, text)
+        obj.stable_length = min(max(stable_length, 0), len(text))
+        return obj
+
+
+def _compose_system_prompt(stable: str, volatile: str) -> SystemPrompt:
+    stable = stable.strip()
+    volatile = volatile.strip()
+    if not volatile:
+        return _enforce_prompt_budget(SystemPrompt(stable, len(stable)))
+    return _enforce_prompt_budget(SystemPrompt(f"{stable}\n\n{volatile}", len(stable)))
+
+
+def append_runtime_context(prompt: str, context: str) -> SystemPrompt:
+    """Append run-time instructions while keeping the cacheable prefix intact."""
+    text = f"{prompt}\n\n{context.strip()}"
+    return SystemPrompt(text, getattr(prompt, "stable_length", 0))
+
 # Resolve prompts directory relative to project root
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent.parent.parent / "prompts"
 _env = Environment(
@@ -92,55 +122,64 @@ def build_system_prompt(
     """
     if agent_prompt:
         # Use agent's custom prompt as base, then append memories/skills context
-        parts = [agent_prompt, _env.get_template("artifact_delivery.j2").render(), _env.get_template("skill_authoring.j2").render(), _env.get_template("memory_usage.j2").render()]
-
-        parts.append(format_portrait_section(user_portrait))
+        stable_parts = [
+            agent_prompt,
+            _env.get_template("artifact_delivery.j2").render(),
+            _env.get_template("skill_authoring.j2").render(),
+            _env.get_template("memory_usage.j2").render(),
+        ]
+        volatile_parts: list[str] = [format_portrait_section(user_portrait)]
 
         if persistent_memories:
             persistent_memories = _trim_memories(persistent_memories)
-            parts.append("\n## User Context (from memory)")
+            memories = ["\n## User Context (from memory)"]
             for memory in persistent_memories:
-                parts.append(f"- {format_memory(memory)}")
+                memories.append(f"- {format_memory(memory)}")
+            volatile_parts.append("\n".join(memories))
 
         if relevant_memories:
             relevant_memories = _trim_relevant_memories(relevant_memories)
-            parts.append("\n## Relevant Memories")
+            memories = ["\n## Relevant Memories"]
             for memory in relevant_memories:
-                parts.append(f"- {format_memory(memory)}")
+                memories.append(f"- {format_memory(memory)}")
+            volatile_parts.append("\n".join(memories))
 
         if daily_memories:
-            parts.append(_build_daily_section(_trim_daily_memories(daily_memories)))
+            volatile_parts.append(_build_daily_section(_trim_daily_memories(daily_memories)))
 
         if relevant_skills:
             relevant_skills = _trim_skills(relevant_skills)
-            parts.append("\n## Relevant Experience")
+            skills = ["\n## Relevant Experience"]
             for skill in relevant_skills:
-                parts.append(f"### {skill.name} (ID: {getattr(skill, 'id', 'unknown')}, version: {getattr(skill, 'version', 'unknown')})")
-                parts.append(skill.description or "")
-                parts.append(f"Verification: {(getattr(skill, 'verification', None) or {}).get('status', 'unverified')}")
+                skills.append(f"### {skill.name} (ID: {getattr(skill, 'id', 'unknown')}, version: {getattr(skill, 'version', 'unknown')})")
+                skills.append(skill.description or "")
+                skills.append(f"Verification: {(getattr(skill, 'verification', None) or {}).get('status', 'unverified')}")
                 if hasattr(skill, "files") and skill.files:
                     file_summary = []
                     for f in skill.files:
                         fname = f.get("path", "").split("/")[-1]
                         ftype = f.get("type", "")
                         file_summary.append(f"{fname} ({ftype})")
-                    parts.append(f"  Files: {', '.join(file_summary)}")
-                    parts.append("  Use `view_skill` to read details and auto-deploy files to sandbox.")
+                    skills.append(f"  Files: {', '.join(file_summary)}")
+                    skills.append("  Use `view_skill` to read details and auto-deploy files to sandbox.")
+            volatile_parts.append("\n".join(skills))
 
         if workspace_files and len(workspace_files) > 0:
-            parts.append(_build_files_section(workspace_files))
+            volatile_parts.append(_build_files_section(workspace_files))
 
         # Inject delegation guidance: pre-configured child agents, or dynamic spawn
         has_delegate_tool = _has_delegate_tool(tools)
         if child_agents:
-            parts.append(_build_child_agents_section(child_agents))
+            volatile_parts.append(_build_child_agents_section(child_agents))
         elif has_delegate_tool:
-            parts.append(_build_dynamic_delegation_section())
+            volatile_parts.append(_build_dynamic_delegation_section())
 
         # The clock is injected as a transient request message; keeping it out
         # of the system prompt is what makes cross-turn prompt caching work.
-        prompt = "\n".join(parts)
-        return _enforce_prompt_budget(prompt)
+        return _compose_system_prompt(
+            "\n".join(part for part in stable_parts if part),
+            "\n".join(part for part in volatile_parts if part),
+        )
 
     # Default: use Jinja2 template
     # Pre-trim dynamic content to control prompt size
@@ -149,24 +188,24 @@ def build_system_prompt(
     relevant_skills = _trim_skills(relevant_skills or [])
     daily_memories = _trim_daily_memories(daily_memories or [])
 
-    template = _env.get_template("system_prompt.j2")
-
-    prompt = template.render(
+    stable = _env.get_template("system_prompt.j2").render(
         tools=tools or [],
+        user_name=user_name or "User",
+    )
+    volatile = _env.get_template("system_context.j2").render(
         persistent_memories=persistent_memories,
         relevant_memories=relevant_memories,
         relevant_skills=relevant_skills,
         daily_memories=daily_memories,
         child_agents=child_agents or [],
-        user_name=user_name or "User",
         user_portrait=user_portrait or "",
     )
 
     if workspace_files and len(workspace_files) > 0:
-        prompt += "\n" + _build_files_section(workspace_files)
+        volatile += "\n" + _build_files_section(workspace_files)
     if _has_delegate_tool(tools) and not child_agents:
-        prompt += "\n" + _build_dynamic_delegation_section()
-    return _enforce_prompt_budget(prompt)
+        volatile += "\n" + _build_dynamic_delegation_section()
+    return _compose_system_prompt(stable, volatile)
 
 
 # ---- Budget-aware trimming helpers ----
@@ -306,7 +345,7 @@ def _trim_skills(skills: list) -> list:
     return skills
 
 
-def _enforce_prompt_budget(prompt: str) -> str:
+def _enforce_prompt_budget(prompt: SystemPrompt) -> SystemPrompt:
     """Final safety net: truncate prompt if it exceeds system prompt budget."""
     budget = ContextBudget.from_settings()
     estimated = estimate_tokens(prompt)
@@ -321,5 +360,6 @@ def _enforce_prompt_budget(prompt: str) -> str:
             estimated,
             budget.system_budget,
         )
-        return prompt[:char_limit] + "\n\n[... system prompt truncated due to context limits ...]"
+        text = prompt[:char_limit] + "\n\n[... system prompt truncated due to context limits ...]"
+        return SystemPrompt(text, min(prompt.stable_length, char_limit))
     return prompt

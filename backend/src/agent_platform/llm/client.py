@@ -613,6 +613,23 @@ class OpenAIProvider(LLMProvider):
 # ---- Anthropic Provider ----
 
 
+def _with_cache_control(message: dict) -> dict:
+    """Return a copy of an Anthropic message with a breakpoint on its last block."""
+    content = message.get("content")
+    if isinstance(content, str):
+        if not content:
+            return message
+        return {
+            **message,
+            "content": [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}],
+        }
+    if isinstance(content, list) and content:
+        blocks = list(content)
+        blocks[-1] = {**blocks[-1], "cache_control": {"type": "ephemeral"}}
+        return {**message, "content": blocks}
+    return message
+
+
 class AnthropicProvider(LLMProvider):
     """
     Supports: Anthropic Claude series models.
@@ -895,11 +912,15 @@ class AnthropicProvider(LLMProvider):
         system_parts: list[str] = []
         transient_parts: list[str] = []
         result: list[dict] = []
+        # Last message that may carry a breakpoint. Transient runtime context
+        # (the clock) changes every request, so it can only sit after it.
+        last_cacheable: int | None = None
 
         for msg in messages:
             if msg.role == "system":
                 target = transient_parts if msg.transient else system_parts
-                target.append(str(msg.content))
+                # Keep SystemPrompt intact: it carries the cacheable prefix length.
+                target.append(msg.content if isinstance(msg.content, str) else str(msg.content))
             elif msg.role == "assistant" and msg.tool_calls:
                 blocks = []
                 if msg.content:
@@ -929,17 +950,35 @@ class AnthropicProvider(LLMProvider):
                 )
             else:
                 result.append({"role": msg.role, "content": msg.content})
+            if msg.role != "system" and not msg.transient:
+                last_cacheable = len(result) - 1
+
         system_blocks: list[dict] = []
         if system_parts:
-            # The static block is the cache breakpoint; transient runtime
-            # context is appended after it so the prefix survives every turn.
+            # The instruction prefix is the cache breakpoint; per-request context
+            # (memories, portrait, workspace files) follows it uncached so it
+            # cannot evict the prefix on every turn.
+            combined = "\n\n".join(str(part) for part in system_parts)
+            stable_end = getattr(system_parts[0], "stable_length", 0)
+            if 0 < stable_end < len(combined):
+                stable_text = combined[:stable_end]
+                volatile_text = combined[stable_end:].lstrip("\n")
+            else:
+                stable_text, volatile_text = combined, ""
             system_blocks.append({
                 "type": "text",
-                "text": "\n\n".join(system_parts),
+                "text": stable_text,
                 "cache_control": {"type": "ephemeral"},
             })
+            if volatile_text:
+                system_blocks.append({"type": "text", "text": volatile_text})
         if transient_parts:
             system_blocks.append({"type": "text", "text": "\n\n".join(transient_parts)})
+
+        # Rolling breakpoint: the next ReAct iteration re-reads everything up to
+        # this message instead of reprocessing the whole conversation.
+        if last_cacheable is not None and result:
+            result[last_cacheable] = _with_cache_control(result[last_cacheable])
         return (system_blocks or None), result
 
     def _convert_tools(self, tools: list[dict]) -> list[dict]:

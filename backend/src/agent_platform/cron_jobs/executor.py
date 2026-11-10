@@ -19,7 +19,7 @@ async def execute_cron_job(job, db, run_id, *, tool_executor, push_to_channel):
         refresh_mcp_tools_for_agent,
     )
     from agent_platform.core.chat_history import ChatTurnRecorder
-    from agent_platform.core.prompt import build_cron_execution_prompt
+    from agent_platform.core.prompt import append_runtime_context, build_cron_execution_prompt
     from agent_platform.db.models import CronJobRun, Message, Tenant, TenantMembership, User
     from agent_platform.db.models import Session as ChatSession
 
@@ -132,11 +132,11 @@ async def execute_cron_job(job, db, run_id, *, tool_executor, push_to_channel):
         )]
         tools_schema = [*tools_schema, CRON_RESPOND_TOOL_SCHEMA]
 
-        system_prompt = await build_system_prompt_with_memories(
-            db, job.user_id, job.message, tools_list, agent=agent, tenant_id=job.tenant_id,
-        )
-        system_prompt += "\n\n" + build_cron_execution_prompt(
-            has_notify_channel=bool(job.channel_id),
+        system_prompt = append_runtime_context(
+            await build_system_prompt_with_memories(
+                db, job.user_id, job.message, tools_list, agent=agent, tenant_id=job.tenant_id,
+            ),
+            build_cron_execution_prompt(has_notify_channel=bool(job.channel_id)),
         )
         loop = await build_agent_loop(
             tool_executor, system_prompt, db, user_id=job.user_id,

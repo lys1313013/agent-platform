@@ -420,41 +420,44 @@ class AgentLoop:
             )
 
             # --- Context budget check: compress early tool results ---
+            # Only near the trigger: rewriting mid-history invalidates the
+            # prompt-cache prefix, so it must buy real headroom.
             if step_num > 3:
-                tokens_before = estimate_messages_tokens(messages)
-                get_hook_manager().fire_nowait(
-                    "PreCompact",
-                    trace_id=str(trace_id),
-                    user_id=user_id,
-                    session_id=session_id,
-                    tenant_id=tenant_id,
-                    agent_id=agent_id,
-                    model=self.provider.model,
-                    data={"tokens_before": tokens_before},
-                )
-                messages = compress_early_tool_results(messages, step_num)
-                tokens_after = estimate_messages_tokens(messages)
-                get_hook_manager().fire_nowait(
-                    "PostCompact",
-                    trace_id=str(trace_id),
-                    user_id=user_id,
-                    session_id=session_id,
-                    tenant_id=tenant_id,
-                    agent_id=agent_id,
-                    model=self.provider.model,
-                    data={
-                        "tokens_before": tokens_before,
-                        "tokens_after": tokens_after,
-                        "saved_tokens": max(tokens_before - tokens_after, 0),
-                    },
-                )
-                current_tokens = tokens_after
                 budget = ContextBudget.from_settings()
-                if current_tokens > budget.usable * 0.9:
+                tokens_before = estimate_messages_tokens(messages)
+                tokens_after = tokens_before
+                if tokens_before > budget.trigger_at:
+                    get_hook_manager().fire_nowait(
+                        "PreCompact",
+                        trace_id=str(trace_id),
+                        user_id=user_id,
+                        session_id=session_id,
+                        tenant_id=tenant_id,
+                        agent_id=agent_id,
+                        model=self.provider.model,
+                        data={"tokens_before": tokens_before},
+                    )
+                    messages = compress_early_tool_results(messages, step_num)
+                    tokens_after = estimate_messages_tokens(messages)
+                    get_hook_manager().fire_nowait(
+                        "PostCompact",
+                        trace_id=str(trace_id),
+                        user_id=user_id,
+                        session_id=session_id,
+                        tenant_id=tenant_id,
+                        agent_id=agent_id,
+                        model=self.provider.model,
+                        data={
+                            "tokens_before": tokens_before,
+                            "tokens_after": tokens_after,
+                            "saved_tokens": max(tokens_before - tokens_after, 0),
+                        },
+                    )
+                if tokens_after > budget.usable * 0.9:
                     logger.warning(
                         "ReAct iteration %d: context at ~%d tokens (90%% of %d usable)",
                         step_num,
-                        current_tokens,
+                        tokens_after,
                         budget.usable,
                     )
                     get_hook_manager().fire_nowait(
@@ -469,7 +472,7 @@ class AgentLoop:
                             "level": "warning",
                             "category": "context_high_utilization",
                             "message": (
-                                f"ReAct iteration {step_num}: context at ~{current_tokens} "
+                                f"ReAct iteration {step_num}: context at ~{tokens_after} "
                                 f"tokens (90% of {budget.usable} usable)"
                             ),
                         },
@@ -688,13 +691,12 @@ class AgentLoop:
         for stream_attempt in range(1, _STREAM_RETRY_MAX + 2):  # 1, 2, 3
             try:
                 # Refresh after tools, user confirmations, and retries without
-                # accumulating stale clocks in history. The platform clock
-                # is system context; Anthropic collects it at the end of
-                # its system prompt instead of the conversation tail.
+                # accumulating stale clocks in history. The clock rides after
+                # the conversation so it never breaks the cached prefix.
                 request_messages = [
                     *messages,
                     LLMMessage(
-                        role="system",
+                        role="user",
                         content=build_current_time_context(),
                         transient=True,
                     ),

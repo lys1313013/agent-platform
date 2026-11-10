@@ -63,7 +63,7 @@ docker compose -f docker-compose-base.yml --profile build build sandbox-build  #
 
 ### 上下文窗口管理
 
-`core/context.py` — token 估算、消息截断、对话摘要压缩。`ContextBudget` 从 settings 读取窗口大小和预留空间。第三步迭代后自动压缩早期工具结果，超过 90% 阈值时告警。
+`core/context.py` — token 估算、消息截断、对话摘要压缩。`ContextBudget` 从 settings 读取窗口大小和预留空间。第三步迭代后、上下文接近预算阈值时压缩早期工具结果（避免破坏提示缓存前缀），超过 90% 阈值时告警。
 
 ### 记忆系统
 

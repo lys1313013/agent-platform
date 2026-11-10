@@ -1,0 +1,60 @@
+{# Per-request context. Kept apart from system_prompt.j2 so retrieving new
+   memories, portrait or skills never invalidates the cached instruction prefix. #}
+{{ portrait_section(user_portrait) }}
+
+{% if persistent_memories %}
+## User Context (from memory)
+These are always-loaded facts about the user. Reference them naturally.
+{% for memory in persistent_memories %}
+- {{ memory | memory_record }}
+{% endfor %}
+{% endif %}
+
+{% if relevant_memories %}
+## Relevant Memories
+These memories may be relevant to the current conversation. Use them for context but don't explicitly cite them unless the user asks.
+{% for memory in relevant_memories %}
+- {{ memory | memory_record }}
+{% endfor %}
+{% endif %}
+
+{% if daily_memories %}
+## Daily Memories (按天的记忆记录)
+Each entry summarizes what the user did on that day. Use them for continuity; when the user asks about a specific day (e.g. "8月9日我们做了什么"), answer from these records.
+{% for memory in daily_memories %}
+### {{ memory.date.isoformat() }}
+{{ memory.content }}
+{% endfor %}
+{% endif %}
+
+{% if relevant_skills %}
+## Relevant Experience
+You have learned methodologies for the following tasks. Use `view_skill` to read
+full details and auto-deploy files to the sandbox.
+{% for skill in relevant_skills %}
+### {{ skill.name }} (ID: {{ skill.id }}, version: {{ skill.version }})
+{{ skill.description }}
+Verification: {{ (skill.verification | default({}, true)).get('status', 'unverified') }}
+{% if skill.files %}
+Files:
+{% for f in skill.files %}
+  - `{{ f.path }}` ({{ f.type }}){% if f.description %}: {{ f.description }}{% endif %}
+
+{% endfor %}
+{% endif %}
+{% endfor %}
+{% endif %}
+
+{% if child_agents %}
+## Available Child Agents
+You can delegate specialized tasks to the following child agents using the `delegate_task` tool:
+{% for child in child_agents %}
+- **{{ child.name }}** (ID: `{{ child.id }}`): {{ child.description or "Specialized sub-agent" }}
+{% endfor %}
+
+**Delegation guidelines**:
+- Use delegation when a task matches a child agent's specialization
+- Provide clear task descriptions with sufficient context for independent execution
+- Child agents share your sandbox environment and can access files you've created
+- You can delegate multiple tasks in parallel by calling `delegate_task` multiple times
+{% endif %}

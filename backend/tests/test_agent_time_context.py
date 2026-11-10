@@ -64,20 +64,23 @@ async def test_clock_refreshes_after_tools_retries_and_new_turns(monkeypatch, us
 
     assert len(requests) == 4
     for messages, current in zip(requests, times, strict=True):
-        assert messages[-1].role == "system"
+        assert messages[-1].role == "user"
+        assert messages[-1].transient is True
         assert f"当前时间（北京时间）：{current}" in messages[-1].content
         assert sum("[平台时间上下文]" in str(m.content) for m in messages) == 1
         assert messages[0].content == loop.system_prompt
         assert messages[2].content == original_input
-        # Anthropic splits the static system block (cache breakpoint) from the
-        # transient clock block, and drops both from the message array.
+        # Anthropic keeps the static system block as the cache breakpoint and
+        # appends the clock after the conversation, never inside the prefix.
         system, converted = AnthropicProvider._to_anthropic_format(None, messages)
+        assert len(system) == 1
         assert system[0]["text"] == loop.system_prompt
         assert system[0]["cache_control"] == {"type": "ephemeral"}
-        assert "[平台时间上下文]" in system[1]["text"]
-        assert "cache_control" not in system[1]
-        assert len(converted) == len(messages) - 2
-        assert all("[平台时间上下文]" not in str(m["content"]) for m in converted)
+        assert len(converted) == len(messages) - 1
+        assert "[平台时间上下文]" in converted[-1]["content"]
+        assert "cache_control" not in converted[-1]
+        if original_input is not None:
+            assert "cache_control" in converted[-2]["content"][-1]
 
     assert requests[1][-2].role == "tool"
     assert requests[1][-2].tool_call_id == "call-1"
