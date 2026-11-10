@@ -36,9 +36,13 @@ def make_executor(manager, kind, output):
     executor = ToolExecutor(registry, manager)
     if kind == "mcp":
         executor.mcp_manager = SimpleNamespace(is_mcp_tool=lambda _: True, call_tool=handler)
+        # File/output tests isolate dispatch IO; real MCP authorization is covered separately.
+        executor._authorize_mcp_tool = AsyncMock()
     elif kind == "remote":
         executor.remote_manager = SimpleNamespace(is_remote_tool=lambda _: True)
         executor.remote_executor = SimpleNamespace(call=handler)
+        # Real tenant ownership is covered by test_remote_api / executor security tests.
+        executor._authorize_remote_tool = AsyncMock()
     else:
         if kind == "builtin":
             registry.register(Tool("sample", "test", {}, requires_sandbox=False))
@@ -49,7 +53,7 @@ def make_executor(manager, kind, output):
 async def execute(executor, **kwargs):
     return await executor.execute(
         "sample", {}, "call-1", "user-1", "session-1",
-        workspace_id="workspace-1", workspace_slug="project", **kwargs,
+        workspace_id="workspace-1", workspace_slug="project", trust_level="auto_all", **kwargs,
     )
 
 

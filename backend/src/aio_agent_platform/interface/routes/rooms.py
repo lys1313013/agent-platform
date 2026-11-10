@@ -8,7 +8,6 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,12 +21,22 @@ from aio_agent_platform.db.models import (
     TenantMembership,
     User,
 )
+from aio_agent_platform.interface.contracts import (
+    EventStreamResponse,
+    StatusOut,
+    SuccessOut,
+    sse_contract,
+)
 from aio_agent_platform.rooms import service
 from aio_agent_platform.rooms.runtime import start_run
 from aio_agent_platform.rooms.schemas import (
     RoomConfirmation,
     RoomCreate,
+    RoomDetailOut,
+    RoomMessageOut,
+    RoomOut,
     RoomRetry,
+    RoomRunAccepted,
     RoomSend,
     RoomUpdate,
 )
@@ -36,7 +45,7 @@ router = APIRouter(prefix="/api/rooms", tags=["rooms"])
 Db = Annotated[AsyncSession, Depends(get_db)]
 
 
-@router.get("")
+@router.get("", response_model=list[RoomOut])
 async def list_rooms(user: CurrentUser, db: Db, offset: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=100)):
     rooms = (await db.scalars(select(ChatRoom).where(
         ChatRoom.user_id == user.id, ChatRoom.tenant_id == user.tenant_id,
@@ -44,27 +53,27 @@ async def list_rooms(user: CurrentUser, db: Db, offset: int = Query(0, ge=0), li
     return [service.room_dict(room) for room in rooms]
 
 
-@router.post("", status_code=201)
+@router.post("", status_code=201, response_model=RoomDetailOut)
 async def create_room(req: RoomCreate, user: CurrentUser, db: Db):
     room = await service.create_room(db, user, req)
     return await service.room_detail(db, room, user)
 
 
-@router.get("/{room_id}")
+@router.get("/{room_id}", response_model=RoomDetailOut)
 async def get_room(room_id: UUID, user: ExecutionUser, db: Db, before: int | None = Query(None, ge=1)):
     room = await service.owned_room(db, room_id, user, lock=True)
     await service.expire_stale_run(db, room)
     return await service.room_detail(db, room, user, before)
 
 
-@router.patch("/{room_id}")
+@router.patch("/{room_id}", response_model=RoomDetailOut)
 async def update_room(room_id: UUID, req: RoomUpdate, user: ExecutionUser, db: Db):
     room = await service.owned_room(db, room_id, user, lock=True)
     await service.update_room(db, room, user, req)
     return await service.room_detail(db, room, user)
 
 
-@router.get("/{room_id}/messages/{message_id}")
+@router.get("/{room_id}/messages/{message_id}", response_model=RoomMessageOut)
 async def get_message(room_id: UUID, message_id: UUID, user: ExecutionUser, db: Db):
     from aio_agent_platform.db.models import ChatRoomMessage
     await service.owned_room(db, room_id, user)
@@ -82,7 +91,7 @@ async def delete_room(room_id: UUID, user: ExecutionUser, db: Db):
     await service.delete_room(db, room)
 
 
-@router.post("/{room_id}/runs", status_code=202)
+@router.post("/{room_id}/runs", status_code=202, response_model=RoomRunAccepted)
 async def send_message(room_id: UUID, req: RoomSend, request: Request, user: ExecutionUser, db: Db):
     room = await service.owned_room(db, room_id, user, lock=True)
     run, created = await service.submit_run(db, room, user, req)
@@ -92,7 +101,7 @@ async def send_message(room_id: UUID, req: RoomSend, request: Request, user: Exe
     return {"run_id": run.id, "created": created}
 
 
-@router.post("/{room_id}/tasks/{task_id}/retry", status_code=202)
+@router.post("/{room_id}/tasks/{task_id}/retry", status_code=202, response_model=RoomRunAccepted)
 async def retry_member(room_id: UUID, task_id: UUID, req: RoomRetry, request: Request, user: ExecutionUser, db: Db):
     room = await service.owned_room(db, room_id, user, lock=True)
     run, created = await service.retry_task(db, room, user, task_id, req)
@@ -102,7 +111,7 @@ async def retry_member(room_id: UUID, task_id: UUID, req: RoomRetry, request: Re
     return {"run_id": run.id, "created": created}
 
 
-@router.post("/{room_id}/runs/{run_id}/stop")
+@router.post("/{room_id}/runs/{run_id}/stop", response_model=StatusOut)
 async def stop_run(room_id: UUID, run_id: UUID, user: ExecutionUser, db: Db):
     room = await service.owned_room(db, room_id, user, lock=True)
     run = await db.scalar(select(ChatRoomRun).where(ChatRoomRun.id == run_id, ChatRoomRun.room_id == room.id))
@@ -128,7 +137,7 @@ async def store_confirmation(db, room, task, req):
     return {"success": True}
 
 
-@router.post("/{room_id}/tasks/{task_id}/respond")
+@router.post("/{room_id}/tasks/{task_id}/respond", response_model=SuccessOut)
 async def respond(room_id: UUID, task_id: UUID, req: RoomConfirmation, user: ExecutionUser, db: Db):
     room = await service.owned_room(db, room_id, user, lock=True)
     task = await db.scalar(select(ChatRoomTask).where(ChatRoomTask.id == task_id, ChatRoomTask.room_id == room.id))
@@ -137,7 +146,7 @@ async def respond(room_id: UUID, task_id: UUID, req: RoomConfirmation, user: Exe
     return await store_confirmation(db, room, task, req)
 
 
-@router.get("/{room_id}/events")
+@router.get("/{room_id}/events", response_class=EventStreamResponse, openapi_extra=sse_contract({"oneOf": [{"type": "object", "properties": {"type": {"const": "snapshot"}, "room": {"$ref": "#/components/schemas/RoomDetailOut"}}, "required": ["type", "room"]}, {"type": "object", "properties": {"type": {"const": "access_revoked"}}, "required": ["type"]}]}))
 async def events(room_id: UUID, request: Request, user: ExecutionUser, db: Db,
                  after_revision: int = Query(-1, ge=-1)):
     room = await service.owned_room(db, room_id, user)
@@ -176,6 +185,6 @@ async def events(room_id: UUID, request: Request, user: ExecutionUser, db: Db,
                     yield ": keepalive\n\n"
             await asyncio.sleep(0.7)
 
-    return StreamingResponse(stream(), media_type="text/event-stream", headers={
+    return EventStreamResponse(stream(), media_type="text/event-stream", headers={
         "Cache-Control": "no-cache", "X-Accel-Buffering": "no",
     })

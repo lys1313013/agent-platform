@@ -191,9 +191,9 @@ async def test_tool_and_extraction_call_reconciliation_without_database(monkeypa
     assert reconcile.call_args.args[:4] == (db, uid, 'L2', '刚入门')
     assert reconcile.call_args.kwargs['agent_id'] == agent
     reconcile.reset_mock()
-    # Background authorization loads the source Session, then the Agent tenant,
+    # Background authorization checks browser privacy, then the source Session and Agent tenant,
     # then the active user/membership. A bare UUID is not a Session object.
-    db.scalar.side_effect = [SimpleNamespace(agent_id=agent), tenant, SimpleNamespace(id=uid)]
+    db.scalar.side_effect = [False, SimpleNamespace(agent_id=agent), tenant, SimpleNamespace(id=uid)]
     provider = SimpleNamespace(complete=AsyncMock(return_value=SimpleNamespace(content=json.dumps({
         'l2_memories': [{'content': '正在学英语'}], 'l3_summary': '',
     }))))

@@ -3,14 +3,25 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Request
+from sqlalchemy import select
 
-from aio_agent_platform.auth.dependencies import CurrentUser
+from aio_agent_platform.auth.dependencies import CurrentUser, DbSession
+from aio_agent_platform.db.models import MCPServer
 
 router = APIRouter(prefix="/api/tools", tags=["tools"])
 
 # Chinese labels and metadata for built-in tools
 # These are UI display properties, not part of the tool's functional definition
 TOOL_META: dict[str, dict] = {
+    "local_browser_open": {"label": "连接本地浏览器", "category": "local_browser"},
+    "local_browser_navigate": {"label": "打开本地网站", "category": "local_browser"},
+    "local_browser_observe": {"label": "读取本地网页", "category": "local_browser"},
+    "local_browser_interact": {"label": "操作本地网页", "category": "local_browser"},
+    "local_browser_screenshot": {"label": "查看本地截图", "category": "local_browser"},
+    "local_browser_tabs": {"label": "列出任务标签页", "category": "local_browser"},
+    "local_browser_request_help": {"label": "请求用户接管", "category": "local_browser"},
+    "local_browser_close": {"label": "关闭浏览器任务", "category": "local_browser"},
+
     "get_runtime_info": {"label": "查询运行环境", "category": "other"},
     "list_models": {"label": "查询可用模型", "category": "automation"},
     "run_shell": {"label": "Shell 命令", "category": "sandbox"},
@@ -59,6 +70,7 @@ TOOL_META: dict[str, dict] = {
 async def list_tools(
     request: Request,
     _user: CurrentUser,
+    db: DbSession,
 ) -> list[dict]:
     """List all registered tools available to agents (built-in + MCP)."""
     tool_executor = request.app.state.tool_executor
@@ -86,7 +98,12 @@ async def list_tools(
     # Add MCP tools
     mcp_manager = getattr(request.app.state, "mcp_manager", None)
     if mcp_manager:
+        allowed_servers = set((await db.scalars(select(MCPServer.id).where(
+            MCPServer.tenant_id == _user.tenant_id, MCPServer.is_active,
+        ))).all())
         for full_name, tool_info in mcp_manager.list_all_tools():
+            if mcp_manager._tool_to_server.get(full_name) not in allowed_servers:
+                continue
             # Determine server name from prefix
             prefix = full_name[:len(full_name) - len(tool_info.name)] if len(full_name) > len(tool_info.name) else ""
             result.append({
@@ -94,21 +111,26 @@ async def list_tools(
                 "description": tool_info.description,
                 "label": f"[MCP] {tool_info.name}",
                 "category": "mcp",
-                "permission_level": "read",
+                "permission_level": "dangerous",
                 "requires_sandbox": False,
                 "timeout": 60,
                 "mcp_server_prefix": prefix,
             })
 
-    # Add remote tools (already looked up above via remote_manager)
+    # Add remote tools owned by the caller's tenant
     if remote_manager:
-        for name, config in remote_manager.list_all_tools():
+        remote_tools = (
+            remote_manager.list_all_tools()
+            if _user.role == "superadmin"
+            else remote_manager.list_for_tenant(_user.tenant_id)
+        )
+        for name, config in remote_tools:
             result.append({
                 "name": name,
                 "description": config.description,
                 "label": config.label,
                 "category": "remote",
-                "permission_level": "read",
+                "permission_level": "read" if config.method.upper() in {"GET", "HEAD", "OPTIONS"} else "dangerous",
                 "requires_sandbox": False,
                 "timeout": config.timeout,
                 "method": config.method,

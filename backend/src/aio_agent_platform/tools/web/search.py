@@ -10,6 +10,7 @@ import httpx
 from aio_agent_platform.core.config import WebSettings
 from aio_agent_platform.tools.web.cache import TTLCache
 from aio_agent_platform.tools.web.config import WebConfigService
+from aio_agent_platform.tools.web.ssrf import MetadataGuardTransport
 
 _DISABLED_MSG = "Error: web tools are disabled by the administrator (Web 工具设置页可开启)."
 
@@ -59,7 +60,9 @@ class BraveProvider:
         self._timeout = timeout
 
     async def search(self, query: str, limit: int) -> list[SearchResult]:
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
+        async with httpx.AsyncClient(
+            timeout=self._timeout, transport=MetadataGuardTransport(),
+        ) as client:
             resp = await client.get(
                 "https://api.search.brave.com/res/v1/web/search",
                 params={"q": query, "count": limit},
@@ -88,7 +91,9 @@ class TavilyProvider:
         self._timeout = timeout
 
     async def search(self, query: str, limit: int) -> list[SearchResult]:
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
+        async with httpx.AsyncClient(
+            timeout=self._timeout, transport=MetadataGuardTransport(),
+        ) as client:
             resp = await client.post(
                 "https://api.tavily.com/search",
                 json={"query": query, "max_results": limit},
@@ -114,7 +119,9 @@ class SearXNGProvider:
         self._timeout = timeout
 
     async def search(self, query: str, limit: int) -> list[SearchResult]:
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
+        async with httpx.AsyncClient(
+            timeout=self._timeout, transport=MetadataGuardTransport(),
+        ) as client:
             resp = await client.get(
                 f"{self._base_url}/search",
                 params={"q": query, "format": "json"},

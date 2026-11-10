@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from aio_agent_platform.auth.dependencies import AdminUser
+from aio_agent_platform.core.credentials import decrypt_secret, encrypt_secret
 from aio_agent_platform.db.connection import get_db
 from aio_agent_platform.db.models import LLMModel, LLMProvider
 
@@ -112,7 +113,7 @@ async def create_provider(
         name=req.name,
         provider_type=req.provider_type,
         base_url=req.base_url,
-        api_key_encrypted=req.api_key,  # TODO: encrypt before storing
+        api_key_encrypted=encrypt_secret(req.api_key),
     )
     db.add(provider)
     await db.flush()
@@ -147,7 +148,7 @@ async def update_provider(
     if req.base_url is not None:
         provider.base_url = req.base_url
     if req.api_key is not None:
-        provider.api_key_encrypted = req.api_key  # TODO: encrypt
+        provider.api_key_encrypted = encrypt_secret(req.api_key)
     if req.is_active is not None:
         provider.is_active = req.is_active
 
@@ -215,7 +216,7 @@ async def fetch_remote_models(
     base = provider.base_url.rstrip("/")
     url = f"{base}/models"
 
-    headers = {"Authorization": f"Bearer {provider.api_key_encrypted}"}
+    headers = {"Authorization": f"Bearer {decrypt_secret(provider.api_key_encrypted)}"}
 
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:

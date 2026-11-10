@@ -24,6 +24,9 @@ logger = structlog.get_logger()
 
 router = APIRouter(prefix="/api/workspaces", tags=["workspaces"])
 
+# The server-proxied path is a small-file fallback; large uploads use presigned URLs.
+_MAX_SERVER_UPLOAD_BYTES = 50 * 1024 * 1024
+
 
 # ---- Helpers ----
 
@@ -311,6 +314,11 @@ async def upload_file_content(
         raise HTTPException(status_code=503, detail="Object storage unavailable")
 
     content = await file.read()
+    if len(content) > _MAX_SERVER_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"文件过大，单次上传最多 {_MAX_SERVER_UPLOAD_BYTES // (1024 * 1024)} MB",
+        )
     ws_storage.put_file(str(workspace_id), path, content)
 
     # Mirror into the live sandbox so the running agent sees it immediately

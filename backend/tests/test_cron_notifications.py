@@ -406,8 +406,8 @@ async def test_real_agent_loop_and_tool_executor_report_decision(execution, monk
     d = execution
     calls = 0
     tool_executor = executor_module.ToolExecutor(ToolRegistry(), Mock())
-    tool_executor.register_direct_handler("cron_respond", handle_cron_respond)
-    tool_executor.register_direct_handler("notify_channel", handle_notify_channel)
+    tool_executor.register_direct_handler("cron_respond", handle_cron_respond, permission_level="write")
+    tool_executor.register_direct_handler("notify_channel", handle_notify_channel, permission_level="write")
     from aio_agent_platform.tools.builtin import register_builtin_tools
     register_builtin_tools(tool_executor.registry)
 

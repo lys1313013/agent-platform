@@ -45,7 +45,7 @@ def _build(channel: ChannelConfig, tool_executor: ToolExecutor):
     agentid = _parse_agentid(getattr(channel, "extra_config", None))
     client = WeComClient(
         corpid=channel.app_id,
-        corpsecret=channel.app_secret_encrypted,
+        corpsecret=channel.app_secret,
         agentid=agentid,
     )
 
@@ -59,8 +59,8 @@ def _build(channel: ChannelConfig, tool_executor: ToolExecutor):
     transport = WeComWebhookTransport(
         pipeline=pipeline,
         corpid=channel.app_id,
-        token=channel.verification_token_encrypted or "",
-        encoding_aes_key=channel.encrypt_key_encrypted or "",
+        token=channel.verification_token or "",
+        encoding_aes_key=channel.encrypt_key or "",
     )
     adapter.set_transport(transport)
     return adapter

@@ -5,6 +5,7 @@ from aio_agent_platform.interface.routes.admin_models import router as admin_mod
 from aio_agent_platform.interface.routes.agent_api import router as agent_api_router
 from aio_agent_platform.interface.routes.agents import router as agents_router
 from aio_agent_platform.interface.routes.analytics import router as analytics_router
+from aio_agent_platform.interface.routes.audit import router as audit_router
 from aio_agent_platform.interface.routes.channels import router as channels_router
 from aio_agent_platform.interface.routes.channels import user_router as channel_bindings_router
 from aio_agent_platform.interface.routes.chat import router as chat_router
@@ -40,6 +41,7 @@ __all__ = [
     "agent_api_router",
     "agents_router",
     "analytics_router",
+    "audit_router",
     "channel_bindings_router",
     "channels_router",
     "chat_router",

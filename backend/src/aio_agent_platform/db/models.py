@@ -5,6 +5,7 @@ from typing import Annotated, ClassVar
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
+    JSON,
     BigInteger,
     Boolean,
     Date,
@@ -16,6 +17,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    Uuid,
     case,
     event,
     func,
@@ -25,6 +27,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
+from aio_agent_platform.core.credentials import decrypt_secret
 from aio_agent_platform.db.sanitize import sanitize_pg_text
 
 # Type alias for UUID columns
@@ -617,6 +620,7 @@ class Session(Base):
         String(16), nullable=False, default="chat", server_default="chat",
         comment="会话来源: chat(界面触发)/pet(宠物闲聊)/api(接口触发)/cron(定时任务)/feishu(飞书)/wecom(企微)/wecom_bot(企微机器人)",
     )
+    browser_private: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     pet_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), comment="宠物闲聊会话关联的用户宠物ID"
     )
@@ -1308,6 +1312,7 @@ class AuditLog(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True, comment="主键ID")
     user_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), comment="操作用户ID")
+    tenant_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), comment="操作租户ID")
     action: Mapped[str] = mapped_column(String(64), nullable=False, comment="操作类型")
     resource: Mapped[str | None] = mapped_column(String(256), comment="操作资源")
     details: Mapped[dict | None] = mapped_column(JSONB, comment="操作详情(JSON)")
@@ -1315,6 +1320,7 @@ class AuditLog(Base):
 
     __table_args__ = (
         Index("idx_audit_user", "user_id", "created_at"),
+        Index("idx_audit_tenant", "tenant_id", "created_at"),
         Index("idx_audit_action", "action", "created_at"),
         {"comment": "审计日志表"},
     )
@@ -1690,6 +1696,9 @@ class RemoteTool(Base):
     __tablename__ = "remote_tools"
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4, comment="主键ID")
+    tenant_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), comment="所属租户ID（历史数据为空时仅超级管理员可管理）"
+    )
     name: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, comment="工具名称 (function name 规范)")
     label: Mapped[str] = mapped_column(String(128), nullable=False, comment="显示名称 (中文友好)")
     description: Mapped[str] = mapped_column(Text, nullable=False, comment="工具描述 (LLM 可见)")
@@ -1712,6 +1721,7 @@ class RemoteTool(Base):
 
     __table_args__ = (
         Index("idx_remote_tools_name", "name"),
+        Index("idx_remote_tools_tenant", "tenant_id"),
         Index("idx_remote_tools_active", "is_active"),
         {"comment": "自定义远程工具配置表"},
     )
@@ -1777,6 +1787,18 @@ class ChannelConfig(Base):
         Index("idx_channel_configs_channel_key", "channel_key"),
         {"comment": "IM 渠道配置表"},
     )
+
+    @property
+    def app_secret(self) -> str:
+        return decrypt_secret(self.app_secret_encrypted) or ""
+
+    @property
+    def encrypt_key(self) -> str | None:
+        return decrypt_secret(self.encrypt_key_encrypted)
+
+    @property
+    def verification_token(self) -> str | None:
+        return decrypt_secret(self.verification_token_encrypted)
 
 
 class ChannelBinding(Base):
@@ -2225,3 +2247,100 @@ class HookExecution(Base):
         Index("idx_hook_executions_hook_created", "hook_id", "created_at"),
         {"comment": "Hook执行日志表"},
     )
+
+
+class BrowserOwned:
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    tenant_id: Mapped[UUID] = mapped_column(Uuid, nullable=False, index=True)
+    user_id: Mapped[UUID] = mapped_column(Uuid, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class BrowserPairing(BrowserOwned, Base):
+    __tablename__ = "browser_pairings"
+    request_id: Mapped[UUID] = mapped_column(Uuid, nullable=False)
+    secret_digest: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    secret_ciphertext: Mapped[str | None] = mapped_column(Text)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    device_id: Mapped[UUID | None] = mapped_column(Uuid)
+    next_digest: Mapped[str | None] = mapped_column(String(64))
+    receipt: Mapped[dict | None] = mapped_column(JSON)
+    __table_args__ = (Index("uq_browser_pair_request", "tenant_id", "user_id", "request_id", unique=True),)
+
+
+class BrowserDevice(BrowserOwned, Base):
+    __tablename__ = "browser_devices"
+    label: Mapped[str] = mapped_column(String(100), nullable=False)
+    token_digest: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    # One previous generation retained only for exact renewal retries.
+    previous_digest: Mapped[str | None] = mapped_column(String(64), index=True)
+    renewal_receipt: Mapped[dict | None] = mapped_column(JSON)
+    retry_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    connection_epoch: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    connected: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    extension_version: Mapped[str | None] = mapped_column(String(40))
+    protocol_version: Mapped[str | None] = mapped_column(String(20))
+    persistent_authorized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    authorization_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+
+
+class BrowserGrant(BrowserOwned, Base):
+    __tablename__ = "browser_run_grants"
+    device_id: Mapped[UUID] = mapped_column(Uuid, nullable=False, index=True)
+    agent_id: Mapped[UUID] = mapped_column(Uuid, nullable=False)
+    chat_session_id: Mapped[UUID] = mapped_column(Uuid, nullable=False, index=True)
+    chat_run_id: Mapped[UUID | None] = mapped_column(Uuid, unique=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Immutable after the UI grants this turn. Exact normalized origins.
+    origins: Mapped[list] = mapped_column(JSON, nullable=False)
+    device_authorization_version: Mapped[int | None] = mapped_column(Integer)
+
+
+class BrowserSession(BrowserOwned, Base):
+    __tablename__ = "browser_sessions"
+    grant_id: Mapped[UUID] = mapped_column(Uuid, unique=True, nullable=False)
+    device_id: Mapped[UUID] = mapped_column(Uuid, nullable=False)
+    chat_run_id: Mapped[UUID] = mapped_column(Uuid, nullable=False, index=True)
+    connection_epoch: Mapped[int] = mapped_column(Integer, nullable=False)
+    state: Mapped[str] = mapped_column(String(24), nullable=False, default="starting")
+    occupied: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    cleanup_state: Mapped[str] = mapped_column(String(24), nullable=False, default="pending")
+    stop_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Native tab IDs never cross the model API; opaque handles scope them here.
+    tabs: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    active_tab: Mapped[str | None] = mapped_column(String(40))
+    __table_args__ = (Index("uq_browser_device_occupied", "device_id", unique=True,
+                           postgresql_where=text("occupied"), sqlite_where=text("occupied = 1")),)
+
+
+class BrowserCommand(BrowserOwned, Base):
+    __tablename__ = "browser_commands"
+    browser_session_id: Mapped[UUID] = mapped_column(Uuid, nullable=False, index=True)
+    request_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    operation: Mapped[str] = mapped_column(String(40), nullable=False)
+    payload_ciphertext: Mapped[str] = mapped_column(Text, nullable=False)
+    payload_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    result_ciphertext: Mapped[str | None] = mapped_column(Text)
+    # pending approval → queued → dispatching → succeeded/failed/unknown/cancelled
+    status: Mapped[str] = mapped_column(String(24), nullable=False, index=True)
+    effect_state: Mapped[str] = mapped_column(String(16), nullable=False, default="none")
+    error_code: Mapped[str | None] = mapped_column(String(60))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (Index("uq_browser_command_request", "browser_session_id", "request_id", unique=True),)
+
+
+class BrowserObservation(BrowserOwned, Base):
+    __tablename__ = "browser_observations"
+    browser_session_id: Mapped[UUID] = mapped_column(Uuid, nullable=False, index=True)
+    connection_epoch: Mapped[int] = mapped_column(Integer, nullable=False)
+    tab_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    context_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    consumed_by: Mapped[UUID | None] = mapped_column(Uuid)

@@ -15,14 +15,21 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from aio_agent_platform.auth.dependencies import CurrentUser
+from aio_agent_platform.auth.dependencies import CurrentUser, ExecutionUser
 from aio_agent_platform.core import chat_runs, task_event_log, task_registry
 from aio_agent_platform.core.chat_history import restore_reasoning_order
+from aio_agent_platform.core.session_access import owned_session
 from aio_agent_platform.db import Session
-from aio_agent_platform.db.connection import get_db
+from aio_agent_platform.db.connection import get_db, get_session_factory
 from aio_agent_platform.db.models import ChatRun, ChatRunEvent
+from aio_agent_platform.interface.contracts import EventStreamResponse, sse_contract
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
+
+
+async def _authorize_session(db, session, user):
+    from aio_agent_platform.core.session_access import authorize_session
+    return await authorize_session(db, session, user.id)
 
 
 # ---- Schemas ----
@@ -47,6 +54,7 @@ class SessionOut(BaseModel):
     is_pinned: bool
     is_archived: bool
     source: str = "chat"
+    browser_private: bool = False
     created_at: datetime
     updated_at: datetime
 
@@ -153,13 +161,25 @@ async def list_sessions(
         query = query.where(Session.agent_id == agent_id)
     query = query.order_by(Session.updated_at.desc()).offset(offset).limit(limit)
     result = await db.execute(query)
-    return list(result.scalars().all())
+    from aio_agent_platform.browser.service import private_chat_scope
+    visible = []
+    for session in result.scalars().all():
+        try:
+            await private_chat_scope(db, session, user.id)
+        except HTTPException:
+            continue
+        if session.browser_private:
+            from aio_agent_platform.browser.service import require_agent_tenant
+            if await require_agent_tenant(db, user.id, session.agent_id) != user.tenant_id:
+                continue
+        visible.append(session)
+    return visible
 
 
 @router.get("/{session_id}", response_model=SessionDetailOut)
 async def get_session(
     session_id: UUID,
-    user: CurrentUser,
+    user: ExecutionUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> SessionDetailOut:
     """Get a session with its message history."""
@@ -171,6 +191,7 @@ async def get_session(
     session = result.scalar_one_or_none()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+    await _authorize_session(db, session, user)
     detail = SessionDetailOut.model_validate(session)
     # Enrich the response only; do not rewrite historical message content.
     legacy = {message.id: message for message in detail.messages
@@ -197,7 +218,7 @@ async def get_session(
 @router.get("/{session_id}/status", response_model=SessionStatusOut)
 async def get_session_status(
     session_id: UUID,
-    user: CurrentUser,
+    user: ExecutionUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> SessionStatusOut:
     """查询会话当前是否有 AgentLoop / 渠道任务在跑。
@@ -206,6 +227,7 @@ async def get_session_status(
     没有注册任务，因此 web 会话会返回 is_running=false；从飞书/企微等渠道
     触发的会话会返回 running=true，前端据此显示「重新连接」入口。
     """
+    await owned_session(db, session_id, user.id)
     result = await db.execute(
         select(Session.id).where(Session.id == session_id, Session.user_id == user.id, Session.source != "room")
     )
@@ -230,10 +252,10 @@ def _sse_event(data: dict) -> str:
     return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
-@router.get("/{session_id}/events")
+@router.get("/{session_id}/events", response_class=EventStreamResponse, openapi_extra=sse_contract())
 async def session_events_stream(
     session_id: UUID,
-    user: CurrentUser,
+    user: ExecutionUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> StreamingResponse:
     """SSE 回放渠道任务在跑期间的完整 Agent 事件（连接即回放 + 实时尾随）。
@@ -243,6 +265,7 @@ async def session_events_stream(
     事件由 channel pipeline 实时写入 Redis Stream（``core.task_event_log``）。
     Redis 不可用时流为空，前端收到 EOF 以 ``closed`` 收尾。
     """
+    await owned_session(db, session_id, user.id)
     result = await db.execute(
         select(Session.id).where(Session.id == session_id, Session.user_id == user.id, Session.source != "room")
     )
@@ -266,6 +289,12 @@ async def session_events_stream(
         deadline = time.monotonic() + task_event_log.TASK_TTL_SECONDS
         while time.monotonic() < deadline:
             tail = await task_event_log.tail_events(user.id, session_id, last_id)
+            async with get_session_factory()() as check_db:
+                try:
+                    await owned_session(check_db, session_id, user.id)
+                except HTTPException:
+                    yield _sse_event({"type": "access_revoked"})
+                    return
             if tail is None:
                 yield ": ping\n\n"
                 continue
@@ -274,7 +303,7 @@ async def session_events_stream(
             if ev.get("type") in ("done", "error"):
                 return
 
-    return StreamingResponse(
+    return EventStreamResponse(
         event_generator(),
         media_type="text/event-stream",
         headers={
@@ -289,20 +318,39 @@ async def session_events_stream(
 async def update_session(
     session_id: UUID,
     req: SessionUpdate,
-    user: CurrentUser,
+    user: ExecutionUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> Session:
     """Update a session (rename title and/or rebind agent)."""
     result = await db.execute(
-        select(Session).where(Session.id == session_id, Session.user_id == user.id, Session.source != "room")
+        select(Session).where(Session.id == session_id, Session.user_id == user.id, Session.source != "room").with_for_update()
     )
     session = result.scalar_one_or_none()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
+    await _authorize_session(db, session, user)
+    if session.browser_private and req.agent_id is not None and req.agent_id != session.agent_id:
+        raise HTTPException(409, "本地浏览器会话不能改绑智能体，请新建会话")
     if req.title is not None:
         session.title = req.title
     if req.agent_id is not None:
+        from aio_agent_platform.core.execution_scope import (
+            ExecutionAccessError,
+            require_agent_tenant,
+        )
+        try:
+            target_tenant = await require_agent_tenant(db, user.id, req.agent_id)
+        except ExecutionAccessError as error:
+            raise HTTPException(403, str(error)) from error
+        original_tenant = await _authorize_session(db, session, user)
+        if target_tenant != original_tenant:
+            raise HTTPException(409, "跨租户切换智能体请新建会话")
+        active = await db.scalar(select(ChatRun.id).where(
+            ChatRun.session_id == session.id, ChatRun.status == "running",
+        ))
+        if active:
+            raise HTTPException(409, "请先停止当前任务再切换智能体")
         session.agent_id = req.agent_id
     await db.flush()
     await db.refresh(session)
@@ -312,7 +360,7 @@ async def update_session(
 @router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_session(
     session_id: UUID,
-    user: CurrentUser,
+    user: ExecutionUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> None:
     """Delete a session and all its messages."""
@@ -323,6 +371,7 @@ async def delete_session(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
+    await _authorize_session(db, session, user)
     await chat_runs.user_scope(db, user.id)
     runs = list((await db.scalars(select(ChatRun).where(
         ChatRun.session_id == session_id, ChatRun.user_id == user.id).with_for_update())).all())

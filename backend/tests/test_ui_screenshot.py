@@ -190,7 +190,8 @@ def _make_screenshot_loop(queue, vision=True):
     ))
     executor = MagicMock()
     executor.registry = registry
-    return AgentLoop(execution_tenant_id=uuid4(), provider=provider, tool_executor=executor, event_queue=queue)
+    return AgentLoop(trust_level="auto_all", execution_tenant_id=uuid4(),
+                     provider=provider, tool_executor=executor, event_queue=queue)
 
 
 async def _aiter(items):

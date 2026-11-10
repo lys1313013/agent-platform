@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from aio_agent_platform.auth.dependencies import AdminUser
+from aio_agent_platform.auth.dependencies import AdminUser, SuperAdminUser
 from aio_agent_platform.db.connection import get_db
 from aio_agent_platform.db.models import AgentKnowledgeBase, KnowledgeBase, SystemConfig
 from aio_agent_platform.knowledge.ragflow_client import RagflowError, retrieve, test_connection
@@ -127,12 +127,29 @@ async def list_knowledge_bases(
     ]
 
 
+async def _ensure_dataset_unowned(
+    db: AsyncSession, dataset_id: str, tenant_id: UUID, *, exclude_id: UUID | None = None,
+) -> None:
+    """A RAGFlow dataset may be bound by exactly one tenant."""
+    stmt = select(KnowledgeBase.id).where(
+        KnowledgeBase.dataset_id == dataset_id,
+        KnowledgeBase.tenant_id != tenant_id,
+    )
+    if exclude_id is not None:
+        stmt = stmt.where(KnowledgeBase.id != exclude_id)
+    if await db.scalar(stmt) is not None:
+        raise HTTPException(
+            status_code=409, detail="该 RAGFlow 数据集已被其他租户绑定，请使用独立数据集",
+        )
+
+
 @router.post("/api/admin/knowledge-bases", response_model=KnowledgeBaseOut)
 async def create_knowledge_base(
     req: KnowledgeBaseCreate,
     admin: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict:
+    await _ensure_dataset_unowned(db, req.dataset_id, admin.tenant_id)
     kb = KnowledgeBase(
         name=req.name,
         dataset_id=req.dataset_id,
@@ -178,6 +195,9 @@ async def update_knowledge_base(
     if req.name is not None:
         kb.name = req.name
     if req.dataset_id is not None:
+        await _ensure_dataset_unowned(
+            db, req.dataset_id, admin.tenant_id, exclude_id=kb.id,
+        )
         kb.dataset_id = req.dataset_id
     if req.description is not None:
         kb.description = req.description
@@ -350,7 +370,7 @@ async def retrieval_knowledge_base(
 
 @router.get("/api/admin/settings/ragflow", response_model=RagflowSettingsOut)
 async def get_ragflow_settings(
-    _admin: AdminUser,
+    _admin: SuperAdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict:
     result = await db.execute(
@@ -368,7 +388,7 @@ async def get_ragflow_settings(
 @router.put("/api/admin/settings/ragflow", response_model=RagflowSettingsOut)
 async def update_ragflow_settings(
     req: RagflowSettingsUpdate,
-    _admin: AdminUser,
+    _admin: SuperAdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict:
     updates: dict[str, str] = {}

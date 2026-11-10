@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from aio_agent_platform.auth.dependencies import AdminUser
+from aio_agent_platform.auth.dependencies import SuperAdminUser
 from aio_agent_platform.db.connection import get_db
 from aio_agent_platform.db.models import SystemConfig
 from aio_agent_platform.tools.web.config import DB_KEY_PREFIX, DB_KEYS, web_config
@@ -62,7 +62,7 @@ def _out(effective) -> dict:
 
 
 @router.get("/api/admin/settings/web", response_model=WebToolConfigOut)
-async def get_web_tool_config(_admin: AdminUser) -> dict:
+async def get_web_tool_config(_admin: SuperAdminUser) -> dict:
     """Return the effective (DB-over-env) web tool config. Secrets are never returned."""
     return _out(await web_config.get())
 
@@ -70,7 +70,7 @@ async def get_web_tool_config(_admin: AdminUser) -> dict:
 @router.put("/api/admin/settings/web", response_model=WebToolConfigOut)
 async def update_web_tool_config(
     req: WebToolConfigUpdate,
-    _admin: AdminUser,
+    _admin: SuperAdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict:
     """Update web tool config. Omitted fields keep current values.

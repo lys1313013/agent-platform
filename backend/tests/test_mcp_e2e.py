@@ -24,14 +24,20 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
 import uvicorn
 from mcp.shared.exceptions import McpError
 from mcp.types import ErrorData
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.compiler import compiles
 
 from aio_agent_platform.core.agent import AgentLoop
+from aio_agent_platform.core.execution_scope import bind_execution_scope
+from aio_agent_platform.db.models import MCPServer, Tenant, TenantMembership, User
 from aio_agent_platform.llm import LLMMessage
 from aio_agent_platform.tools.executor import ToolExecutor
 from aio_agent_platform.tools.mcp.adapter import MCPServerConnection
@@ -286,10 +292,44 @@ class _FakeSandbox:
         raise RuntimeError("sandbox should not be called for MCP tools")
 
 
+@compiles(JSONB, "sqlite")
+def sqlite_jsonb(_type, _compiler, **_kwargs):
+    return "JSON"
+
+
+@pytest_asyncio.fixture
+async def mcp_authorization(monkeypatch, fake_mcp_server):
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        for model in (User, Tenant, TenantMembership, MCPServer):
+            await conn.run_sync(model.__table__.create)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr("aio_agent_platform.db.connection.get_session_factory", lambda: factory)
+
+    async def register(server_id):
+        uid, tid = uuid.uuid4(), uuid.uuid4()
+        async with factory() as db:
+            db.add_all([Tenant(id=tid, name="MCP test", slug=str(tid)),
+                        User(id=uid, tenant_id=tid, username=str(uid), email=f"{uid}@test.invalid", password_hash="unused"),
+                        TenantMembership(user_id=uid, tenant_id=tid),
+                        MCPServer(id=server_id, tenant_id=tid, name="test", transport_type="sse", url=fake_mcp_server)])
+            await db.commit()
+        return SimpleNamespace(user_id=uid, tenant_id=tid)
+
+    yield register
+    await engine.dispose()
+
+
+def configured_agent(server_id):
+    return SimpleNamespace(id=uuid.uuid4(), enabled_tools=["wx_fake_weather"],
+                           mcp_server_ids=[str(server_id)], mcp_all_tools_server_ids=[],
+                           knowledge_bases=[], graph_knowledge_bases=[], children=[])
+
+
 class TestExecutorMCPRouting:
     @pytest.mark.asyncio
     async def test_executor_dispatches_mcp_tool(
-        self, fake_mcp_server, mcp_manager
+        self, fake_mcp_server, mcp_manager, mcp_authorization
     ):
         server_id = uuid.uuid4()
         await mcp_manager.add_server(
@@ -311,13 +351,12 @@ class TestExecutorMCPRouting:
             mcp_manager=mcp_manager,
         )
 
-        result = await executor.execute(
-            tool_name="wx_fake_weather",
-            arguments={"city": "Tokyo"},
-            tool_call_id="call_1",
-            user_id=str(uuid.uuid4()),
-            session_id=str(uuid.uuid4()),
-        )
+        scope = await mcp_authorization(server_id)
+        with bind_execution_scope(scope.user_id, scope.tenant_id):
+            result = await executor.execute(
+                tool_name="wx_fake_weather", arguments={"city": "Tokyo"}, tool_call_id="call_1",
+                user_id=str(scope.user_id), session_id=str(uuid.uuid4()), approved=True,
+            )
         assert result.success, result.error
         assert "FAKE_WEATHER:Tokyo" in result.output
 
@@ -409,7 +448,8 @@ class TestLLMSeesMCPTools:
             mcp_manager=mcp_manager,
         )
 
-        _builtin, tools_schema = _filter_tools_by_agent(executor, agent=None)
+        assert _filter_tools_by_agent(executor, agent=None)[1] == []
+        _builtin, tools_schema = _filter_tools_by_agent(executor, agent=configured_agent(server_id))
 
         # BEFORE MCP was hooked up, tools_schema would only contain built-in
         # tools. AFTER hook-up it MUST contain the MCP tool.
@@ -428,7 +468,7 @@ class TestLLMSeesMCPTools:
 
     @pytest.mark.asyncio
     async def test_agent_loop_roundtrip_via_mcp_tool(
-        self, fake_mcp_server, mcp_manager
+        self, fake_mcp_server, mcp_manager, mcp_authorization
     ):
         """Full loop: LLM emits MCP tool_call -> executor -> MCP server -> LLM."""
         server_id = uuid.uuid4()
@@ -452,7 +492,8 @@ class TestLLMSeesMCPTools:
             sandbox_mgr=_FakeSandbox(),
             mcp_manager=mcp_manager,
         )
-        _builtin, tools_schema = _filter_tools_by_agent(executor, agent=None)
+        assert _filter_tools_by_agent(executor, agent=None)[1] == []
+        _builtin, tools_schema = _filter_tools_by_agent(executor, agent=configured_agent(server_id))
 
         # Script the LLM: first turn emits the MCP tool call, second turn
         # returns a final text answer that can reference the tool output.
@@ -465,18 +506,20 @@ class TestLLMSeesMCPTools:
         ]
         provider = _ScriptedLLMProvider(scripted_tool_calls=scripted)
 
-        loop = AgentLoop(execution_tenant_id=uuid.uuid4(),
+        scope = await mcp_authorization(server_id)
+        loop = AgentLoop(execution_tenant_id=scope.tenant_id,
+            allowed_tools={"wx_fake_weather"},
             provider=provider,
             tool_executor=executor,
             system_prompt="You are a test agent.",
             max_iterations=3,
-            trust_level="full",
+            trust_level="auto_all",
         )
 
         events: list = []
         async for ev in loop.run(
             user_input="What is the weather in Oslo?",
-            user_id=uuid.uuid4(),
+            user_id=scope.user_id,
             session_id=uuid.uuid4(),
             conversation_history=[],
             tools=tools_schema,

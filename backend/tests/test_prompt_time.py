@@ -14,21 +14,25 @@ def test_formatted_current_time_uses_beijing_timezone():
     assert zone == "Asia/Shanghai)"
 
 
-def test_default_prompt_includes_user_local_time(monkeypatch):
+def test_default_prompt_keeps_clock_out_of_static_prefix(monkeypatch):
     current = "2026-09-16 21:33:08+08:00 (Asia/Shanghai)"
     monkeypatch.setattr(prompt_module, "_format_current_datetime", lambda: current)
 
     rendered = prompt_module.build_system_prompt()
 
-    assert f"Current time (default user timezone): {current}" in rendered
+    assert "Current time" not in rendered
+    assert current not in rendered
+    assert current in prompt_module.build_current_time_context()
     assert "13:33 UTC" not in rendered
 
 
-def test_custom_prompt_includes_user_local_time(monkeypatch):
+def test_custom_prompt_keeps_clock_out_of_static_prefix(monkeypatch):
     current = "2026-09-16 21:33:08+08:00 (Asia/Shanghai)"
     monkeypatch.setattr(prompt_module, "_format_current_datetime", lambda: current)
 
     rendered = prompt_module.build_system_prompt(agent_prompt="You are a test agent.")
 
-    assert f"Current time (default user timezone): {current}" in rendered
+    assert "Current time" not in rendered
+    assert current not in rendered
+    assert current in prompt_module.build_current_time_context()
     assert "13:33 UTC" not in rendered

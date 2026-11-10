@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from aio_agent_platform.auth.dependencies import AdminUser, CurrentUser, ExecutionUser
 from aio_agent_platform.core.agent import AgentLoop, AgentStep
-from aio_agent_platform.core.chat import ModelUnavailableError, build_agent_loop, build_tools_schema
+from aio_agent_platform.core.chat import ModelUnavailableError, build_tools_schema
 from aio_agent_platform.core.chat_history import ChatTurnRecorder
 from aio_agent_platform.core.context import (
     emergency_compress,
@@ -31,15 +31,13 @@ from aio_agent_platform.core.context import (
     prepare_context,
     prepared_history,
 )
-from aio_agent_platform.core.execution_scope import bind_execution_scope
-from aio_agent_platform.core.prompt import build_system_prompt
+from aio_agent_platform.core.execution import ChatExecutionService
 from aio_agent_platform.core.runtime_config import AgentRuntimeConfig
+from aio_agent_platform.core.session_access import owned_session
 from aio_agent_platform.db import Message, Session
 from aio_agent_platform.db.connection import get_db
 from aio_agent_platform.db.models import Agent, AgentVersion, User
-from aio_agent_platform.llm import LLMMessage
-from aio_agent_platform.memory.service import MemoryService
-from aio_agent_platform.skills.service import SkillService
+from aio_agent_platform.interface.contracts import EventStreamResponse, sse_contract
 from aio_agent_platform.tools.executor import ToolExecutor
 
 logger = structlog.get_logger()
@@ -129,6 +127,16 @@ async def _get_active_version(db: AsyncSession, agent_id: UUID) -> AgentVersion 
     return result.scalar_one_or_none()
 
 
+async def _prepare_published_execution(db, config_snapshot, tenant_id, user_id=None):
+    try:
+        return await ChatExecutionService.prepare(
+            db, tenant_id=tenant_id, user_id=user_id,
+            config=AgentRuntimeConfig.from_snapshot(config_snapshot),
+        )
+    except ModelUnavailableError as error:
+        raise HTTPException(status_code=400, detail="没有可用的模型，请在管理后台配置模型") from error
+
+
 async def _build_agent_loop_for_version(
     tool_executor: ToolExecutor,
     system_prompt: str,
@@ -138,26 +146,23 @@ async def _build_agent_loop_for_version(
     workspace_id: UUID | None = None,
     workspace_slug: str | None = None,
     allowed_tools: set[str] | None = None,
+    user_id: UUID | None = None,
 ) -> AgentLoop:
     """Use published settings with the same model/provider policy as live chat."""
-    try:
-        return await build_agent_loop(
-            tool_executor=tool_executor,
-            system_prompt=system_prompt,
-            db=db,
-            tenant_id=tenant_id,
-            runtime_config=AgentRuntimeConfig.from_snapshot(config_snapshot),
-            workspace_id=workspace_id,
-            workspace_slug=workspace_slug,
-            allowed_tools=allowed_tools,
-        )
-    except ModelUnavailableError as error:
-        raise HTTPException(status_code=400, detail="没有可用的模型，请在管理后台配置模型") from error
+    execution = await _prepare_published_execution(db, config_snapshot, tenant_id, user_id)
+    return await execution.build_loop(
+        tool_executor, system_prompt, db, workspace_id=workspace_id,
+        workspace_slug=workspace_slug, allowed_tools=allowed_tools,
+    )
 
 
-def _filter_tools_for_agent(tool_executor: ToolExecutor, config_snapshot: dict) -> tuple[list, list]:
+def _filter_tools_for_agent(
+    tool_executor: ToolExecutor, config_snapshot: dict, tenant_id: UUID | None = None,
+) -> tuple[list, list]:
     """Filter tools based on the version config snapshot."""
-    all_tools = tool_executor.registry.list_tools()
+    from aio_agent_platform.tools.executor import visible_registry_tools
+
+    all_tools = visible_registry_tools(tool_executor, tenant_id)
     enabled_tools = config_snapshot.get("enabled_tools", [])
 
     if enabled_tools:
@@ -405,6 +410,8 @@ async def _execute_agent_inner(
                 )
             )
             session = result.scalar_one_or_none()
+            if session is not None and session.browser_private:
+                raise HTTPException(403, "本地浏览器私密会话仅支持 Web 聊天")
             if session is None:
                 raise HTTPException(status_code=404, detail="Session not found for this agent")
         except ValueError as exc:
@@ -420,48 +427,20 @@ async def _execute_agent_inner(
         db.add(session)
         await db.flush()
 
-    # Load conversation history
-    history_result = await db.execute(
-        select(Message)
-        .where(Message.session_id == session.id)
-        .order_by(*Message.chronological_order())
-    )
-    history_messages = history_result.scalars().all()
-    history: list[LLMMessage] = []
-    for msg in history_messages:
-        history.append(LLMMessage(role=msg.role, content=msg.content or ""))
+    execution = await _prepare_published_execution(db, config_snapshot, agent.tenant_id, user.id)
+    history, _ = await execution.load_history(db, session.id)
 
     # Build system prompt
     if tool_executor.mcp_manager:
         await tool_executor.mcp_manager.ensure_tools_fresh(
             {str(sid) for sid in config_snapshot.get("mcp_server_ids", [])}
         )
-    tools_list, tools_schema = _filter_tools_for_agent(tool_executor, config_snapshot)
-
-    memory_top_k = 5
-    with bind_execution_scope(user.id, agent.tenant_id, agent_id=agent.id):
-        memory_data = await MemoryService.get_memories_for_prompt(
-            db, user.id, req.user_input, top_k=memory_top_k, agent_id=agent_id,
-        )
-    from aio_agent_platform.db import UserProfile
-    profile_result = await db.execute(
-        select(UserProfile).where(
-            UserProfile.user_id == user.id,
-            UserProfile.tenant_id == agent.tenant_id,
-        )
+    tools_list, tools_schema = _filter_tools_for_agent(
+        tool_executor, config_snapshot, agent.tenant_id,
     )
-    user_profile = profile_result.scalar_one_or_none()
-    user_portrait = user_profile.personal_portrait if user_profile else None
 
-    system_prompt = build_system_prompt(
-        tools=tools_list,
-        persistent_memories=memory_data.get("l1_memories", []),
-        relevant_memories=memory_data.get("l2_memories", []) + memory_data.get("l3_memories", []),
-        daily_memories=memory_data.get("daily_memories", []),
-        relevant_skills=await SkillService.get_skills_for_prompt(db, user.id, req.user_input, bound_skills=agent.skills),
-        agent_prompt=config_snapshot.get("system_prompt", agent.system_prompt),
-        child_agents=agent.children if agent.children else None,
-        user_portrait=user_portrait,
+    system_prompt = await execution.build_prompt(
+        db, req.user_input, tools_list, agent=agent, prompt_config=config_snapshot,
     )
 
     # Resolve workspace (default workspace for user)
@@ -471,9 +450,8 @@ async def _execute_agent_inner(
     workspace_slug = workspace.slug
 
     # Build agent loop
-    agent_loop = await _build_agent_loop_for_version(
-        tool_executor, system_prompt, db, config_snapshot,
-        tenant_id=agent.tenant_id,
+    agent_loop = await execution.build_loop(
+        tool_executor, system_prompt, db,
         workspace_id=workspace_id,
         workspace_slug=workspace_slug,
         allowed_tools={s["function"]["name"] for s in tools_schema},
@@ -605,7 +583,7 @@ def _sse_event(data: dict) -> str:
     return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
-@router.post("/api/sessions/{session_id}/chat")
+@router.post("/api/sessions/{session_id}/chat", response_class=EventStreamResponse, openapi_extra=sse_contract(named_events=True))
 async def sse_chat(
     session_id: UUID,
     req: SseChatRequest,
@@ -624,6 +602,8 @@ async def sse_chat(
         select(Session).where(Session.id == session_id, Session.user_id == user.id, Session.source != "room")
     )
     session = result.scalar_one_or_none()
+    if session is not None and session.browser_private:
+        raise HTTPException(403, "本地浏览器私密会话仅支持 Web 聊天")
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
@@ -643,6 +623,8 @@ async def sse_chat(
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
 
+    execution = await _prepare_published_execution(db, config_snapshot, agent.tenant_id, user.id)
+
     async def event_generator() -> AsyncIterator[str]:
         """Generate SSE events for streaming chat."""
         from aio_agent_platform.db.connection import get_session_factory
@@ -651,47 +633,20 @@ async def sse_chat(
             # Send session event
             yield f"event: session\ndata: {json.dumps({'session_id': str(session_id)}, ensure_ascii=False)}\n\n"
 
-            # Load conversation history
-            history_result = await db_session.execute(
-                select(Message)
-                .where(Message.session_id == session_id)
-                .order_by(*Message.chronological_order())
-            )
-            history_messages = history_result.scalars().all()
-            history: list[LLMMessage] = []
-            for msg in history_messages:
-                history.append(LLMMessage(role=msg.role, content=msg.content or ""))
+            await owned_session(db_session, session_id, user.id)
+            history, _ = await execution.load_history(db_session, session_id)
 
             # Build tools and system prompt
             if tool_executor.mcp_manager:
                 await tool_executor.mcp_manager.ensure_tools_fresh(
                     {str(sid) for sid in config_snapshot.get("mcp_server_ids", [])}
                 )
-            tools_list, tools_schema = _filter_tools_for_agent(tool_executor, config_snapshot)
-
-            with bind_execution_scope(user.id, agent.tenant_id, agent_id=agent.id):
-                memory_data = await MemoryService.get_memories_for_prompt(
-                    db_session, user.id, req.message, top_k=5, agent_id=agent_id,
-                )
-            from aio_agent_platform.db import UserProfile
-            profile_result = await db_session.execute(
-                select(UserProfile).where(
-                    UserProfile.user_id == user.id,
-                    UserProfile.tenant_id == agent.tenant_id,
-                )
+            tools_list, tools_schema = _filter_tools_for_agent(
+                tool_executor, config_snapshot, execution.tenant_id,
             )
-            user_profile = profile_result.scalar_one_or_none()
-            user_portrait = user_profile.personal_portrait if user_profile else None
 
-            system_prompt = build_system_prompt(
-                tools=tools_list,
-                persistent_memories=memory_data.get("l1_memories", []),
-                relevant_memories=memory_data.get("l2_memories", []) + memory_data.get("l3_memories", []),
-                daily_memories=memory_data.get("daily_memories", []),
-                relevant_skills=await SkillService.get_skills_for_prompt(db_session, user.id, req.message, bound_skills=agent.skills),
-                agent_prompt=config_snapshot.get("system_prompt", agent.system_prompt),
-                child_agents=agent.children if agent.children else None,
-                user_portrait=user_portrait,
+            system_prompt = await execution.build_prompt(
+                db_session, req.message, tools_list, agent=agent, prompt_config=config_snapshot,
             )
 
             # Resolve workspace (default workspace for user)
@@ -701,9 +656,8 @@ async def sse_chat(
             workspace_slug = workspace.slug
 
             # Build agent loop
-            agent_loop = await _build_agent_loop_for_version(
-                tool_executor, system_prompt, db_session, config_snapshot,
-                tenant_id=agent.tenant_id,
+            agent_loop = await execution.build_loop(
+                tool_executor, system_prompt, db_session,
                 workspace_id=workspace_id,
                 workspace_slug=workspace_slug,
                 allowed_tools={s["function"]["name"] for s in tools_schema},
@@ -770,7 +724,7 @@ async def sse_chat(
             }
             yield f"event: done\ndata: {json.dumps(done_data, ensure_ascii=False)}\n\n"
 
-    return StreamingResponse(
+    return EventStreamResponse(
         event_generator(),
         media_type="text/event-stream",
         headers={
@@ -787,14 +741,17 @@ async def sse_chat(
 @router.get("/api/sessions/{session_id}/messages")
 async def get_session_messages(
     session_id: UUID,
-    user: CurrentUser,
+    user: ExecutionUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict:
     """Get conversation history for an external API session."""
+    await owned_session(db, session_id, user.id)
     result = await db.execute(
         select(Session).where(Session.id == session_id, Session.user_id == user.id, Session.source != "room")
     )
     session = result.scalar_one_or_none()
+    if session is not None and session.browser_private:
+        raise HTTPException(403, "本地浏览器私密会话仅支持 Web 聊天")
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
@@ -822,14 +779,17 @@ async def get_session_messages(
 @router.post("/api/sessions/{session_id}/clear")
 async def clear_session(
     session_id: UUID,
-    user: CurrentUser,
+    user: ExecutionUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict:
     """Clear all messages in a session (keep the session)."""
+    await owned_session(db, session_id, user.id)
     result = await db.execute(
         select(Session).where(Session.id == session_id, Session.user_id == user.id, Session.source != "room")
     )
     session = result.scalar_one_or_none()
+    if session is not None and session.browser_private:
+        raise HTTPException(403, "本地浏览器私密会话仅支持 Web 聊天")
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
@@ -840,38 +800,18 @@ async def clear_session(
     return {"code": 0, "data": {"message": "Session cleared"}}
 
 
-@router.delete("/api/sessions/{session_id}")
-async def delete_external_session(
-    session_id: UUID,
-    user: CurrentUser,
-    db: Annotated[AsyncSession, Depends(get_db)],
-) -> dict:
-    """Delete an external API session and its messages."""
-    result = await db.execute(
-        select(Session).where(Session.id == session_id, Session.user_id == user.id, Session.source != "room")
-    )
-    session = result.scalar_one_or_none()
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    from sqlalchemy import delete
-    await db.execute(delete(Message).where(Message.session_id == session_id))
-    await db.execute(delete(Session).where(Session.id == session_id))
-
-    return {"code": 0, "data": {"message": "Session deleted"}}
-
-
 @router.post("/api/sessions/{session_id}/messages/{message_id}/feedback")
 async def submit_message_feedback(
     session_id: UUID,
     message_id: UUID,
     body: dict,
-    user: CurrentUser,
+    user: ExecutionUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict:
     """Submit feedback (up/down) for a message (session owner only)."""
     # The session must belong to the caller, or anyone could mutate another
     # user's message feedback.
+    await owned_session(db, session_id, user.id)
     owned = await db.scalar(
         select(Session.id).where(
             Session.id == session_id, Session.user_id == user.id, Session.source != "room"

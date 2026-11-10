@@ -1,6 +1,7 @@
 """LLM Provider — unified interface for OpenAI and Anthropic."""
 
 import asyncio
+import hashlib
 import json
 import time
 from abc import ABC, abstractmethod
@@ -14,6 +15,7 @@ import openai
 import structlog
 from langfuse import Langfuse
 
+from aio_agent_platform.core.credentials import decrypt_secret
 from aio_agent_platform.llm.tool_schema import (
     call_with_schema_fallback,
     prepare_tools,
@@ -171,6 +173,9 @@ class LLMMessage:
     tool_calls: list[ToolCall] | None = None
     tool_call_id: str | None = None
     name: str | None = None
+    # Per-request runtime context (clock, taint notices). Never part of the
+    # cached system prefix.
+    transient: bool = False
 
 
 # ---- Provider Interface ----
@@ -238,6 +243,22 @@ class OpenAIProvider(LLMProvider):
         self.langfuse_client = langfuse_client
         self.supports_vision = supports_vision
 
+    def _prompt_cache_kwargs(self, messages: list[LLMMessage], tools: list[dict] | None) -> dict:
+        """Official OpenAI routing hint; compatible endpoints reject unknown params."""
+        base = str(getattr(self.client, "base_url", "") or "")
+        if "api.openai.com" not in base or not self.model.startswith("gpt-5"):
+            return {}
+        system_text = "\n".join(
+            str(m.content) for m in messages if m.role == "system" and not m.transient
+        )
+        tool_names = ",".join(sorted(
+            tool.get("function", {}).get("name", "") for tool in (tools or [])
+        ))
+        digest = hashlib.sha256(
+            f"{self.model}|{system_text}|{tool_names}".encode()
+        ).hexdigest()
+        return {"prompt_cache_key": digest[:32]}
+
     async def complete(
         self,
         messages: list[LLMMessage],
@@ -251,6 +272,7 @@ class OpenAIProvider(LLMProvider):
         mt = max_tokens if max_tokens is not None else self.default_max_tokens
         t_start = time.monotonic()
         retries = 0
+        cache_kwargs = self._prompt_cache_kwargs(openai_messages, tools)
 
         async def _call():
             nonlocal retries
@@ -262,6 +284,7 @@ class OpenAIProvider(LLMProvider):
                         tools=current_tools,
                         max_tokens=mt,
                         stream=False,
+                        **cache_kwargs,
                         **({"temperature": temp} if temp is not None else {}),
                     ),
                     tools, provider=self.provider_type, model=self.model,
@@ -341,7 +364,8 @@ class OpenAIProvider(LLMProvider):
 
         # Start Langfuse generation if available
         gen_obs = None
-        if self.langfuse_client:
+        from aio_agent_platform.browser.context import is_private_browser_run
+        if self.langfuse_client and not is_private_browser_run():
             from aio_agent_platform.observation import get_current_observation
             parent = get_current_observation()
             factory = parent.start_observation if parent else self.langfuse_client.start_observation
@@ -361,6 +385,8 @@ class OpenAIProvider(LLMProvider):
         last_usage = None
 
         try:
+            cache_kwargs = self._prompt_cache_kwargs(openai_messages, tools)
+
             async def _open_stream():
                 nonlocal retries
                 try:
@@ -372,6 +398,7 @@ class OpenAIProvider(LLMProvider):
                             max_tokens=mt,
                             stream=True,
                             stream_options={"include_usage": True},
+                            **cache_kwargs,
                             **({"temperature": temp} if temp is not None else {}),
                         ),
                         tools, provider=self.provider_type, model=self.model,
@@ -714,7 +741,8 @@ class AnthropicProvider(LLMProvider):
 
         # Start Langfuse generation if available
         gen_obs = None
-        if self.langfuse_client:
+        from aio_agent_platform.browser.context import is_private_browser_run
+        if self.langfuse_client and not is_private_browser_run():
             from aio_agent_platform.observation import get_current_observation
             model_input = {"system": system_content, "messages": anthropic_messages}
             parent = get_current_observation()
@@ -862,14 +890,16 @@ class AnthropicProvider(LLMProvider):
                 tools_count=len(tools) if tools else 0,
             )
 
-    def _to_anthropic_format(self, messages: list[LLMMessage]) -> tuple[str | None, list[dict]]:
-        """Split messages into system prompt + message array."""
-        system_parts = []
+    def _to_anthropic_format(self, messages: list[LLMMessage]) -> tuple[list[dict] | None, list[dict]]:
+        """Split messages into cacheable system blocks + message array."""
+        system_parts: list[str] = []
+        transient_parts: list[str] = []
         result: list[dict] = []
 
         for msg in messages:
             if msg.role == "system":
-                system_parts.append(msg.content)
+                target = transient_parts if msg.transient else system_parts
+                target.append(str(msg.content))
             elif msg.role == "assistant" and msg.tool_calls:
                 blocks = []
                 if msg.content:
@@ -899,12 +929,22 @@ class AnthropicProvider(LLMProvider):
                 )
             else:
                 result.append({"role": msg.role, "content": msg.content})
-        system = "\n\n".join(system_parts) if system_parts else None
-        return system, result
+        system_blocks: list[dict] = []
+        if system_parts:
+            # The static block is the cache breakpoint; transient runtime
+            # context is appended after it so the prefix survives every turn.
+            system_blocks.append({
+                "type": "text",
+                "text": "\n\n".join(system_parts),
+                "cache_control": {"type": "ephemeral"},
+            })
+        if transient_parts:
+            system_blocks.append({"type": "text", "text": "\n\n".join(transient_parts)})
+        return (system_blocks or None), result
 
     def _convert_tools(self, tools: list[dict]) -> list[dict]:
         """Convert OpenAI function format to Anthropic tool format."""
-        return [
+        converted = [
             {
                 "name": t["function"]["name"],
                 "description": t["function"].get("description", ""),
@@ -912,6 +952,10 @@ class AnthropicProvider(LLMProvider):
             }
             for t in tools
         ]
+        if converted:
+            # One breakpoint covers the whole tool block.
+            converted[-1] = {**converted[-1], "cache_control": {"type": "ephemeral"}}
+        return converted
 
     def _parse_response(self, resp) -> LLMResponse:
         content = ""
@@ -1222,6 +1266,7 @@ def create_provider(
     (``llm_models.is_multimodal``), not from name sniffing — it gates
     image-content flows such as ui_screenshot.
     """
+    api_key = decrypt_secret(api_key)
     if provider == "anthropic":
         return AnthropicProvider(
             model=model,

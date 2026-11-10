@@ -15,6 +15,7 @@ from decimal import Decimal
 
 import pytest
 from sqlalchemy import (
+    JSON,
     BigInteger,
     Boolean,
     Date,
@@ -24,10 +25,9 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    Uuid,
     select,
 )
-from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aio_agent_platform.db.models import Base
@@ -47,7 +47,7 @@ MODELS = list(_all_models())
 
 def _sentinel(col):
     t = col.type
-    if isinstance(t, PG_UUID):
+    if isinstance(t, Uuid):
         return uuid.uuid4()
     if isinstance(t, String):
         return f"t-{col.name}"[: (t.length or 128)]
@@ -63,7 +63,7 @@ def _sentinel(col):
         return date(2020, 1, 1)
     if isinstance(t, DateTime):
         return datetime(2020, 1, 1)
-    if isinstance(t, JSONB):
+    if isinstance(t, JSON):
         return {"t": col.name}
     raise TypeError(f"round-trip test has no sentinel for column {col.table.name}.{col.name}: {t}")
 

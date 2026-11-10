@@ -103,6 +103,43 @@ async def assert_public_url(url: str) -> None:
     await resolve_allowed_ips(url)
 
 
+async def assert_not_cloud_metadata(url: str) -> None:
+    """Allow admin-configured internal endpoints but never cloud metadata."""
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise SSRFError(f"only http/https URLs are allowed, got: {url}")
+    host = (parsed.hostname or "").rstrip(".").lower()
+    if not host:
+        raise SSRFError(f"URL has no host: {url}")
+    if host in _BLOCKED_HOSTS or host == "metadata":
+        raise SSRFError(f"URL host is blocked: {host}")
+    try:
+        ips = [str(ipaddress.ip_address(host))]
+    except ValueError:
+        try:
+            ips = await _resolve_host(host)
+        except socket.gaierror:
+            return
+    for ip_str in ips:
+        ip = ipaddress.ip_address(ip_str)
+        if ip.is_link_local or ip_str in {"100.100.100.200", "fd00:ec2::254"}:
+            raise SSRFError(f"URL targets a cloud metadata address and is blocked: {url}")
+
+
+class MetadataGuardTransport(httpx.AsyncBaseTransport):
+    """Allow private/internal destinations but block cloud metadata on every hop."""
+
+    def __init__(self) -> None:
+        self._inner = httpx.AsyncHTTPTransport(trust_env=False)
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        await assert_not_cloud_metadata(str(request.url))
+        return await self._inner.handle_async_request(request)
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
+
+
 class PinnedAsyncTransport(httpx.AsyncBaseTransport):
     """Connect to validated literal IPs without a second hostname lookup.
 

@@ -155,7 +155,8 @@ class HookManager:
         self._fire(event, data=data, **kwargs)
 
     def _fire(self, event: str, *, data: dict | None = None, **kwargs) -> None:
-        if not settings.hook.enabled or not self._started:
+        from aio_agent_platform.browser.context import is_private_browser_run
+        if is_private_browser_run() or not settings.hook.enabled or not self._started:
             return
         if _hook_action_ctx.get() > 0:  # 递归防护：hook 动作链内不再触发
             return

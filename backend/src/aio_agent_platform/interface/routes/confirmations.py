@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 import structlog
@@ -11,10 +11,10 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from aio_agent_platform.auth.dependencies import CurrentUser
+from aio_agent_platform.auth.dependencies import ExecutionUser
 from aio_agent_platform.core.confirmation import confirmation_manager
+from aio_agent_platform.core.session_access import owned_session
 from aio_agent_platform.db.connection import get_db
-from aio_agent_platform.db.models import Session
 
 logger = structlog.get_logger()
 
@@ -27,7 +27,7 @@ router = APIRouter(prefix="/api/confirmations", tags=["confirmations"])
 class ConfirmResponseRequest(BaseModel):
     """Request body for responding to a confirmation."""
 
-    status: str  # "approved" | "rejected" | "modified"
+    status: Literal["approved", "rejected", "modified"]
     selected_options: list[str] | None = None
     user_input: str | None = None
     table_data: list[dict] | None = None
@@ -60,7 +60,7 @@ class PendingConfirmationResponse(BaseModel):
 async def respond_to_confirmation(
     confirmation_id: str,
     body: ConfirmResponseRequest,
-    user: CurrentUser,
+    user: ExecutionUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ConfirmResponseResponse:
     """Submit a response to a pending confirmation request.
@@ -98,6 +98,8 @@ async def respond_to_confirmation(
         # a briefly surviving in-memory confirmation during cancellation.
         raise HTTPException(409, "该聊天室确认已失效")
 
+    await owned_session(db, UUID(confirmation.session_id), user.id,
+                        tenant_id=confirmation.execution_tenant_id)
     resolved = confirmation_manager.resolve_confirmation(
         confirmation_id,
         response={
@@ -118,20 +120,15 @@ async def respond_to_confirmation(
 @router.get("/sessions/{session_id}/pending")
 async def get_pending_confirmations(
     session_id: UUID,
-    user: CurrentUser,
+    user: ExecutionUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> list[PendingConfirmationResponse]:
     """Get all pending confirmation requests for a session (for page refresh recovery)."""
-    # Only the session owner may list its confirmations.
-    owned = await db.scalar(
-        select(Session.id).where(
-            Session.id == session_id, Session.user_id == user.id
-        )
-    )
-    if not owned:
-        raise HTTPException(status_code=404, detail="Session not found")
-
     pending = confirmation_manager.get_pending(str(session_id))
+    if not pending:
+        await owned_session(db, session_id, user.id)
+    for confirmation in pending:
+        await owned_session(db, session_id, user.id, tenant_id=confirmation.execution_tenant_id)
     return [
         PendingConfirmationResponse(
             id=c.id,

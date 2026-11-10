@@ -24,6 +24,8 @@ ALLOWED_MIME: set[str] = {
     "image/webp",
 }
 MAX_BYTES: int = 10 * 1024 * 1024  # 10 MB per image
+_DATA_URI_CACHE: dict[tuple[str, str, int], str] = {}
+_DATA_URI_CACHE_MAX = 64
 
 
 class AttachmentAccessError(ValueError):
@@ -99,17 +101,18 @@ class ChatAttachmentStorage:
 
     @staticmethod
     def get_public_url(key: str) -> str:
-        """Return a stable, publicly-accessible URL for an attachment.
+        """Return a short-lived signed URL for an attachment.
 
-        Points to the agent-server's ``/api/public/images/{key}`` proxy
-        endpoint, which requires the owner's authentication.
+        The URL carries an HMAC token bound to this object key (not the user's
+        access token), so logs and referrers never expose login credentials.
         """
         from aio_agent_platform.core.config import settings
+        from aio_agent_platform.core.signed_urls import mint_resource_token
 
         base = settings.server.server_url
         if not base:
             base = f"http://localhost:{settings.server.port}"
-        return f"{base.rstrip('/')}/api/public/images/{key}"
+        return f"{base.rstrip('/')}/api/public/images/{key}?t={mint_resource_token(key)}"
 
     def to_data_uri(
         self, key: str, mime: str, *, user_id: str, session_id: str | None,
@@ -129,9 +132,17 @@ class ChatAttachmentStorage:
         raw = self._storage.get(key)
         if len(raw) != info.size or len(raw) > MAX_BYTES:
             raise AttachmentAccessError("图片大小无效")
+        cache_key = (key, actual_mime, info.size)
+        cached = _DATA_URI_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
         compressed, compressed_mime = self._compress_image(raw, actual_mime)
         encoded = base64.b64encode(compressed).decode("ascii")
-        return f"data:{compressed_mime};base64,{encoded}"
+        uri = f"data:{compressed_mime};base64,{encoded}"
+        if len(_DATA_URI_CACHE) >= _DATA_URI_CACHE_MAX:
+            _DATA_URI_CACHE.pop(next(iter(_DATA_URI_CACHE)))
+        _DATA_URI_CACHE[cache_key] = uri
+        return uri
 
     @staticmethod
     def _compress_image(data: bytes, mime: str) -> tuple[bytes, str]:

@@ -20,6 +20,7 @@ _COUNT_TTL_SECONDS = 7 * 24 * 3600
 _client: aioredis.Redis | None = None
 _local_until: dict[str, float] = {}
 _local_counts: dict[str, int] = {}
+_local_windows: dict[str, tuple[int, float]] = {}
 
 
 def _redis() -> aioredis.Redis:
@@ -80,3 +81,31 @@ async def claim_message_batch(
     except Exception:
         logger.debug("throttle_claim_not_persisted", key=key)
     return previous
+
+
+async def exceeded(key: str, limit: int, window_seconds: int) -> bool:
+    """Count one attempt in a fixed window; True once the limit is exceeded."""
+    now = time.monotonic()
+    count, reset = _local_windows.get(key, (0, now + window_seconds))
+    if now >= reset:
+        count, reset = 0, now + window_seconds
+    count += 1
+    _local_windows[key] = (count, reset)
+    if count > limit:
+        return True
+    try:
+        client = _redis()
+        value = int(await client.incr(key))
+        if value == 1:
+            await client.expire(key, window_seconds)
+        return value > limit
+    except Exception:
+        return False
+
+
+async def clear_counter(key: str) -> None:
+    _local_windows.pop(key, None)
+    try:
+        await _redis().delete(key)
+    except Exception:
+        logger.debug("throttle_clear_not_persisted", key=key)

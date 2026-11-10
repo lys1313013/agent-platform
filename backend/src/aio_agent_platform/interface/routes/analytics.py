@@ -78,12 +78,15 @@ def _resolve_range(start: date | None, end: date | None) -> tuple[date, date]:
 
 
 def _check_scope(scope: Scope, user: User) -> UUID | None:
-    """Return the user_id filter for 'mine', None (no filter) for 'global'."""
+    """Return the user_id filter for 'mine', None (no filter) for 'global'.
+
+    Global usage spans every tenant, so only the platform superadmin may read it.
+    """
     if scope == "global":
-        if user.role not in {"admin", "superadmin"}:
+        if user.role != "superadmin":
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Admin access required for global scope",
+                detail="Super admin access required for global scope",
             )
         return None
     return user.id

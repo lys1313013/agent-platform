@@ -44,6 +44,7 @@ async def test_wecom_bot_spec_build_wires_transport() -> None:
         channel_type="wecom_bot",
         app_id=_BOT_ID,
         app_secret_encrypted=_SECRET,
+        app_secret=_SECRET,
         agent_id=uuid4(),
         mode="websocket",
     )

@@ -246,13 +246,15 @@ async def handle_delegate_task(
                 workspace_slug=workspace_slug,
             )
 
+            from aio_agent_platform.core.chat import resolve_trust_level
+
             child_loop = AgentLoop(
                 execution_tenant_id=tenant_id,
                 provider=child_provider,
                 tool_executor=tool_executor,
                 system_prompt=child_system_prompt,
                 max_iterations=child_agent.max_iterations if child_agent.max_iterations is not None else settings.agent.child_max_iterations,
-                trust_level=settings.agent.trust_level,
+                trust_level=await resolve_trust_level(db, UUID(user_id)),
                 delegation=child_delegation,
                 event_queue=event_queue,
                 workspace_id=workspace_id,
@@ -274,21 +276,27 @@ async def handle_delegate_task(
             final_output = ""
             child_event_count = 0
             try:
-                async for event in child_loop.run(
-                    user_input=user_input,
-                    user_id=UUID(user_id),
-                    session_id=UUID(session_id),  # Share parent's sandbox
-                    conversation_history=[],  # Child has no history
-                    tools=child_tools_schema,
-                ):
-                    child_event_count += 1
-                    if isinstance(event, str):
-                        # Proxy child events to parent's SSE stream
-                        if event_queue:
-                            await _proxy_child_event(event_queue, delegation_id, event)
-                    elif isinstance(event, AgentStep):
-                        if event.done:
-                            final_output = event.final_output
+                async with asyncio.timeout(settings.agent.delegation_timeout):
+                    async for event in child_loop.run(
+                        user_input=user_input,
+                        user_id=UUID(user_id),
+                        session_id=UUID(session_id),  # Share parent's sandbox
+                        conversation_history=[],  # Child has no history
+                        tools=child_tools_schema,
+                    ):
+                        child_event_count += 1
+                        if isinstance(event, str):
+                            # Proxy child events to parent's SSE stream
+                            if event_queue:
+                                await _proxy_child_event(event_queue, delegation_id, event)
+                        elif isinstance(event, AgentStep):
+                            if event.done:
+                                final_output = event.final_output
+            except TimeoutError:
+                final_output = (
+                    f"Error: delegation timed out after "
+                    f"{settings.agent.delegation_timeout}s"
+                )
             finally:
                 # Restore parent's agent ID so subsequent parent tool calls are unaffected.
                 current_agent_id.reset(parent_agent_id_token)
@@ -375,7 +383,9 @@ def _build_child_tools(
     parent_allowed_tools: set[str] | None,
 ) -> tuple[list, list]:
     """Build tool list for child agent with depth-aware filtering."""
-    all_tools = tool_executor.registry.list_tools()
+    from aio_agent_platform.tools.executor import visible_registry_tools
+
+    all_tools = visible_registry_tools(tool_executor, getattr(child_agent, "tenant_id", None))
 
     # Filter by child's enabled_tools.
     # knowledge_retrieval and delegate_task are auto-injected based on

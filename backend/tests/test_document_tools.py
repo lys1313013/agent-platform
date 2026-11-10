@@ -279,7 +279,7 @@ async def test_pixels_reach_next_model_call_but_not_history_or_events(executor, 
         yield LLMChunk(type="done", usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2})
 
     provider.stream = stream
-    loop = AgentLoop(provider, executor, execution_tenant_id=uuid4(), trust_level="full", workspace_id=uuid4(), workspace_slug="project")
+    loop = AgentLoop(provider, executor, execution_tenant_id=uuid4(), trust_level="auto_all", workspace_id=uuid4(), workspace_slug="project")
     history = ChatTurnRecorder(uuid4(), uuid4())
     events = []
     # A resumed run has metadata in history, never pixels: it must reread the image.

@@ -259,7 +259,14 @@ class PetService:
 
     async def _get_owned_package(self, user: User, package_id: UUID) -> PetPackage:
         pkg = await self.db.get(PetPackage, package_id)
-        if pkg is None or (pkg.owner_id != user.id and user.role not in ADMIN_ROLES):
+        if pkg is None:
+            raise PetNotFoundError(str(package_id))
+        allowed = (
+            pkg.owner_id == user.id
+            or user.role == "superadmin"
+            or (user.role == "admin" and pkg.tenant_id == user.tenant_id)
+        )
+        if not allowed:
             raise PetNotFoundError(str(package_id))
         return pkg
 

@@ -6,7 +6,8 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+from pydantic.json_schema import SkipJsonSchema
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload, with_loader_criteria
@@ -100,9 +101,9 @@ class AgentCreate(BaseModel):
 
 
 class AgentUpdate(BaseModel):
-    name: str | None = Field(default=None, min_length=1, max_length=128)
+    name: str | SkipJsonSchema[None] = Field(default=None, min_length=1, max_length=128)
     description: str | None = None
-    icon: str | None = Field(default=None, max_length=64)
+    icon: str | SkipJsonSchema[None] = Field(default=None, max_length=64)
     system_prompt: str | None = None
     model_id: UUID | None = None
     enabled_tools: list[str] | None = None
@@ -112,15 +113,23 @@ class AgentUpdate(BaseModel):
     max_iterations: int | None = Field(default=None, ge=1, le=500)
     welcome_message: str | None = None
     starter_prompts: list[dict] | None = None
-    enable_memory_extraction: bool | None = None
-    enable_retry: bool | None = None
-    enable_auto_title: bool | None = None
+    enable_memory_extraction: bool | SkipJsonSchema[None] = None
+    enable_retry: bool | SkipJsonSchema[None] = None
+    enable_auto_title: bool | SkipJsonSchema[None] = None
     skill_ids: list[str] | None = None
     knowledge_base_ids: list[str] | None = None
     graph_knowledge_base_ids: list[str] | None = None
-    is_active: bool | None = None
+    is_active: bool | SkipJsonSchema[None] = None
     child_ids: list[str] | None = None
-    visibility: str | None = Field(default=None, pattern="^(tenant|private)$")
+    visibility: str | SkipJsonSchema[None] = Field(default=None, pattern="^(tenant|private)$")
+
+    @field_validator("name", "icon", "enable_memory_extraction", "enable_retry",
+                     "enable_auto_title", "is_active", "visibility", mode="before")
+    @classmethod
+    def reject_explicit_null(cls, value):
+        if value is None:
+            raise ValueError("字段不能为 null；不修改时请省略该字段")
+        return value
 
     def is_set(self, field_name: str) -> bool:
         """Check if a field was explicitly provided in the request (even if null)."""

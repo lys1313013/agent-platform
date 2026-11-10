@@ -506,17 +506,17 @@ class SkillService:
             func.concat_ws(" ", Skill.name, Skill.description, Skill.content),
         )
         sim_score = func.similarity(search_col, tokenized_query).label("score")
+        from aio_agent_platform.core.text_search import trigram_match
+
+        match = await trigram_match(db, search_col, tokenized_query, threshold)
+        direct_match = Skill.name.ilike(f"%{query}%")
 
         stmt = (
             select(Skill, sim_score)
             .where(
                 Skill.user_id == user_id,
                 Skill.is_active == True,  # noqa: E712
-                or_(
-                    func.similarity(search_col, tokenized_query) > threshold,
-                    # Fallback: direct ILIKE match on name for better coverage
-                    Skill.name.ilike(f"%{query}%"),
-                ),
+                or_(match, direct_match),
             )
             .order_by(sim_score.desc())
             .limit(top_k)

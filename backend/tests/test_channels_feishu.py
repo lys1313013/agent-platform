@@ -520,6 +520,9 @@ def test_unchanged_channel_mode_is_not_a_sensitive_change() -> None:
         app_secret_encrypted="secret",
         encrypt_key_encrypted="encrypt-key",
         verification_token_encrypted="verification-token",
+        app_secret="secret",
+        encrypt_key="encrypt-key",
+        verification_token="verification-token",
         mode="websocket",
     )
 
@@ -534,6 +537,9 @@ def test_changed_channel_credential_is_a_sensitive_change() -> None:
         app_secret_encrypted="secret",
         encrypt_key_encrypted=None,
         verification_token_encrypted=None,
+        app_secret="secret",
+        encrypt_key=None,
+        verification_token=None,
         mode="websocket",
     )
 
@@ -1297,6 +1303,9 @@ def _make_channel(**overrides) -> SimpleNamespace:
         "app_secret_encrypted": "secret",
         "encrypt_key_encrypted": None,
         "verification_token_encrypted": None,
+        "app_secret": "secret",
+        "encrypt_key": None,
+        "verification_token": None,
         "mode": "webhook",
         "status": "enabled",
         "channel_key": f"key_{uuid4().hex[:8]}",

@@ -33,11 +33,13 @@ class RemoteToolConfig:
     response_extract: str | None
     timeout: int
     is_active: bool
+    tenant_id: UUID | None = None
 
     @classmethod
     def from_db(cls, tool: RemoteTool) -> RemoteToolConfig:
         return cls(
             id=tool.id,
+            tenant_id=tool.tenant_id,
             name=tool.name,
             label=tool.label,
             description=tool.description,
@@ -81,6 +83,17 @@ class RemoteToolManager:
 
     async def _register(self, config: RemoteToolConfig) -> None:
         """Register a remote tool into the ToolRegistry and internal map."""
+        existing = self._registry.get(config.name)
+        if existing is not None and config.name not in self._tools:
+            # Never let a stored remote tool shadow a built-in (or another
+            # server's) tool. Rows created before name validation existed are
+            # skipped instead of silently replacing the real implementation.
+            logger.warning(
+                "remote_tool_name_conflict",
+                name=config.name,
+                existing_description=existing.description[:80],
+            )
+            return
         tool = Tool(
             name=config.name,
             description=config.description,
@@ -104,8 +117,23 @@ class RemoteToolManager:
     def is_remote_tool(self, name: str) -> bool:
         return name in self._tools
 
+    def is_visible(self, name: str, tenant_id: UUID | None) -> bool:
+        """A tenant only sees its own tools; unowned legacy rows stay hidden."""
+        config = self._tools.get(name)
+        if config is None:
+            return False
+        if tenant_id is None:
+            return config.tenant_id is None
+        return config.tenant_id == tenant_id
+
     def get_config(self, name: str) -> RemoteToolConfig | None:
         return self._tools.get(name)
+
+    def list_for_tenant(self, tenant_id: UUID | None) -> list[tuple[str, RemoteToolConfig]]:
+        return [
+            (name, config) for name, config in self._tools.items()
+            if self.is_visible(name, tenant_id)
+        ]
 
     def list_all_tools(self) -> list[tuple[str, RemoteToolConfig]]:
         """Return list of (name, config) for all registered remote tools."""

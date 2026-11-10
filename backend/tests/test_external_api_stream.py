@@ -15,6 +15,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.ext.compiler import compiles
 
+from aio_agent_platform.core import chat as core_chat
 from aio_agent_platform.core.agent import AgentStep
 from aio_agent_platform.core.execution_scope import execution_tenant_id
 from aio_agent_platform.db.models import Message
@@ -45,14 +46,21 @@ async def external_chat(monkeypatch):
     monkeypatch.setattr(agent_api, "_load_agent_with_relations", AsyncMock(return_value=agent))
     monkeypatch.setattr(agent_api, "_get_active_version", AsyncMock(return_value=SimpleNamespace(config_snapshot={})))
     monkeypatch.setattr(agent_api, "_filter_tools_for_agent", Mock(return_value=([], [])))
-    monkeypatch.setattr(agent_api, "build_system_prompt", Mock(return_value="base"))
+    monkeypatch.setattr(core_chat, "build_system_prompt", Mock(return_value="base"))
 
     async def memory(*_args, **_kwargs):
         assert execution_tenant_id(user.id) == agent.tenant_id
-        return {}
+        return {"l1_memories": [], "l2_memories": [], "l3_memories": [], "daily_memories": []}
 
-    monkeypatch.setattr(agent_api.MemoryService, "get_memories_for_prompt", memory)
-    monkeypatch.setattr(agent_api.SkillService, "get_skills_for_prompt", AsyncMock(return_value=[]))
+    monkeypatch.setattr(core_chat.MemoryService, "get_memories_for_prompt", memory)
+    monkeypatch.setattr(core_chat, "get_memory_top_k", AsyncMock(return_value=5))
+    monkeypatch.setattr(core_chat, "resolve_model", AsyncMock(return_value=SimpleNamespace(
+        id=uuid4(), is_multimodal=False, provider=SimpleNamespace(provider_type="openai"))))
+    # Transport persistence is isolated from object auth (covered by test_execution_security).
+    monkeypatch.setattr(agent_api, "owned_session", AsyncMock())
+    from aio_agent_platform.storage import chat_attachments
+    monkeypatch.setattr(chat_attachments, "ObjectStorage", Mock())
+    monkeypatch.setattr(core_chat.SkillService, "get_skills_for_prompt", AsyncMock(return_value=[]))
     monkeypatch.setattr("aio_agent_platform.workspaces.service.WorkspaceService.get_or_create_default", AsyncMock(return_value=SimpleNamespace(id=uuid4(), slug="default")))
     # Only the profile query uses a table absent from this disposable schema.
     real_execute = factory.class_.execute
@@ -96,7 +104,7 @@ async def test_stream_persists_current_events(external_chat, monkeypatch, outcom
         finally:
             closed.set()
 
-    monkeypatch.setattr(agent_api, "_build_agent_loop_for_version", AsyncMock(return_value=SimpleNamespace(provider=Mock(), run=run)))
+    monkeypatch.setattr(core_chat, "build_agent_loop", AsyncMock(return_value=SimpleNamespace(provider=Mock(), run=run)))
     async with fixture.factory() as db:
         response = await agent_api.sse_chat(fixture.session_id, agent_api.SseChatRequest(message="repeat"), fixture.request, fixture.user, db)
     frames = []
@@ -177,7 +185,7 @@ async def test_published_prompt_does_not_fall_back_when_explicitly_empty(
     async def run(**_kwargs):
         yield AgentStep(step=1, done=True, final_output="answer")
 
-    monkeypatch.setattr(agent_api, "_build_agent_loop_for_version", AsyncMock(
+    monkeypatch.setattr(core_chat, "build_agent_loop", AsyncMock(
         return_value=SimpleNamespace(provider=Mock(), run=run),
     ))
     async with fixture.factory() as db:
@@ -195,4 +203,4 @@ async def test_published_prompt_does_not_fall_back_when_explicitly_empty(
             async for _frame in response.body_iterator:
                 pass
     expected = fixture.agent.system_prompt if saved_prompt == "missing" else saved_prompt
-    assert agent_api.build_system_prompt.call_args.kwargs["agent_prompt"] == expected
+    assert core_chat.build_system_prompt.call_args.kwargs["agent_prompt"] == expected

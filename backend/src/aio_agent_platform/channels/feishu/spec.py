@@ -31,7 +31,7 @@ def _build(channel: ChannelConfig, tool_executor: ToolExecutor):
 
     client = FeishuClient(
         app_id=channel.app_id,
-        app_secret=channel.app_secret_encrypted,
+        app_secret=channel.app_secret,
     )
 
     pipeline = ChannelInboundPipeline(
@@ -44,15 +44,15 @@ def _build(channel: ChannelConfig, tool_executor: ToolExecutor):
     if channel.mode == "websocket":
         transport = FeishuWebSocketTransport(
             app_id=channel.app_id,
-            app_secret=channel.app_secret_encrypted,
+            app_secret=channel.app_secret,
             pipeline=pipeline,
         )
     elif channel.mode == "webhook":
         # Webhook transport reads the keys via ``channel._encrypt_key`` /
         # ``channel._verification_token`` (also matches test rows that
         # monkey-patch those attributes).
-        channel._encrypt_key = channel.encrypt_key_encrypted  # type: ignore[attr-defined]
-        channel._verification_token = channel.verification_token_encrypted  # type: ignore[attr-defined]
+        channel._encrypt_key = channel.encrypt_key  # type: ignore[attr-defined]
+        channel._verification_token = channel.verification_token  # type: ignore[attr-defined]
         transport = FeishuWebhookTransport(pipeline=pipeline, channel=channel)
     else:
         raise ValueError(f"Invalid channel mode: {channel.mode}")

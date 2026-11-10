@@ -5,7 +5,7 @@ from uuid import uuid4
 
 import pytest
 
-from aio_agent_platform.tools.registry import ToolRegistry
+from aio_agent_platform.tools.registry import Tool, ToolRegistry
 from aio_agent_platform.tools.remote.manager import RemoteToolConfig, RemoteToolManager
 
 
@@ -51,6 +51,28 @@ class TestRemoteToolManager:
         assert manager.is_remote_tool("my_tool")
         assert manager.get_config("my_tool") == config
         assert registry.get("my_tool") is not None
+
+    @pytest.mark.asyncio
+    async def test_remote_tool_cannot_shadow_registered_tool(self, setup):
+        registry, manager = setup
+        registry.register(Tool("read_file", "built-in", {}, requires_sandbox=True))
+
+        await manager.add_tool(make_config(name="read_file"))
+
+        assert not manager.is_remote_tool("read_file")
+        assert registry.get("read_file").description == "built-in"
+
+    @pytest.mark.asyncio
+    async def test_tool_is_visible_only_to_own_tenant(self, setup):
+        _, manager = setup
+        tenant = uuid4()
+        await manager.add_tool(make_config(name="owned", tenant_id=tenant))
+
+        assert manager.is_visible("owned", tenant)
+        assert not manager.is_visible("owned", uuid4())
+        assert not manager.is_visible("owned", None)
+        assert [name for name, _ in manager.list_for_tenant(tenant)] == ["owned"]
+        assert manager.list_for_tenant(uuid4()) == []
 
     @pytest.mark.asyncio
     async def test_remove_tool(self, setup):

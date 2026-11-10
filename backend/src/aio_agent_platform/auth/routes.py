@@ -5,9 +5,9 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, EmailStr, Field
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -91,9 +91,12 @@ async def register(
             detail="Username or email already registered",
         )
 
-    # Determine if this is the first user (make admin)
-    total_users = await db.execute(select(User))
-    is_first_user = len(total_users.scalars().all()) == 0
+    # Determine if this is the first user (make admin). Serialize on PostgreSQL
+    # so two concurrent registrations cannot both observe an empty table.
+    if db.get_bind().dialect.name == "postgresql":
+        await db.execute(text("SELECT pg_advisory_xact_lock(721347001)"))
+    total_users = await db.scalar(select(func.count(User.id))) or 0
+    is_first_user = total_users == 0
 
     # Public registration creates an isolated tenant. Joining an existing tenant
     # must go through an administrator-controlled membership flow.
@@ -136,8 +139,21 @@ async def register(
 @router.post("/login", response_model=TokenPair)
 async def login(
     req: LoginRequest,
+    request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> TokenPair:
+    from aio_agent_platform.core.throttle import clear_counter, exceeded
+
+    identity = req.username_or_email.strip().lower()
+    client = request.client.host if request.client else "unknown"
+    user_key = f"aio:login:user:{client}:{identity}"
+    ip_key = f"aio:login:ip:{client}"
+    if await exceeded(ip_key, 100, 300) or await exceeded(user_key, 20, 300):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="登录尝试过于频繁，请稍后再试",
+        )
+
     result = await db.execute(
         select(User).options(selectinload(User.tenant)).where(
             (User.username == req.username_or_email) | (User.email == req.username_or_email)
@@ -159,6 +175,9 @@ async def login(
 
     access = create_access_token(user.id, user.role)
     refresh = create_refresh_token(user.id)
+
+    await clear_counter(user_key)
+    await clear_counter(ip_key)
 
     # Persist refresh token
     await _store_refresh_token(db, user.id, refresh, settings.jwt.refresh_token_expire_days)
@@ -198,6 +217,15 @@ async def refresh(
     )
     token_record = result.scalar_one_or_none()
     if not token_record:
+        # A correctly signed token that is no longer stored was rotated or
+        # revoked. Treat replay as compromise and revoke the whole family.
+        try:
+            await db.execute(delete(RefreshToken).where(
+                RefreshToken.user_id == UUID(payload.sub),
+            ))
+            await db.commit()
+        except Exception:
+            await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Refresh token revoked or expired",

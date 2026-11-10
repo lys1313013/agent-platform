@@ -23,37 +23,36 @@ def _extract_owner_id(key: str) -> str | None:
 async def get_public_image(
     key: str,
     token: str | None = Query(default=None),
+    signed: str | None = Query(default=None, alias="t"),
     authorization: Annotated[str | None, Header()] = None,
 ):
-    """Serve a chat attachment image to its owner.
+    """Serve a chat attachment image behind a scoped, short-lived token.
 
-    An ``<img>`` tag cannot set an Authorization header, so the access token
-    may be passed either as a ``?token=`` query param or as a Bearer header.
-    The token is validated and must belong to the same user that owns the
-    attachment (the user id embedded in the object key), so a leaked URL
-    cannot be read by other users.
+    ``?t=`` is an HMAC token bound to this object key, so it is safe to appear
+    in URLs and logs. A Bearer access token is still accepted for API clients.
     """
     if not key.startswith("chat-attachments/"):
         raise HTTPException(status_code=404, detail="Not found")
 
-    bearer = token
-    if not bearer and authorization and authorization.startswith("Bearer "):
-        bearer = authorization[len("Bearer ") :]
+    from aio_agent_platform.core.signed_urls import verify_resource_token
 
-    if not bearer:
-        raise HTTPException(status_code=401, detail="缺少访问凭证")
+    authorized = False
+    scoped = signed or token
+    if scoped and verify_resource_token(scoped, key):
+        authorized = True
 
-    try:
-        payload = decode_token(bearer)
-    except TokenError:
-        raise HTTPException(status_code=401, detail="凭证无效或已过期")
-
-    if payload.type != "access":
-        raise HTTPException(status_code=401, detail="无效的凭证类型")
-
-    owner_id = _extract_owner_id(key)
-    if not owner_id or payload.sub != owner_id:
-        raise HTTPException(status_code=403, detail="无权访问该附件")
+    if not authorized:
+        if not authorization or not authorization.startswith("Bearer "):
+            raise HTTPException(status_code=401, detail="缺少访问凭证")
+        try:
+            payload = decode_token(authorization[len("Bearer "):])
+        except TokenError:
+            raise HTTPException(status_code=401, detail="凭证无效或已过期")
+        if payload.type != "access":
+            raise HTTPException(status_code=401, detail="无效的凭证类型")
+        owner_id = _extract_owner_id(key)
+        if not owner_id or payload.sub != owner_id:
+            raise HTTPException(status_code=403, detail="无权访问该附件")
 
     try:
         storage = ObjectStorage()

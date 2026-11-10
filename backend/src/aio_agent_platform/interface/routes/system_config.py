@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from aio_agent_platform.auth.dependencies import AdminUser
+from aio_agent_platform.auth.dependencies import SuperAdminUser
 from aio_agent_platform.core.auto_title import (
     DEFAULT_PROMPT,
     load_auto_title_config,
@@ -33,7 +33,7 @@ class AutoTitleConfigUpdate(BaseModel):
 
 @router.get("/auto-title", response_model=AutoTitleConfigOut)
 async def get_auto_title_config(
-    _admin: AdminUser,
+    _admin: SuperAdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict:
     config = await load_auto_title_config(db)
@@ -47,7 +47,7 @@ async def get_auto_title_config(
 @router.put("/auto-title", response_model=AutoTitleConfigOut)
 async def update_auto_title_config(
     req: AutoTitleConfigUpdate,
-    _admin: AdminUser,
+    _admin: SuperAdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict:
     prompt = req.prompt.strip() or DEFAULT_PROMPT

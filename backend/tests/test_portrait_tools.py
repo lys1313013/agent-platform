@@ -257,7 +257,7 @@ async def test_next_model_request_gets_authoritative_portrait(monkeypatch, succe
     executor = Mock()
     executor.execute = AsyncMock(return_value=ToolResult(tool_call_id="edit", name="update_user_portrait",
         arguments={}, output='{"action":"replace","portrait":"OUTDATED RESULT"}', success=success, error="conflict"))
-    loop = agent_module.AgentLoop(execution_tenant_id=uuid4(), provider=Mock(model="test", stream=stream),
+    loop = agent_module.AgentLoop(trust_level="auto_all", execution_tenant_id=uuid4(), provider=Mock(model="test", stream=stream),
         tool_executor=executor, system_prompt=build_system_prompt(user_portrait="OLD FACT"))
     _events = [event async for event in loop.run(user_input="修改画像", user_id=uuid4(), session_id=uuid4(), tools=[], conversation_history=[])]
     assert len(requests) == 2

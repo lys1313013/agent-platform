@@ -12,8 +12,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aio_agent_platform.auth.dependencies import AdminUser
+from aio_agent_platform.core.credentials import decrypt_secret, encrypt_secret
 from aio_agent_platform.db.connection import get_db
 from aio_agent_platform.db.models import MCPServer
+from aio_agent_platform.tools.web.ssrf import SSRFError, assert_not_cloud_metadata
 
 logger = structlog.get_logger()
 
@@ -21,6 +23,29 @@ router = APIRouter(prefix="/api/admin/mcp-servers", tags=["admin-mcp"])
 
 # Valid transport types
 VALID_TRANSPORTS = {"sse", "streamable-http"}
+_HEADER_MASK = "••••••"
+
+
+def _encrypt_headers(headers: dict[str, str] | None) -> dict[str, str]:
+    return {key: encrypt_secret(value) or "" for key, value in (headers or {}).items()}
+
+
+def _decrypt_headers(headers: dict | None) -> dict[str, str]:
+    return {key: decrypt_secret(str(value)) or "" for key, value in (headers or {}).items()}
+
+
+def _mask_headers(headers: dict | None) -> dict[str, str]:
+    return {
+        key: (_HEADER_MASK if str(value).startswith("enc:v1:") else value)
+        for key, value in (headers or {}).items()
+    }
+
+
+async def _validate_server_url(url: str) -> None:
+    try:
+        await assert_not_cloud_metadata(url)
+    except SSRFError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
 
 
 # ---- Schemas ----
@@ -73,7 +98,7 @@ def _server_to_dict(server: MCPServer, tools_count: int = 0, tools: list[dict] |
         "name": server.name,
         "transport_type": server.transport_type,
         "url": server.url,
-        "headers": server.headers or {},
+        "headers": _mask_headers(server.headers),
         "is_active": server.is_active,
         "tool_prefix": server.tool_prefix,
         "timeout": server.timeout,
@@ -90,7 +115,7 @@ def _build_config(server: MCPServer) -> dict:
         "name": server.name,
         "transport_type": server.transport_type,
         "url": server.url,
-        "headers": server.headers or {},
+        "headers": _decrypt_headers(server.headers),
         "tool_prefix": server.tool_prefix,
         "timeout": server.timeout,
     }
@@ -178,12 +203,13 @@ async def create_mcp_server(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict:
     """Create a new MCP Server and attempt to connect."""
+    await _validate_server_url(req.url)
     server = MCPServer(
         tenant_id=user.tenant_id,
         name=req.name,
         transport_type=req.transport_type,
         url=req.url,
-        headers=req.headers,
+        headers=_encrypt_headers(req.headers),
         is_active=req.is_active,
         tool_prefix=req.tool_prefix,
         timeout=req.timeout,
@@ -250,9 +276,17 @@ async def update_mcp_server(
     if req.transport_type is not None:
         server.transport_type = req.transport_type
     if req.url is not None:
+        await _validate_server_url(req.url)
         server.url = req.url
     if req.headers is not None:
-        server.headers = req.headers
+        previous = server.headers or {}
+        merged: dict[str, str] = {}
+        for key, value in req.headers.items():
+            if value == _HEADER_MASK and key in previous:
+                merged[key] = previous[key]
+            else:
+                merged[key] = encrypt_secret(value) or ""
+        server.headers = merged
     if req.tool_prefix is not None:
         server.tool_prefix = req.tool_prefix
     if req.timeout is not None:

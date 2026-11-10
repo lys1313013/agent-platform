@@ -32,7 +32,7 @@ def _build(channel: ChannelConfig, tool_executor: ToolExecutor):
     transport = WeComBotTransport(
         pipeline=pipeline,
         bot_id=channel.app_id,
-        secret=channel.app_secret_encrypted,
+        secret=channel.app_secret,
     )
     adapter.set_transport(transport)
     return adapter

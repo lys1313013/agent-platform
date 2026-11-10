@@ -19,7 +19,7 @@ from uuid import UUID, uuid4
 
 import structlog
 from fastapi import HTTPException
-from sqlalchemy import select, text
+from sqlalchemy import delete, select, text
 
 from aio_agent_platform.core.chat_history import _merge_file_changes
 from aio_agent_platform.core.chat_run_notify import notifier
@@ -270,6 +270,19 @@ async def reserve(db, user_id: UUID, session_id: UUID, request: dict, resumed_fr
     run = ChatRun(id=uuid4(), session_id=session_id, user_id=user_id, assistant_message_id=uuid4(),
                   owner=OWNER, status="running", request=request, snapshot={}, last_sequence=0,
                   heartbeat_at=now(), created_at=now(), resumed_from=resumed_from, stop_requested=False)
+    # Keep event rows for the new run and the immediately previous one (live
+    # replay/disconnect); older run histories are no longer reachable.
+    stale_runs = list((await db.scalars(
+        select(ChatRun.id)
+        .where(ChatRun.session_id == session_id, ChatRun.user_id == user_id)
+        .order_by(ChatRun.created_at.desc())
+        .offset(1)
+    )).all())
+    if stale_runs:
+        await db.execute(delete(ChatRunEvent).where(
+            ChatRunEvent.user_id == user_id,
+            ChatRunEvent.run_id.in_(stale_runs),
+        ))
     db.add(run)
     await db.flush()
     return run

@@ -17,6 +17,7 @@ from aio_agent_platform.channels.cron_notify import (
     handle_notify_channel,
 )
 from aio_agent_platform.channels.file_send import SEND_FILE_TOOL_NAME, handle_send_file
+from aio_agent_platform.core.credentials import decrypt_secret
 from aio_agent_platform.cron_jobs.executor import execute_cron_job
 from aio_agent_platform.cron_jobs.handlers import CRON_JOB_HANDLERS
 from aio_agent_platform.cron_jobs.scheduler import Scheduler
@@ -56,7 +57,11 @@ def create_tool_executor(sandbox_mgr) -> ToolExecutor:
     ):
         handlers.update(group)
     for name, handler in handlers.items():
-        executor.register_direct_handler(name, handler)
+        # These context-bound delivery tools have no globally visible Tool definition.
+        permission = "write" if name in {SEND_FILE_TOOL_NAME, CRON_RESPOND_TOOL_NAME, NOTIFY_CHANNEL_TOOL_NAME} else "dangerous"
+        executor.register_direct_handler(name, handler, permission_level=permission)
+    from aio_agent_platform.browser.tools import register as register_browser_tools
+    register_browser_tools(executor)
     web_tools.register_handlers(executor)
     ensure_pet_tools_registered(executor)
     return executor
@@ -68,12 +73,15 @@ async def connect_mcp_servers(manager: MCPManager, factory) -> None:
         async with factory() as db:
             result = await db.execute(select(MCPServer).where(MCPServer.is_active))
             servers = result.scalars().all()
-        for server in servers:
+        async def connect_one(server) -> None:
             config = {
                 "name": server.name,
                 "transport_type": server.transport_type,
                 "url": server.url,
-                "headers": server.headers or {},
+                "headers": {
+                    key: decrypt_secret(str(value)) or ""
+                    for key, value in (server.headers or {}).items()
+                },
                 "tool_prefix": server.tool_prefix,
                 "timeout": server.timeout,
             }
@@ -90,6 +98,10 @@ async def connect_mcp_servers(manager: MCPManager, factory) -> None:
                 logger.warning("mcp_server_startup_skipped", server_id=str(server.id), name=server.name)
             except Exception as error:
                 logger.warning("mcp_server_startup_failed", server_id=str(server.id), name=server.name, error=str(error))
+
+        # Independent servers connect concurrently; one slow server no longer
+        # adds its full timeout to every other server's startup.
+        await asyncio.gather(*(connect_one(server) for server in servers))
     except Exception as error:
         logger.warning("mcp_manager_init_failed", error=str(error))
 

@@ -111,7 +111,7 @@ def _make_loop_for_ui(event_queue) -> AgentLoop:
     executor = MagicMock()
     executor.registry = registry
 
-    return AgentLoop(execution_tenant_id=uuid4(),
+    return AgentLoop(trust_level="auto_all", execution_tenant_id=uuid4(),
         provider=provider, tool_executor=executor, event_queue=event_queue
     )
 
@@ -286,7 +286,7 @@ async def test_unconfigured_ui_call_is_denied_before_browser_dispatch(monkeypatc
     executor = _make_executor_with_builtin_tools()
     _, schema = filter_tools_by_agent(executor, _make_agent(["run_shell"]))
     queue = asyncio.Queue()
-    loop = AgentLoop(execution_tenant_id=uuid4(), provider=MagicMock(), tool_executor=executor, event_queue=queue,
+    loop = AgentLoop(trust_level="auto_all", execution_tenant_id=uuid4(), provider=MagicMock(), tool_executor=executor, event_queue=queue,
                      allowed_tools={s["function"]["name"] for s in schema})
     loop._run_ui_action_flow = MagicMock(side_effect=AssertionError("must not dispatch"))
     _scripted_stream(loop.provider, [

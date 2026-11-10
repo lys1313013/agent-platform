@@ -399,7 +399,7 @@ async def _execute_task(app, room_id, run_id, task_id):
             )
             queue = asyncio.Queue()
             loop = await build_agent_loop(
-                app.state.tool_executor, prompt, db, tenant_id=room.tenant_id,
+                app.state.tool_executor, prompt, db, tenant_id=room.tenant_id, user_id=user.id,
                 agent_model_id=agent.model_id, agent_temperature=agent.temperature,
                 agent_max_iterations=agent.max_iterations, agent_enable_retry=agent.enable_retry,
                 event_queue=queue, workspace_id=workspace.id, workspace_slug=workspace.slug,

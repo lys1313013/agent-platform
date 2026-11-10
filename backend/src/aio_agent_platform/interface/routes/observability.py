@@ -38,6 +38,13 @@ def _require_admin(user: User) -> None:
         )
 
 
+def _scope(user: User, model) -> list:
+    """Tenant admins see only their tenant; superadmins see the whole platform."""
+    if user.role == "superadmin":
+        return []
+    return [model.tenant_id == user.tenant_id]
+
+
 # ---- Time helpers ----
 
 
@@ -200,62 +207,62 @@ async def get_overview(
     _require_admin(user)
     start, end = _resolve_range(window, start_at, end_at)
 
-    def _in_range(col):
-        return col >= start, col <= end
+    def _in_range(col, model):
+        return [col >= start, col <= end, *_scope(user, model)]
 
     # Cards
     llm_total = await db.scalar(
-        select(func.count()).where(*_in_range(LLMCallLog.created_at))
+        select(func.count()).where(*_in_range(LLMCallLog.created_at, LLMCallLog))
     ) or 0
     llm_failed = await db.scalar(
         select(func.count()).where(
-            *_in_range(LLMCallLog.created_at),
+            *_in_range(LLMCallLog.created_at, LLMCallLog),
             LLMCallLog.final_status == "failed",
         )
     ) or 0
     tool_total = await db.scalar(
-        select(func.count()).where(*_in_range(ToolCallLog.created_at))
+        select(func.count()).where(*_in_range(ToolCallLog.created_at, ToolCallLog))
     ) or 0
     tool_failed = await db.scalar(
         select(func.count()).where(
-            *_in_range(ToolCallLog.created_at),
+            *_in_range(ToolCallLog.created_at, ToolCallLog),
             ToolCallLog.is_error.is_(True),
         )
     ) or 0
     avg_ttft = await db.scalar(
-        select(func.avg(LLMCallLog.ttft_ms)).where(*_in_range(LLMCallLog.created_at))
+        select(func.avg(LLMCallLog.ttft_ms)).where(*_in_range(LLMCallLog.created_at, LLMCallLog))
     )
     p95_latency = await db.scalar(
         select(func.percentile_cont(0.95).within_group(LLMCallLog.duration_ms)).where(
-            *_in_range(LLMCallLog.created_at),
+            *_in_range(LLMCallLog.created_at, LLMCallLog),
             LLMCallLog.duration_ms.is_not(None),
         )
     )
     total_tokens = await db.scalar(
         select(func.coalesce(func.sum(LLMCallLog.total_tokens), 0)).where(
-            *_in_range(LLMCallLog.created_at)
+            *_in_range(LLMCallLog.created_at, LLMCallLog)
         )
     )
     prompt_tokens = await db.scalar(
         select(func.coalesce(func.sum(LLMCallLog.prompt_tokens), 0)).where(
-            *_in_range(LLMCallLog.created_at)
+            *_in_range(LLMCallLog.created_at, LLMCallLog)
         )
     )
     completion_tokens = await db.scalar(
         select(func.coalesce(func.sum(LLMCallLog.completion_tokens), 0)).where(
-            *_in_range(LLMCallLog.created_at)
+            *_in_range(LLMCallLog.created_at, LLMCallLog)
         )
     )
     cache_read_tokens = await db.scalar(
         select(func.coalesce(func.sum(LLMCallLog.cache_read_tokens), 0)).where(
-            *_in_range(LLMCallLog.created_at)
+            *_in_range(LLMCallLog.created_at, LLMCallLog)
         )
     )
     ctx_p95 = await db.scalar(
         select(
             func.percentile_cont(0.95).within_group(LLMCallLog.context_utilization)
         ).where(
-            *_in_range(LLMCallLog.created_at),
+            *_in_range(LLMCallLog.created_at, LLMCallLog),
             LLMCallLog.context_utilization.is_not(None),
         )
     )
@@ -281,7 +288,7 @@ async def get_overview(
     llm_bucket = _bucket_expr(LLMCallLog.created_at, window)
     llm_rows = (
         await db.execute(
-            select(llm_bucket, func.count()).where(*_in_range(LLMCallLog.created_at))
+            select(llm_bucket, func.count()).where(*_in_range(LLMCallLog.created_at, LLMCallLog))
             .group_by(llm_bucket).order_by(llm_bucket)
         )
     ).all()
@@ -290,7 +297,7 @@ async def get_overview(
     llm_fail_rows = (
         await db.execute(
             select(llm_bucket, func.count()).where(
-                *_in_range(LLMCallLog.created_at),
+                *_in_range(LLMCallLog.created_at, LLMCallLog),
                 LLMCallLog.final_status == "failed",
             ).group_by(llm_bucket).order_by(llm_bucket)
         )
@@ -300,7 +307,7 @@ async def get_overview(
     token_rows = (
         await db.execute(
             select(llm_bucket, func.coalesce(func.sum(LLMCallLog.total_tokens), 0))
-            .where(*_in_range(LLMCallLog.created_at)).group_by(llm_bucket).order_by(llm_bucket)
+            .where(*_in_range(LLMCallLog.created_at, LLMCallLog)).group_by(llm_bucket).order_by(llm_bucket)
         )
     ).all()
     token_map = {r[0]: float(r[1]) for r in token_rows}
@@ -308,7 +315,7 @@ async def get_overview(
     tool_bucket = _bucket_expr(ToolCallLog.created_at, window)
     tool_rows = (
         await db.execute(
-            select(tool_bucket, func.count()).where(*_in_range(ToolCallLog.created_at))
+            select(tool_bucket, func.count()).where(*_in_range(ToolCallLog.created_at, ToolCallLog))
             .group_by(tool_bucket).order_by(tool_bucket)
         )
     ).all()
@@ -317,7 +324,7 @@ async def get_overview(
     tool_fail_rows = (
         await db.execute(
             select(tool_bucket, func.count()).where(
-                *_in_range(ToolCallLog.created_at),
+                *_in_range(ToolCallLog.created_at, ToolCallLog),
                 ToolCallLog.is_error.is_(True),
             ).group_by(tool_bucket).order_by(tool_bucket)
         )
@@ -374,6 +381,7 @@ async def list_traces(
     conds = [
         AgentTraceLog.created_at >= start,
         AgentTraceLog.created_at <= end,
+        *_scope(user, AgentTraceLog),
     ]
     if status_filter:
         conds.append(AgentTraceLog.status == status_filter)
@@ -424,20 +432,26 @@ async def get_trace(
 ) -> dict:
     _require_admin(user)
     trace = await db.scalar(
-        select(AgentTraceLog).where(AgentTraceLog.trace_id == trace_id)
+        select(AgentTraceLog).where(
+            AgentTraceLog.trace_id == trace_id, *_scope(user, AgentTraceLog),
+        )
     )
     if not trace:
         raise HTTPException(status_code=404, detail="Trace not found")
 
     llm_calls = (
         (await db.execute(
-            select(LLMCallLog).where(LLMCallLog.trace_id == trace_id)
+            select(LLMCallLog).where(
+                LLMCallLog.trace_id == trace_id, *_scope(user, LLMCallLog),
+            )
             .order_by(LLMCallLog.call_order)
         )).scalars().all()
     )
     tool_calls = (
         (await db.execute(
-            select(ToolCallLog).where(ToolCallLog.trace_id == trace_id)
+            select(ToolCallLog).where(
+                ToolCallLog.trace_id == trace_id, *_scope(user, ToolCallLog),
+            )
             .order_by(ToolCallLog.call_order)
         )).scalars().all()
     )
@@ -490,6 +504,7 @@ async def get_stats(
                     LLMCallLog.created_at >= start,
                     LLMCallLog.created_at <= end,
                     LLMCallLog.model.is_not(None),
+                    *_scope(user, LLMCallLog),
                 )
                 .group_by(LLMCallLog.model)
             )
@@ -531,6 +546,7 @@ async def get_stats(
                 AgentTraceLog.created_at >= start,
                 AgentTraceLog.created_at <= end,
                 dim_col.is_not(None),
+                *_scope(user, AgentTraceLog),
             )
             .group_by(dim_col)
         )
@@ -601,6 +617,7 @@ async def get_tool_ranking(
         ToolCallLog.created_at >= start,
         ToolCallLog.created_at <= end,
         ToolCallLog.tool_name.is_not(None),
+        *_scope(user, ToolCallLog),
     ]
 
     rows = (
@@ -681,6 +698,7 @@ async def get_tool_trend(
                 ToolCallLog.tool_name == tool,
                 ToolCallLog.created_at >= s,
                 ToolCallLog.created_at <= e,
+                *_scope(user, ToolCallLog),
             )
             .group_by(bucket)
             .order_by(bucket)
@@ -742,7 +760,11 @@ async def get_quality(
                 func.coalesce(func.sum(AgentTraceLog.saved_tokens), 0),
             )
             .select_from(AgentTraceLog)
-            .where(AgentTraceLog.created_at >= start, AgentTraceLog.created_at <= end)
+            .where(
+                AgentTraceLog.created_at >= start,
+                AgentTraceLog.created_at <= end,
+                *_scope(user, AgentTraceLog),
+            )
         )
     ).one()
     count, completed, errors, interrupted, avg_dur, total_tok, llm_calls, tool_calls, comp, saved = row
@@ -763,7 +785,11 @@ async def get_quality(
                 ),
                 func.coalesce(func.sum(AgentTraceLog.saved_tokens), 0),
             )
-            .where(AgentTraceLog.created_at >= start, AgentTraceLog.created_at <= end)
+            .where(
+                AgentTraceLog.created_at >= start,
+                AgentTraceLog.created_at <= end,
+                *_scope(user, AgentTraceLog),
+            )
             .group_by(bucket_expr)
             .order_by(bucket_expr)
         )

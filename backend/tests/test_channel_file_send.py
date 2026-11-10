@@ -27,7 +27,7 @@ def _executor() -> ToolExecutor:
     registry = ToolRegistry()
     register_builtin_tools(registry)
     ex = ToolExecutor(registry=registry, sandbox_mgr=None)
-    ex.register_direct_handler(SEND_FILE_TOOL_NAME, handle_send_file)
+    ex.register_direct_handler(SEND_FILE_TOOL_NAME, handle_send_file, permission_level="write")
     return ex
 
 

@@ -46,7 +46,7 @@ async def test_clock_refreshes_after_tools_retries_and_new_turns(monkeypatch, us
     executor.execute = AsyncMock(return_value=ToolResult(
         tool_call_id="call-1", name="lookup", arguments={}, output="查询结果", success=True,
     ))
-    loop = agent_module.AgentLoop(execution_tenant_id=uuid4(),
+    loop = agent_module.AgentLoop(trust_level="auto_all", execution_tenant_id=uuid4(),
         provider=Mock(model="test-model", stream=stream),
         tool_executor=executor,
         system_prompt="Existing custom prompt with an older clock",
@@ -69,10 +69,13 @@ async def test_clock_refreshes_after_tools_retries_and_new_turns(monkeypatch, us
         assert sum("[平台时间上下文]" in str(m.content) for m in messages) == 1
         assert messages[0].content == loop.system_prompt
         assert messages[2].content == original_input
-        # Anthropic collects system messages separately while preserving the
-        # original conversation and appending the current clock to the prompt.
+        # Anthropic splits the static system block (cache breakpoint) from the
+        # transient clock block, and drops both from the message array.
         system, converted = AnthropicProvider._to_anthropic_format(None, messages)
-        assert system == loop.system_prompt + "\n\n" + messages[-1].content
+        assert system[0]["text"] == loop.system_prompt
+        assert system[0]["cache_control"] == {"type": "ephemeral"}
+        assert "[平台时间上下文]" in system[1]["text"]
+        assert "cache_control" not in system[1]
         assert len(converted) == len(messages) - 2
         assert all("[平台时间上下文]" not in str(m["content"]) for m in converted)
 

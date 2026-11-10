@@ -19,6 +19,7 @@ from aio_agent_platform.channels.binding import (
     consume_bind_code,
 )
 from aio_agent_platform.channels.registry import get_channel_spec
+from aio_agent_platform.core.credentials import encrypt_secret
 from aio_agent_platform.db.connection import get_db
 from aio_agent_platform.db.models import (
     Agent,
@@ -211,11 +212,11 @@ def _sensitive_config_changed(channel: ChannelConfig, req: ChannelUpdate) -> boo
         (
             req.app_id is not None and req.app_id != channel.app_id,
             req.app_secret is not None
-            and req.app_secret != channel.app_secret_encrypted,
+            and req.app_secret != channel.app_secret,
             req.encrypt_key is not None
-            and req.encrypt_key != channel.encrypt_key_encrypted,
+            and req.encrypt_key != channel.encrypt_key,
             req.verification_token is not None
-            and req.verification_token != channel.verification_token_encrypted,
+            and req.verification_token != channel.verification_token,
             req.mode is not None and req.mode != channel.mode,
             req.extra_config is not None and req.extra_config != (channel.extra_config or {}),
         )
@@ -227,10 +228,10 @@ def _sensitive_config_changed(channel: ChannelConfig, req: ChannelUpdate) -> boo
 
 @router.get("", response_model=list[ChannelOut])
 async def list_channels(
-    user: CurrentUser,
+    user: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> list[dict]:
-    """List channels in the current tenant for all signed-in users."""
+    """List channels in the current tenant for administrators."""
     result = await db.execute(
         select(ChannelConfig)
         .where(ChannelConfig.tenant_id == user.tenant_id)
@@ -243,7 +244,7 @@ async def list_channels(
 async def create_channel(
     req: ChannelCreate,
     request: Request,
-    user: CurrentUser,
+    user: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict:
     """Validate, save, and start a new channel by default."""
@@ -278,9 +279,9 @@ async def create_channel(
         name=req.name,
         agent_id=req.agent_id,
         app_id=req.app_id,
-        app_secret_encrypted=req.app_secret,  # TODO: encrypt at rest
-        encrypt_key_encrypted=req.encrypt_key,  # TODO: encrypt at rest
-        verification_token_encrypted=req.verification_token,  # TODO: encrypt at rest
+        app_secret_encrypted=encrypt_secret(req.app_secret) or "",
+        encrypt_key_encrypted=encrypt_secret(req.encrypt_key),
+        verification_token_encrypted=encrypt_secret(req.verification_token),
         mode=req.mode,
         status="enabled",
         channel_key=secrets.token_urlsafe(32),
@@ -308,7 +309,7 @@ async def create_channel(
 async def update_channel(
     channel_id: UUID,
     req: ChannelUpdate,
-    user: CurrentUser,
+    user: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict:
     """Update channel configuration. Requires re-enable after mode/credential changes."""
@@ -324,8 +325,8 @@ async def update_channel(
 
     _validate_feishu_webhook_auth(
         channel.channel_type, req.mode if req.mode is not None else channel.mode,
-        req.verification_token if req.verification_token is not None else channel.verification_token_encrypted,
-        req.encrypt_key if req.encrypt_key is not None else channel.encrypt_key_encrypted,
+        req.verification_token if req.verification_token is not None else channel.verification_token,
+        req.encrypt_key if req.encrypt_key is not None else channel.encrypt_key,
     )
     sensitive_changed = _sensitive_config_changed(channel, req)
 
@@ -346,11 +347,11 @@ async def update_channel(
     if req.app_id is not None:
         channel.app_id = req.app_id
     if req.app_secret is not None:
-        channel.app_secret_encrypted = req.app_secret  # TODO: encrypt
+        channel.app_secret_encrypted = encrypt_secret(req.app_secret) or ""
     if req.encrypt_key is not None:
-        channel.encrypt_key_encrypted = req.encrypt_key
+        channel.encrypt_key_encrypted = encrypt_secret(req.encrypt_key)
     if req.verification_token is not None:
-        channel.verification_token_encrypted = req.verification_token
+        channel.verification_token_encrypted = encrypt_secret(req.verification_token)
     if req.mode is not None:
         channel.mode = req.mode
     if req.extra_config is not None:
@@ -395,16 +396,16 @@ async def enable_channel(
     try:
         _validate_channel_mode(channel.channel_type, channel.mode)
         _validate_feishu_webhook_auth(
-            channel.channel_type, channel.mode, channel.verification_token_encrypted, channel.encrypt_key_encrypted
+            channel.channel_type, channel.mode, channel.verification_token, channel.encrypt_key
         )
         if channel.channel_type == "wecom":
             _validate_wecom_agentid(channel.extra_config or {})
-            if not channel.verification_token_encrypted:
+            if not channel.verification_token:
                 raise HTTPException(status_code=400, detail="企微渠道必须配置回调 Token")
         await _verify_channel_credentials(
             channel.channel_type,
             channel.app_id,
-            channel.app_secret_encrypted,
+            channel.app_secret,
             channel.extra_config or {},
         )
 

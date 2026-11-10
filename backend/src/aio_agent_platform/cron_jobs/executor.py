@@ -139,7 +139,7 @@ async def execute_cron_job(job, db, run_id, *, tool_executor, push_to_channel):
             has_notify_channel=bool(job.channel_id),
         )
         loop = await build_agent_loop(
-            tool_executor, system_prompt, db,
+            tool_executor, system_prompt, db, user_id=job.user_id,
             agent_model_id=job.model_id or agent.model_id,
             agent_temperature=agent.temperature,
             agent_max_iterations=agent.max_iterations,

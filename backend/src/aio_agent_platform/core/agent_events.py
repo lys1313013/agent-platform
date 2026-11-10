@@ -45,7 +45,7 @@ class FileChangesEvent(AgentEvent):
 
 @dataclass(frozen=True, slots=True)
 class ControlEvent(AgentEvent):
-    kind: Literal["confirmation_flow", "ui_action", "delegation_heartbeat"]
+    kind: Literal["confirmation_flow", "ui_action", "delegation_heartbeat", "browser_flow"]
     call_id: str = ""
     status: str = ""
 
@@ -100,7 +100,7 @@ def decode_agent_event(event: AgentEvent | str) -> AgentEvent | None:
         changes = _json_or(content, None)
         if isinstance(changes, list) and all(isinstance(item, dict) for item in changes):
             return FileChangesEvent(changes)
-    if kind in {"confirmation_flow", "ui_action"}:
+    if kind in {"confirmation_flow", "ui_action", "browser_flow"}:
         call_id, _, status = content.partition(":")
         return ControlEvent(kind, call_id, status)
     if kind == "delegation_heartbeat":

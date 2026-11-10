@@ -16,6 +16,7 @@ import zipfile
 import httpx
 
 from aio_agent_platform.core.config import settings
+from aio_agent_platform.tools.web.ssrf import assert_not_cloud_metadata
 
 
 class MinerUParseError(Exception):
@@ -109,6 +110,7 @@ async def parse_document(filename: str, data: bytes) -> str:
         batch_id, upload_url = await _request_batch_upload(client, filename)
         await _upload_file(client, upload_url, data)
         zip_url = await _poll_result(client, batch_id)
+        await assert_not_cloud_metadata(zip_url)
         zip_resp = await client.get(zip_url)
         if zip_resp.status_code != 200:
             raise MinerUParseError(f"MinerU 结果下载失败(HTTP {zip_resp.status_code})")

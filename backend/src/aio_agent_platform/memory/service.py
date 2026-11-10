@@ -377,6 +377,9 @@ class MemoryService:
             return []
 
         sim_score = func.similarity(Memory.search_vec, tokenized_query).label("score")
+        from aio_agent_platform.core.text_search import trigram_match
+
+        match = await trigram_match(db, Memory.search_vec, tokenized_query, threshold)
 
         stmt = (
             select(Memory, sim_score)
@@ -384,7 +387,7 @@ class MemoryService:
                 Memory.user_id == user_id,
                 memory_scope(Memory, agent_id, include_shared),
                 Memory.search_vec.isnot(None),
-                func.similarity(Memory.search_vec, tokenized_query) > threshold,
+                match,
             )
             .order_by(sim_score.desc())
             .limit(top_k)
@@ -487,9 +490,11 @@ class MemoryService:
             from aio_agent_platform.db.models import Session
 
             async with get_session_factory()() as scope_db:
+                if await scope_db.scalar(select(Session.browser_private).where(Session.id == session_id, Session.user_id == user_id)):
+                    return []
                 if agent_id is None:
                     agent_id = await scope_db.scalar(select(Session.agent_id).where(
-                        Session.id == session_id, Session.user_id == user_id,
+                        Session.id == session_id, Session.user_id == user_id, Session.browser_private.is_(False),
                     ))
                 tenant_id = await resolve_background_tenant(
                     scope_db, user_id, tenant_id=tenant_id, agent_id=agent_id, session_id=session_id,

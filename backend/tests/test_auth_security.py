@@ -88,3 +88,15 @@ def test_jwt_prefixed_env_takes_priority(clean_jwt_environment, monkeypatch):
     monkeypatch.setenv("JWT_REFRESH_TOKEN_EXPIRE_DAYS", "3")
     assert JWTSettings().access_token_expire_minutes == 10
     assert JWTSettings().refresh_token_expire_days == 3
+
+
+@pytest.mark.parametrize("secret", [
+    "change-me-in-production-0123456789",
+    "CHANGEME-0123456789012345678901234",
+    "your-secret-key-here-0123456789abcdef",
+    "placeholder-value-0123456789abcdef",
+])
+def test_jwt_rejects_placeholder_secrets(clean_jwt_environment, monkeypatch, secret):
+    monkeypatch.setenv("JWT_SECRET", secret)
+    with pytest.raises(ValidationError):
+        JWTSettings()

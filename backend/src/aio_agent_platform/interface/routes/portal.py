@@ -30,6 +30,7 @@ class PortalAgentOut(BaseModel):
     icon: str = "robot"
     welcome_message: str | None = None
     starter_prompts: list[dict] | None = None
+    local_browser_enabled: bool = False
 
 
 def _portal_visible_to(user):
@@ -47,6 +48,7 @@ def _to_portal_out(agent: Agent) -> PortalAgentOut:
         icon=agent.icon,
         welcome_message=agent.welcome_message,
         starter_prompts=agent.starter_prompts,
+        local_browser_enabled="local_browser_open" in (agent.enabled_tools or []),
     )
 
 

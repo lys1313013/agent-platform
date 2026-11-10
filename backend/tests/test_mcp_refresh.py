@@ -39,8 +39,11 @@ def setup_server():
 async def test_ttl_refresh_rebuilds_schema_and_routes_before_execution():
     manager, sid, conn = setup_server()
     executor = SimpleNamespace(mcp_manager=manager, registry=ToolRegistry())
-    await refresh_mcp_tools_for_agent(executor, None)
-    _, schema = filter_tools_by_agent(executor, None)
+    agent = SimpleNamespace(id=uuid4(), mcp_server_ids=[str(sid)], enabled_tools=None,
+                            mcp_all_tools_server_ids=[], knowledge_bases=[],
+                            graph_knowledge_bases=[], children=[])
+    await refresh_mcp_tools_for_agent(executor, agent)
+    _, schema = filter_tools_by_agent(executor, agent)
     assert [s["function"]["name"] for s in schema] == ["docs_search", "docs_added"]
     assert "keyword" in schema[0]["function"]["parameters"]["properties"]
     assert not manager.is_mcp_tool("docs_removed")

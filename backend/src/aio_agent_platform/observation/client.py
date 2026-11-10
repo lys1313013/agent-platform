@@ -40,7 +40,8 @@ def init_langfuse() -> Langfuse | None:
 
 def get_langfuse_client() -> Langfuse | None:
     """Get the current Langfuse client."""
-    return _client
+    from aio_agent_platform.browser.context import is_private_browser_run
+    return None if is_private_browser_run() else _client
 
 
 def set_current_observation(obs: LangfuseSpan | None) -> None:

@@ -1408,3 +1408,14 @@ UI_TOOLS: tuple[Tool, ...] = (
 #: Names of all frontend-executed tools — used by blacklist call sites
 #: (channels / cron / preview / delegation) that must never offer them.
 FRONTEND_TOOL_NAMES: frozenset[str] = frozenset(t.name for t in UI_TOOLS)
+
+
+def _collect_builtin_names() -> frozenset[str]:
+    registry = ToolRegistry()
+    register_builtin_tools(registry)
+    return frozenset(tool.name for tool in registry.list_tools())
+
+
+#: Every built-in tool name, including document and frontend tools. Remote and
+#: MCP servers must not register a tool under one of these names.
+BUILTIN_TOOL_NAMES: frozenset[str] = _collect_builtin_names()

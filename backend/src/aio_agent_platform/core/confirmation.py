@@ -7,6 +7,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
+from uuid import UUID
 
 import structlog
 
@@ -29,6 +30,7 @@ class PendingConfirmation:
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     timeout_seconds: int = 300
     table_schema: dict[str, Any] | None = None
+    execution_tenant_id: UUID | None = None
 
 
 class ConfirmationManager:
@@ -51,10 +53,17 @@ class ConfirmationManager:
         options: list[dict[str, Any]] | None = None,
         context: dict[str, Any] | None = None,
         table_schema: dict[str, Any] | None = None,
+        execution_tenant_id: UUID | None = None,
     ) -> PendingConfirmation:
         """Create a new confirmation request (non-blocking)."""
         ctx = context or {}
-        timeout = ctx.get("timeout_seconds", 300)
+        # Model-provided values are clamped so a confirmation can neither hang
+        # a worker for hours nor expire before the user can react.
+        raw_timeout = ctx.get("timeout_seconds", 300)
+        try:
+            timeout = min(max(int(raw_timeout), 5), 600)
+        except (TypeError, ValueError):
+            timeout = 300
 
         confirmation = PendingConfirmation(
             id=str(uuid.uuid4()),
@@ -66,6 +75,7 @@ class ConfirmationManager:
             context=ctx,
             timeout_seconds=timeout,
             table_schema=table_schema,
+            execution_tenant_id=execution_tenant_id,
         )
         self._pending[confirmation.id] = confirmation
         logger.info(
@@ -114,6 +124,10 @@ class ConfirmationManager:
     def get(self, confirmation_id: str) -> PendingConfirmation | None:
         """Get a single pending confirmation by id (without waiting)."""
         return self._pending.get(confirmation_id)
+
+    def discard(self, confirmation_id: str) -> None:
+        """Dispose abandoned prompts even if the generator closes at its yield."""
+        self._pending.pop(confirmation_id, None)
 
     def get_pending(self, session_id: str) -> list[PendingConfirmation]:
         """Get all pending confirmations for a session."""

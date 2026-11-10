@@ -18,7 +18,7 @@ def sandbox_execution(tmp_path, monkeypatch):
     monkeypatch.setattr("aio_agent_platform.tools.executor.get_hook_manager", lambda: hooks)
     monkeypatch.setattr("aio_agent_platform.tools.executor.get_recorder", lambda: recorder)
 
-    async def execute(_sandbox, command):
+    async def execute(_sandbox, command, timeout=None):
         command = command.replace("/tmp/_agent_code", str(tmp_path / "code"))
         command = command.replace("/workspace/project", str(tmp_path / "project"))
         if command.startswith("python3 "):

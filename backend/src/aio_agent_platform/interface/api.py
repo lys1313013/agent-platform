@@ -1,15 +1,23 @@
 """FastAPI application entry point."""
 
+import asyncio
 import os
 import threading
 import time
 from pathlib import Path
+from uuid import UUID
 
+import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from sqlalchemy import select, text
 
 from aio_agent_platform.auth import auth_router
+from aio_agent_platform.auth.jwt_handler import decode_token
 from aio_agent_platform.core.config import settings
+from aio_agent_platform.db.connection import get_engine, get_session_factory, set_db_user
+from aio_agent_platform.db.models import AuditLog, User
 
 # Importing the commands package registers all built-in slash commands.
 from aio_agent_platform.interface import commands as _commands  # noqa: F401
@@ -20,6 +28,7 @@ from aio_agent_platform.interface.routes import (
     agent_api_router,
     agents_router,
     analytics_router,
+    audit_router,
     channel_bindings_router,
     channels_router,
     chat_router,
@@ -52,6 +61,8 @@ from aio_agent_platform.interface.routes import (
 from aio_agent_platform.interface.routes.rooms import router as rooms_router
 from aio_agent_platform.workspaces.routes import router as workspaces_router
 
+logger = structlog.get_logger()
+
 
 def create_app() -> FastAPI:
     """Create and configure FastAPI app."""
@@ -72,11 +83,51 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    @app.middleware("http")
+    async def audit_admin_mutation(request, call_next):
+        """Record every mutating admin request without storing credentials."""
+        response = await call_next(request)
+        if request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.url.path.startswith("/api/admin/"):
+            header = request.headers.get("authorization", "")
+            user_id = None
+            if header.lower().startswith("bearer "):
+                try:
+                    payload = decode_token(header[7:])
+                    if payload.type == "access":
+                        user_id = UUID(payload.sub)
+                except Exception:
+                    user_id = None
+            if user_id is not None:
+                try:
+                    async with asyncio.timeout(2):
+                        async with get_session_factory()() as db:
+                            await set_db_user(db, user_id)
+                            tenant_id = await db.scalar(
+                                select(User.tenant_id).where(User.id == user_id)
+                            )
+                            db.add(AuditLog(
+                                user_id=user_id,
+                                tenant_id=tenant_id,
+                                action=request.method.lower(),
+                                resource=request.url.path,
+                                details={
+                                    "status": response.status_code,
+                                    "client": request.client.host if request.client else None,
+                                },
+                            ))
+                            await db.commit()
+                except Exception:
+                    logger.warning("audit_write_failed", path=request.url.path)
+        return response
+
     # Mount routers
     app.include_router(auth_router)
     app.include_router(public_router)
     app.include_router(sessions_router)
     app.include_router(analytics_router)
+    app.include_router(audit_router)
+    from aio_agent_platform.browser.routes import router as browser_router
+    app.include_router(browser_router)
     app.include_router(chat_router)
     app.include_router(rooms_router)
     app.include_router(commands_router)
@@ -113,11 +164,36 @@ def create_app() -> FastAPI:
     # Health check
     @app.get("/health")
     async def health():
+        db_ok = False
+        try:
+            async with asyncio.timeout(2):
+                async with get_engine().connect() as conn:
+                    await conn.execute(text("SELECT 1"))
+            db_ok = True
+        except Exception:
+            db_ok = False
+        redis_ok = False
+        try:
+            import redis.asyncio as aioredis
+
+            client = aioredis.Redis.from_url(
+                settings.redis.url, socket_connect_timeout=1.0, socket_timeout=1.0,
+            )
+            try:
+                async with asyncio.timeout(1.5):
+                    redis_ok = bool(await client.ping())
+            finally:
+                await client.aclose()
+        except Exception:
+            redis_ok = False
         sandbox_mgr = getattr(app.state, "sandbox_mgr", None)
-        return {
-            "status": "ok",
+        payload = {
+            "status": "ok" if db_ok else "degraded",
+            "db": db_ok,
+            "redis": redis_ok,
             "sandbox_active": len(sandbox_mgr._active) if sandbox_mgr else 0,
         }
+        return payload if db_ok else JSONResponse(payload, status_code=503)
 
     return app
 

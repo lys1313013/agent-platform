@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Collection
-from functools import partial
 from typing import Any
 from uuid import UUID
 
@@ -199,7 +198,9 @@ def filter_tools_by_agent(
     ``extra_blacklist`` lets callers (e.g. channel adapters) drop specific tools
     on top of the agent's own allow-list.
     """
-    all_tools = tool_executor.registry.list_tools()
+    from aio_agent_platform.tools.executor import visible_registry_tools
+
+    all_tools = visible_registry_tools(tool_executor, getattr(agent, "tenant_id", None))
     blacklist = set(extra_blacklist or ())
     from aio_agent_platform.browser.tools import NAMES
     if not allow_local_browser or delegation_depth > 0:
@@ -619,14 +620,21 @@ async def load_conversation_history(
                 if allow_images:
                     if attachment_storage is None:
                         attachment_storage = ChatAttachmentStorage()
+                    # MinIO download + Pillow compression are blocking; resolve
+                    # each image off the event loop instead of stalling the turn.
+                    data_uris = {
+                        attachment["key"]: await asyncio.to_thread(
+                            attachment_storage.to_data_uri,
+                            attachment["key"], attachment["mime"],
+                            user_id=str(session.user_id), session_id=str(session.id),
+                        )
+                        for attachment in (attachments or [])
+                    }
                     content = build_user_content(
                         text=msg.content or "",
                         attachments=attachments,
                         provider_type=provider_type,
-                        to_data_uri=partial(
-                            attachment_storage.to_data_uri,
-                            user_id=str(session.user_id), session_id=str(session.id),
-                        ),
+                        to_data_uri=lambda key, _mime, _uris=data_uris: _uris[key],
                     )
                 else:
                     refs = build_image_url_refs(attachments)

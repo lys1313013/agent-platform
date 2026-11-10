@@ -293,8 +293,9 @@ async def pet_action_handler(
     tool_call_id=None,
     workspace_id=None,
     workspace_slug=None,
+    **kwargs,
 ) -> str:
-    """direct handler：闲聊中智能体主动触发宠物动作。按名称解析行号并推送 SSE 事件。"""
+    """解析动作并推送 SSE；兼容执行器上下文参数，工具白名单由执行器校验。"""
     name = (args or {}).get("name")
     if not name:
         return "需要提供动作名 name（可用动作名见工具描述）"
@@ -329,4 +330,4 @@ def ensure_pet_tools_registered(tool_executor) -> None:
     if tool_executor is None:
         return
     if "pet_action" not in getattr(tool_executor, "direct_handlers", {}):
-        tool_executor.register_direct_handler("pet_action", pet_action_handler)
+        tool_executor.register_direct_handler("pet_action", pet_action_handler, permission_level="write")

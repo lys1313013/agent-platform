@@ -271,9 +271,11 @@ class DailyMemoryService:
             from aio_agent_platform.db.connection import get_session_factory
 
             async with get_session_factory()() as scope_db:
+                if await scope_db.scalar(select(Session.browser_private).where(Session.id == session_id, Session.user_id == user_id)):
+                    return None
                 if agent_id is None:
                     agent_id = await scope_db.scalar(select(Session.agent_id).where(
-                        Session.id == session_id, Session.user_id == user_id,
+                        Session.id == session_id, Session.user_id == user_id, Session.browser_private.is_(False),
                     ))
                 tenant_id = await resolve_background_tenant(
                     scope_db, user_id, tenant_id=tenant_id, agent_id=agent_id, session_id=session_id,
@@ -387,7 +389,7 @@ class DailyMemoryService:
                         .where(
                             Session.user_id == user_id,
                             Session.agent_id == agent_id,
-                            Session.updated_at >= start,
+                            Session.browser_private.is_(False), Session.updated_at >= start,
                             Session.updated_at < end,
                         )
                         .order_by(Session.updated_at)
@@ -478,7 +480,7 @@ async def run_daily_consolidation(day: date | None = None) -> dict:
     async with factory() as db:
         result = await db.execute(
             select(Session.user_id, Session.agent_id)
-            .where(Session.updated_at >= start, Session.updated_at < end)
+            .where(Session.browser_private.is_(False), Session.updated_at >= start, Session.updated_at < end)
             .group_by(Session.user_id, Session.agent_id)
         )
         user_scopes = list(result.all())

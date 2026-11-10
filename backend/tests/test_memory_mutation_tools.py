@@ -187,7 +187,7 @@ async def test_next_llm_request_receives_updated_system_memory(monkeypatch, dele
     executor.execute = AsyncMock(return_value=ToolResult(
         tool_call_id="edit", name=tool_name, arguments={}, output=output, success=success, error="conflict",
     ))
-    loop = agent_module.AgentLoop(execution_tenant_id=uuid4(), provider=Mock(model="test", stream=stream), tool_executor=executor,
+    loop = agent_module.AgentLoop(trust_level="auto_all", execution_tenant_id=uuid4(), provider=Mock(model="test", stream=stream), tool_executor=executor,
                                   system_prompt=build_system_prompt(persistent_memories=[memory]))
     _events = [event async for event in loop.run(user_input="修改记忆", user_id=uuid4(), session_id=uuid4(), tools=[], conversation_history=[])]
     assert len(requests) == 2

@@ -82,7 +82,11 @@ async def test_create_feishu_webhook_without_auth_does_not_save(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_enable_feishu_webhook_without_auth_does_not_start(monkeypatch):
-    channel = SimpleNamespace(channel_type="feishu", mode="webhook", verification_token_encrypted=None, encrypt_key_encrypted=None)
+    channel = SimpleNamespace(
+        channel_type="feishu", mode="webhook",
+        verification_token_encrypted=None, encrypt_key_encrypted=None,
+        verification_token=None, encrypt_key=None, app_secret="",
+    )
     row = MagicMock()
     row.scalar_one_or_none.return_value = channel
     db = MagicMock(execute=AsyncMock(return_value=row))
@@ -100,7 +104,11 @@ async def test_enable_feishu_webhook_without_auth_does_not_start(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_update_cannot_clear_last_webhook_credential():
-    channel = SimpleNamespace(channel_type="feishu", mode="webhook", verification_token_encrypted="token", encrypt_key_encrypted=None)
+    channel = SimpleNamespace(
+        channel_type="feishu", mode="webhook",
+        verification_token_encrypted="token", encrypt_key_encrypted=None,
+        verification_token="token", encrypt_key=None, app_secret="",
+    )
     row = MagicMock()
     row.scalar_one_or_none.return_value = channel
     db = MagicMock(execute=AsyncMock(return_value=row))

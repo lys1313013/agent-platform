@@ -130,8 +130,6 @@ def build_system_prompt(
         if workspace_files and len(workspace_files) > 0:
             parts.append(_build_files_section(workspace_files))
 
-        parts.append(f"\nCurrent time (default user timezone): {_format_current_datetime()}")
-
         # Inject delegation guidance: pre-configured child agents, or dynamic spawn
         has_delegate_tool = _has_delegate_tool(tools)
         if child_agents:
@@ -139,6 +137,8 @@ def build_system_prompt(
         elif has_delegate_tool:
             parts.append(_build_dynamic_delegation_section())
 
+        # The clock is injected as a transient request message; keeping it out
+        # of the system prompt is what makes cross-turn prompt caching work.
         prompt = "\n".join(parts)
         return _enforce_prompt_budget(prompt)
 
@@ -158,7 +158,6 @@ def build_system_prompt(
         relevant_skills=relevant_skills,
         daily_memories=daily_memories,
         child_agents=child_agents or [],
-        current_datetime=_format_current_datetime(),
         user_name=user_name or "User",
         user_portrait=user_portrait or "",
     )

@@ -11,6 +11,7 @@ class InteractiveTurnMetadata:
         self.delegations_map: dict[str, dict] = {}
         self.confirmations_order: list[str] = []
         self.confirmations_map: dict[str, dict] = {}
+        self.confirmation_to_toolcall: dict[str, str] = {}
 
     def track(self, evt: dict) -> None:
         """Track delegation events for persistence in message tool_calls."""
@@ -72,7 +73,10 @@ class InteractiveTurnMetadata:
         elif evt_type == "confirmation_required":
             c_id = evt.get("confirmation_id", "")
             if c_id:
-                self.confirmations_order.append(c_id)
+                if c_id not in self.confirmations_map:
+                    self.confirmations_order.append(c_id)
+                if evt.get("tool_call_id"):
+                    self.confirmation_to_toolcall[c_id] = evt["tool_call_id"]
                 self.confirmations_map[c_id] = {
                     "confirmation_id": c_id,
                     "question": evt.get("question", ""),
@@ -101,6 +105,13 @@ class InteractiveTurnMetadata:
         for tc in tool_calls:
             if tc["name"] == "delegate_task" and tc["id"] in self.delegations_map:
                 tc["delegation"] = self.delegations_map[tc["id"]]
-        ask_tcs = [tc for tc in tool_calls if tc["name"] == "AskUserQuestion"]
-        for tc, c_id in zip(ask_tcs, self.confirmations_order, strict=False):
+        by_id = {tc["id"]: tc for tc in tool_calls}
+        for c_id, tc_id in self.confirmation_to_toolcall.items():
+            if tc_id in by_id:
+                by_id[tc_id]["confirmation"] = self.confirmations_map[c_id]
+        # Older events did not carry tool_call_id and only confirmed AskUserQuestion.
+        mapped = set(self.confirmation_to_toolcall.values())
+        ask_tcs = [tc for tc in tool_calls if tc["name"] == "AskUserQuestion" and tc["id"] not in mapped]
+        legacy = [cid for cid in self.confirmations_order if cid not in self.confirmation_to_toolcall]
+        for tc, c_id in zip(ask_tcs, legacy, strict=False):
             tc["confirmation"] = self.confirmations_map.get(c_id)

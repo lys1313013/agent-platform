@@ -3,7 +3,7 @@
 from urllib.parse import quote
 
 from dotenv import load_dotenv
-from pydantic import AliasChoices, Field, field_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Load .env file early so nested BaseSettings subclasses can read env vars
@@ -73,7 +73,9 @@ class JWTSettings(BaseSettings):
     @field_validator("secret")
     @classmethod
     def secret_must_not_be_placeholder(cls, v: str) -> str:
-        if v.lower() in {"your-secret-key-here", "changeme", "change-me"}:
+        normalized = v.strip().lower()
+        if (normalized in {"your-secret-key-here", "changeme", "change-me"}
+                or normalized.startswith(("change-me", "changeme", "your-secret", "placeholder-"))):
             raise ValueError("JWT secret must not be a placeholder value")
         return v
 
@@ -276,12 +278,39 @@ class ServerSettings(BaseSettings):
     )
 
 
+class BrowserSettings(BaseSettings):
+    """Private BrowserSkill gateway; explicitly enabled and separately keyed."""
+    model_config = SettingsConfigDict(env_prefix="BROWSER_")
+    enabled: bool = False
+    secret_key: SecretStr = SecretStr("")
+    public_wss_url: str = ""
+    allow_loopback_ws: bool = False
+    pairing_ttl: int = Field(default=300, ge=60, le=600)
+    grant_ttl: int = Field(default=1800, ge=60, le=1800)
+    credential_ttl: int = Field(default=604800, ge=3600, le=2592000)
+    rpc_timeout: int = Field(default=30, ge=5, le=120)
+    approval_timeout: int = Field(default=300, ge=30, le=600)
+    heartbeat_timeout: int = Field(default=60, ge=30, le=120)
+    max_connections: int = Field(default=64, ge=1, le=500)
+    max_frame_bytes: int = Field(default=8_000_000, ge=100_000, le=16_000_000)
+    port: int = Field(default=8101, ge=1, le=65535)
+
+
+class CredentialsSettings(BaseSettings):
+    """At-rest encryption key for third-party credentials (falls back to JWT)."""
+
+    model_config = SettingsConfigDict(env_prefix="CREDENTIALS_")
+
+    key: str = Field(default="", description="独立凭据加密密钥；为空时使用 JWT secret")
+
+
 class AppSettings(BaseSettings):
     """Root application settings, composes all sub-configs."""
 
     db: DatabaseSettings = Field(default_factory=DatabaseSettings)
     redis: RedisSettings = Field(default_factory=RedisSettings)
     jwt: JWTSettings = Field(default_factory=JWTSettings)
+    credentials: CredentialsSettings = Field(default_factory=CredentialsSettings)
     llm: LLMProvidersSettings = Field(default_factory=LLMProvidersSettings)
     agent: AgentSettings = Field(default_factory=AgentSettings)
     sandbox: SandboxSettings = Field(default_factory=SandboxSettings)
@@ -291,6 +320,7 @@ class AppSettings(BaseSettings):
     web: WebSettings = Field(default_factory=WebSettings)
     hook: HookSettings = Field(default_factory=HookSettings)
     mineru: MinerUSettings = Field(default_factory=MinerUSettings)
+    browser: BrowserSettings = Field(default_factory=BrowserSettings)
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

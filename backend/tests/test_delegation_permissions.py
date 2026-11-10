@@ -47,7 +47,7 @@ async def test_executor_preserves_parent_grant_for_direct_handlers(registered):
     ex = executor()
     name = "delegate_task" if registered else "custom_direct"
     handler = AsyncMock(return_value="ok")
-    ex.register_direct_handler(name, handler)
+    ex.register_direct_handler(name, handler, permission_level="read")
     grant = {name, "read_file"}
     result = await ex.execute(name, {}, "call", str(uuid4()), str(uuid4()), allowed_tools=grant)
     assert result.success
