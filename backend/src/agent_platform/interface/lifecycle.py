@@ -203,6 +203,7 @@ async def lifespan(app: FastAPI):
         mcp = MCPManager()
         own(infrastructure, "mcp", mcp.shutdown)
         await connect_mcp_servers(mcp, factory)
+        mcp.start()
         executor.mcp_manager = mcp
         mark("mcp_connect")
         remote = RemoteToolManager(executor.registry)

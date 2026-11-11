@@ -149,9 +149,20 @@ class MCPServerConnection:
             # All SDK scopes have exited here, so cancellation cannot escape
             # this task into whichever request originally called connect().
             if not isinstance(error, asyncio.CancelledError):
-                logger.exception(
+                causes = [error]
+                for cause in causes:
+                    if isinstance(cause, BaseExceptionGroup):
+                        causes.extend(cause.exceptions)
+                # Remote downtime is recoverable. Keep actionable metadata
+                # without dumping SDK locals, headers or request contents.
+                logger.warning(
                     "mcp_connection_stopped", server_id=str(self.server_id),
-                    name=self.config.get("name"), error=str(error),
+                    name=self.config.get("name"),
+                    error_types=sorted({type(cause).__name__ for cause in causes}),
+                    http_status_codes=sorted({
+                        cause.response.status_code for cause in causes
+                        if isinstance(cause, httpx.HTTPStatusError)
+                    }),
                 )
         finally:
             self._connected = False
@@ -213,6 +224,16 @@ class MCPServerConnection:
         if cancelled:
             raise asyncio.CancelledError
 
+    async def invalidate(self, failed_session) -> None:
+        """Retire a failed session without disabling future recovery.
+
+        SSE can keep its receive stream open after its POST writer fails.
+        A timeout must therefore retire that half-open session explicitly.
+        """
+        async with self._lifecycle_lock:
+            if not self._closed and self.session is failed_session:
+                await self._cleanup()
+
     async def refresh_tools(self) -> list[MCPToolInfo]:
         """Refresh the list of tools from the MCP Server."""
         if not self.session:
@@ -264,8 +285,10 @@ class MCPServerConnection:
         fails every subsequent call until someone manually refreshes the
         server.
         """
-        if not self.session:
-            raise RuntimeError(f"MCP Server not connected: {self.config.get('name')}")
+        if not self.connected:
+            if self._closed:
+                raise RuntimeError("MCP connection was disconnected")
+            await self.connect()
 
         failed_session = self.session
         try:
@@ -296,6 +319,10 @@ class MCPServerConnection:
                     name=self.config.get("name"),
                     tool_name=tool_name,
                 )
+                raise
+            if isinstance(e, (httpx.HTTPStatusError, BaseExceptionGroup)):
+                # A gateway can fail after a write was processed. Restore the
+                # connection, but do not automatically replay an ambiguous call.
                 raise
             # 重建成功，重试一次；若仍失败则原样上抛并记录。
             try:
@@ -337,19 +364,29 @@ class MCPServerConnection:
     def _is_reconnectable(self, exc: Exception) -> bool:
         """Whether an exception is worth recovering from by reconnecting.
 
-        Two cases qualify:
+        Recoverable cases include:
         - The server reclaimed our session. For streamable-http the server
           answers a stale session with HTTP 404, which the MCP SDK turns into
           ``McpError`` (code 32600, "Session terminated"). ``mcp`` is an
           optional dependency, so match by name instead of importing it.
         - A transport-level network failure (connection dropped, connect
           timeout) — rebuilding the session typically restores service.
+        - Temporary HTTP failures, closed streams and SDK exception groups.
         """
         if type(exc).__name__ == "McpError":
             code = getattr(getattr(exc, "error", None), "code", None)
             if code == 32600 or "session terminated" in str(exc).lower():
                 return True
         if isinstance(exc, httpx.RequestError):
+            return True
+        if isinstance(exc, httpx.HTTPStatusError):
+            return exc.response.status_code in {408, 429} or exc.response.status_code >= 500
+        if isinstance(exc, BaseExceptionGroup):
+            return any(
+                isinstance(error, Exception) and self._is_reconnectable(error)
+                for error in exc.exceptions
+            )
+        if isinstance(exc, (anyio.EndOfStream, anyio.BrokenResourceError, anyio.ClosedResourceError)):
             return True
         return False
 

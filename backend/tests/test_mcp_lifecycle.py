@@ -26,6 +26,7 @@ def sdk(request, monkeypatch):
     state = SimpleNamespace(
         entered=[], exited=[], sessions=[], initialize_gate=None,
         close_gate=None, closing=asyncio.Event(), fail=asyncio.Event(),
+        available=True, failure=RuntimeError("transport crashed"),
     )
 
     @asynccontextmanager
@@ -41,9 +42,12 @@ def sdk(request, monkeypatch):
 
     @asynccontextmanager
     async def transport(**kwargs):
+        if not state.available:
+            raise httpx.ConnectError("server is stopped")
+
         async def fail():
             await state.fail.wait()
-            raise RuntimeError("transport crashed")
+            raise state.failure
 
         async with scope("transport"), anyio.create_task_group() as group:
             group.start_soon(fail)
@@ -70,7 +74,9 @@ def sdk(request, monkeypatch):
                 await state.initialize_gate.wait()
 
         async def list_tools(self, **kwargs):
-            return SimpleNamespace(tools=[], nextCursor=None)
+            return SimpleNamespace(tools=[SimpleNamespace(
+                name="remote_echo", description="echo", inputSchema={"type": "object"},
+            )], nextCursor=None)
 
         async def call_tool(self, *args):
             return SimpleNamespace(isError=False, content=[SimpleNamespace(text="ok")])
@@ -220,9 +226,190 @@ async def test_concurrent_server_replacement_does_not_orphan_connection(sdk):
     assert [name for name, _ in sdk.exited] == ["session", "transport"] * 4
 
 
+async def eventually(predicate):
+    async with asyncio.timeout(2):
+        while not predicate():
+            await asyncio.sleep(0.005)
+
+
+@pytest_asyncio.fixture
+async def recovery_manager(monkeypatch):
+    monkeypatch.setattr("agent_platform.tools.mcp.manager.RECONNECT_POLL_SECONDS", 0.005)
+    monkeypatch.setattr("agent_platform.tools.mcp.manager.RECONNECT_INITIAL_DELAY_SECONDS", 0.005)
+    monkeypatch.setattr("agent_platform.tools.mcp.manager.RECONNECT_MAX_DELAY_SECONDS", 0.02)
+    manager = MCPManager()
+    try:
+        yield manager
+    finally:
+        await manager.shutdown()
+
+
+async def test_startup_outage_recovers_without_tool_call(sdk, recovery_manager):
+    manager = recovery_manager
+    sid = uuid4()
+    sdk.available = False
+    with pytest.raises(httpx.ConnectError):
+        await manager.add_server(sid, sdk.config)
+    manager.start()
+    await eventually(lambda: manager._reconnect_failures.get(sid, 0) >= 7)
+    sdk.available = True
+    await eventually(lambda: sid in manager._connections and manager._connections[sid].connected)
+    assert manager.is_mcp_tool("remote_echo")
+    assert await manager.call_tool("remote_echo", {}) == "ok"
+    assert sid not in manager._reconnect_failures
+
+
+async def test_background_502_outage_recovers_without_tool_call(sdk, recovery_manager):
+    manager = recovery_manager
+    sid = uuid4()
+    await manager.add_server(sid, sdk.config)
+    conn = manager._connections[sid]
+    owner = conn._owner_task
+    sdk.failure = httpx.HTTPStatusError(
+        "502 Bad Gateway", request=httpx.Request("POST", "http://test"),
+        response=httpx.Response(502),
+    )
+    sdk.available = False
+    sdk.fail.set()
+    await asyncio.wait_for(asyncio.shield(owner), timeout=1)
+    manager.start()
+    await eventually(lambda: manager._reconnect_failures.get(sid, 0) >= 2)
+    assert manager.is_mcp_tool("remote_echo")  # Preserve cached routing during the outage.
+    sdk.fail.clear()
+    sdk.available = True
+    await eventually(lambda: conn.connected)
+    assert len(sdk.sessions) == 2
+    assert await manager.call_tool("remote_echo", {}) == "ok"
+
+
+async def test_disconnected_concurrent_calls_share_recovery(sdk, recovery_manager):
+    manager = recovery_manager
+    sid = uuid4()
+    await manager.add_server(sid, sdk.config)
+    conn = manager._connections[sid]
+    owner = conn._owner_task
+    sdk.fail.set()
+    await asyncio.wait_for(asyncio.shield(owner), timeout=1)
+    sdk.fail.clear()
+    results = await asyncio.gather(*(manager.call_tool("remote_echo", {}) for _ in range(8)))
+    assert results == ["ok"] * 8
+    assert len(sdk.sessions) == 2
+
+
+async def test_manual_refresh_recovers_despite_backoff_and_fresh_cache(sdk, recovery_manager):
+    manager = recovery_manager
+    sid = uuid4()
+    await manager.add_server(sid, sdk.config)
+    conn = manager._connections[sid]
+    owner = conn._owner_task
+    sdk.fail.set()
+    await asyncio.wait_for(asyncio.shield(owner), timeout=1)
+    sdk.fail.clear()
+    manager._reconnect_after[sid] = asyncio.get_running_loop().time() + 3600
+    tools = await manager.refresh_tools(sid)
+    assert conn.connected
+    assert [tool.name for tool in tools] == ["remote_echo"]
+    assert sid not in manager._reconnect_after
+
+
+async def test_removed_server_is_not_recreated_by_background_retry(sdk, recovery_manager):
+    manager = recovery_manager
+    sid = uuid4()
+    sdk.available = False
+    with pytest.raises(httpx.ConnectError):
+        await manager.add_server(sid, sdk.config)
+    manager.start()
+    await eventually(lambda: manager._reconnect_failures.get(sid, 0) >= 2)
+    await manager.remove_server(sid)
+    sdk.available = True
+    await asyncio.sleep(0.04)
+    assert sid not in manager._configs
+    assert sid not in manager._connections
+    assert not sdk.sessions
+
+
+async def test_shutdown_cancels_pending_background_handshake(sdk, recovery_manager):
+    manager = recovery_manager
+    sid = uuid4()
+    await manager.add_server(sid, sdk.config)
+    owner = manager._connections[sid]._owner_task
+    sdk.fail.set()
+    await asyncio.wait_for(asyncio.shield(owner), timeout=1)
+    sdk.fail.clear()
+    sdk.initialize_gate = asyncio.Event()
+    manager.start()
+    await eventually(lambda: len(sdk.sessions) == 2)
+    await asyncio.wait_for(manager.shutdown(), timeout=1)
+    assert not manager._configs
+    assert not manager._connections
+    assert manager._reconnect_task is None
+    assert not [t for t in asyncio.all_tasks() if t.get_name().startswith("mcp-connection-")]
+
+
+async def test_cancelled_manager_shutdown_still_releases_connections(sdk, recovery_manager):
+    manager = recovery_manager
+    await manager.add_server(uuid4(), sdk.config)
+    manager.start()
+    sdk.close_gate = asyncio.Event()
+    task = asyncio.create_task(manager.shutdown())
+    await sdk.closing.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    sdk.close_gate.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=1)
+    assert not manager._connections
+    assert manager._reconnect_task is None
+    assert not [t for t in asyncio.all_tasks() if t.get_name().startswith("mcp-connection-")]
+
+
+async def test_manager_can_stop_before_recovery_task_starts():
+    manager = MCPManager()
+    manager.start()
+    await manager.shutdown()
+    assert manager._reconnect_task is None
+
+
+@pytest.mark.parametrize("grouped", [False, True])
+async def test_502_recovers_connection_without_replaying_uncertain_write(sdk, grouped):
+    conn = MCPServerConnection(uuid4(), sdk.config)
+    await conn.connect()
+    first_session = conn.session
+    calls = 0
+    error = httpx.HTTPStatusError(
+        "502 Bad Gateway", request=httpx.Request("POST", "http://test"),
+        response=httpx.Response(502),
+    )
+    failure = ExceptionGroup("transport failure", [error]) if grouped else error
+
+    async def uncertain_write(*args):
+        nonlocal calls
+        calls += 1
+        raise failure
+
+    first_session.call_tool = uncertain_write
+    try:
+        with pytest.raises(type(failure)):
+            await conn.call_tool("save", {})
+        assert calls == 1
+        assert conn.connected and conn.session is not first_session
+        assert await conn.call_tool("remote_echo", {}) == "ok"
+    finally:
+        await conn.disconnect()
+
+
 @pytest_asyncio.fixture(params=["sse", "streamable-http"])
-async def real_server(request):
+async def real_server(request, monkeypatch):
     from mcp.server.fastmcp import FastMCP
+    from sse_starlette import sse as sse_module
+
+    # Each fixture starts a new server/loop. SSE-Starlette keeps shutdown state
+    # in thread globals; an earlier server's graceful exit must not close this one.
+    monkeypatch.setattr(sse_module.AppStatus, "should_exit", False)
+    monkeypatch.setattr(
+        sse_module._thread_state, "shutdown_state", sse_module._ShutdownState(), raising=False,
+    )
 
     mcp = FastMCP("LifecycleTest")
     entered = asyncio.Event()
@@ -236,6 +423,17 @@ async def real_server(request):
         return text
 
     app = mcp.sse_app() if request.param == "sse" else mcp.streamable_http_app()
+    upstream = app
+    availability = SimpleNamespace(online=True)
+
+    async def app(scope, receive, send):
+        if scope["type"] == "http" and not availability.online:
+            from starlette.responses import PlainTextResponse
+
+            await PlainTextResponse("upstream stopped", status_code=502)(scope, receive, send)
+        else:
+            await upstream(scope, receive, send)
+
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         sock.setblocking(False)
@@ -250,6 +448,7 @@ async def real_server(request):
             yield {
                 "transport_type": request.param, "url": f"http://127.0.0.1:{port}{path}",
                 "timeout": _REAL_IO_TIMEOUT,
+                "_availability": availability,
             }, entered
         finally:
             release.set()
@@ -302,3 +501,28 @@ async def test_real_sdk_cross_task_cancel_reconnect_and_shutdown(real_server, mo
     assert deliveries == settled
     assert deliveries < 500
     assert not [t for t in asyncio.all_tasks() if t.get_name().startswith("mcp-connection-")]
+
+
+async def test_real_sdk_gateway_502_then_background_recovery(real_server, recovery_manager):
+    from mcp.shared.exceptions import McpError
+
+    config, _ = real_server
+    manager = recovery_manager
+    sid = uuid4()
+    await asyncio.wait_for(manager.add_server(sid, config), timeout=_REAL_IO_TIMEOUT)
+    assert await manager.call_tool("echo", {"text": "before outage"}) == "before outage"
+    config["_availability"].online = False
+    # Bound the intentionally unanswered SSE request without shortening the
+    # real SDK handshake budget used by the rest of this fixture.
+    manager._connections[sid].config["timeout"] = 0.25
+    try:
+        with pytest.raises((httpx.HTTPError, ExceptionGroup, McpError, TimeoutError)):
+            await asyncio.wait_for(manager.refresh_tools(sid), timeout=_REAL_IO_TIMEOUT + 1)
+        await eventually(lambda: not manager._connections[sid].connected)
+        manager._connections[sid].config["timeout"] = _REAL_IO_TIMEOUT
+        manager.start()
+        await eventually(lambda: manager._reconnect_failures.get(sid, 0) >= 2)
+    finally:
+        config["_availability"].online = True
+    await eventually(lambda: manager._connections[sid].connected)
+    assert await manager.call_tool("echo", {"text": "after recovery"}) == "after recovery"

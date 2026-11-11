@@ -39,7 +39,7 @@ def services(monkeypatch):
         yield SimpleNamespace()
 
     sandbox = SimpleNamespace(start_periodic_sync=asynchronous("sandbox.start"), shutdown=asynchronous("sandbox.close"))
-    mcp = SimpleNamespace(shutdown=asynchronous("mcp.close"))
+    mcp = SimpleNamespace(start=sync("mcp.reconnect.start"), shutdown=asynchronous("mcp.close"))
     executor = SimpleNamespace(registry=object())
     remote = SimpleNamespace(initialize=asynchronous("remote.start"))
     recorder = SimpleNamespace(start=sync("recorder.start"), shutdown=asynchronous("recorder.close"))
