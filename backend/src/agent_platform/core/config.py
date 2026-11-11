@@ -155,7 +155,7 @@ class SandboxSettings(BaseSettings):
     tmpfs_size: str = Field(default="512m")
     network_disabled: bool = Field(default=True, description="Disable outbound network from sandbox")
     command_timeout: int = Field(default=60, ge=5, le=600)
-    session_ttl: int = Field(default=3600, ge=60, le=86400, description="Idle timeout in seconds")
+    session_ttl: int = Field(default=3600, ge=60, le=604800, description="Idle timeout in seconds (up to 7 days)")
     workspace_quota_mb: int = Field(default=500, ge=10, le=10240)
     max_concurrent: int = Field(default=10, ge=1, le=100)
 
