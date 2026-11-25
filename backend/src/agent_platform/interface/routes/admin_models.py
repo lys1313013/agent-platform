@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 import httpx
@@ -18,6 +18,8 @@ from agent_platform.db.connection import get_db
 from agent_platform.db.models import LLMModel, LLMProvider
 
 router = APIRouter(prefix="/api/admin/models", tags=["admin-models"])
+
+ProviderType = Literal["openai", "openai_responses", "anthropic"]
 
 
 # ---- Schemas ----
@@ -36,14 +38,14 @@ class ProviderOut(BaseModel):
 
 class ProviderCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=128)
-    provider_type: str = Field(..., pattern=r"^(openai|anthropic)$")
+    provider_type: ProviderType
     base_url: str | None = Field(default=None, max_length=512)
     api_key: str | None = None
 
 
 class ProviderUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=128)
-    provider_type: str | None = Field(default=None, pattern=r"^(openai|anthropic)$")
+    provider_type: ProviderType | None = None
     base_url: str | None = None
     api_key: str | None = None
     is_active: bool | None = None

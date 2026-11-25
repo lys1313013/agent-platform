@@ -44,6 +44,7 @@ const { Option } = Select;
 // Map provider types to display info
 const PROVIDER_META: Record<string, { label: string; color: string; icon: string }> = {
   openai: { label: 'OpenAI 兼容', color: 'green', icon: '🔗' },
+  openai_responses: { label: 'OpenAI（Responses API）', color: 'blue', icon: '🔗' },
   anthropic: { label: 'Anthropic', color: 'orange', icon: '🧠' },
 };
 
@@ -591,12 +592,9 @@ export default function ModelManagementPage() {
               <Input placeholder="如：OpenAI、DeepSeek、Anthropic" />
             </Form.Item>
             <Form.Item name="provider_type" label="类型" rules={[{ required: true }]}>
-              <Select>
-                <Option value="openai">OpenAI 兼容</Option>
-                <Option value="anthropic">Anthropic</Option>
-              </Select>
+              <Select options={Object.entries(PROVIDER_META).map(([value, { label }]) => ({ value, label }))} />
             </Form.Item>
-            <Form.Item name="base_url" label="API 地址" extra="OpenAI 兼容接口的基础地址，如 https://api.deepseek.com/v1。拉取模型和调用都使用此地址。">
+            <Form.Item name="base_url" label="API 地址" extra="填写 API 基础地址，例如 https://api.openai.com/v1。拉取模型和调用都使用此地址。">
               <Input placeholder="https://api.openai.com/v1" />
             </Form.Item>
             <Form.Item name="api_key" label="API 密钥" extra={editingProvider ? '留空表示不修改当前密钥。' : '用于拉取模型列表和实际调用。'}>

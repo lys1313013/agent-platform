@@ -124,6 +124,8 @@ class AgentStep:
     tool_results: list[ToolResult] = field(default_factory=list)
     final_output: str = ""
     done: bool = False
+    # Used for stateless tool continuations within this turn.
+    _response_items: list[dict] | None = field(default=None, repr=False)
 
 
 def _format_ask_user_output(
@@ -571,8 +573,10 @@ class AgentLoop:
                     role="assistant",
                     content=step.thinking if step.thinking else None,
                     tool_calls=step.tool_calls,
+                    response_items=step._response_items,
                 )
             )
+            step._response_items = None
 
             async with aclosing(self._execute_step_tools(step, ctx)) as tool_events:
                 async for event in tool_events:
@@ -784,8 +788,11 @@ class AgentLoop:
                                 raise ValueError("Tool argument delta has no matching tool call")
                             pending_tool_calls[idx]["args_str"] += chunk.argument_delta
 
-                        elif chunk.type == "done" and chunk.usage:
-                            step_usage = chunk.usage
+                        elif chunk.type == "done":
+                            if chunk.usage:
+                                step_usage = chunk.usage
+                            if chunk.response_items:
+                                step._response_items = chunk.response_items
                 break  # stream completed normally
             except LLMStreamError:
                 produced = (

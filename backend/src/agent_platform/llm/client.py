@@ -152,6 +152,7 @@ class LLMChunk:
     usage: dict | None = None
     stop_reason: str | None = None
     tool_call_index: int | None = None
+    response_items: list[dict] | None = field(default=None, repr=False)
 
 
 @dataclass
@@ -177,6 +178,7 @@ class LLMMessage:
     # cached system prefix.
     transient: bool = False
     omit_from_trace: bool = False
+    response_items: list[dict] | None = field(default=None, repr=False)
 
 
 # ---- Provider Interface ----
@@ -1334,13 +1336,18 @@ def create_provider(
             langfuse_client=langfuse_client,
             supports_vision=supports_vision,
         )
+    if provider == "openai_responses":
+        from agent_platform.llm.responses import OpenAIResponsesProvider
+
+        provider_class = OpenAIResponsesProvider
     else:
-        return OpenAIProvider(
-            model=model,
-            base_url=base_url or "",
-            api_key=api_key or "",
-            default_temperature=temperature,
-            enable_retry=enable_retry,
-            langfuse_client=langfuse_client,
-            supports_vision=supports_vision,
-        )
+        provider_class = OpenAIProvider
+    return provider_class(
+        model=model,
+        base_url=base_url or "",
+        api_key=api_key or "",
+        default_temperature=temperature,
+        enable_retry=enable_retry,
+        langfuse_client=langfuse_client,
+        supports_vision=supports_vision,
+    )
