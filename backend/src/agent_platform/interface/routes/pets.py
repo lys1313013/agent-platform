@@ -170,6 +170,7 @@ class ActiveTaskOut(BaseModel):
     source: str
     chat_key: str
     agent_id: str
+    workspace_id: str = ""
     started_at: float
 
 
@@ -570,6 +571,7 @@ async def list_active_tasks(
             source=t.source,
             chat_key=t.chat_key,
             agent_id=t.agent_id,
+            workspace_id=t.workspace_id,
             started_at=t.started_at,
         )
         for t in await task_registry.list_tasks(user.id, workspace_id=workspace_id)

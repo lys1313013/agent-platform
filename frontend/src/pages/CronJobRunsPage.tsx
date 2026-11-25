@@ -1,3 +1,4 @@
+import { errorMessage } from '@/lib/errors';
 import { usePageQuery, queryPage, queryChoice } from '@/hooks/usePageQuery';
 import { getAuthGeneration, assertAuthGeneration } from '@/lib/authSession';
 import { useCallback, useEffect, useState } from 'react';
@@ -63,8 +64,8 @@ export default function CronJobRunsPage() {
       });
       setRuns(result.items);
       setTotal(result.total);
-    } catch (err: any) {
-      message.error(err.message || '加载执行记录失败');
+    } catch (err) {
+      message.error(errorMessage(err, '加载执行记录失败'));
     } finally {
       setLoading(false);
     }
@@ -92,6 +93,7 @@ export default function CronJobRunsPage() {
       useChatStore.setState((state) => ({
         sessions: [session, ...state.sessions.filter((item) => item.id !== session.id)],
         messages: { ...state.messages, [session.id]: session.messages },
+        hasMoreMessages: { ...state.hasMoreMessages, [session.id]: session.has_more_messages },
         activeSessionId: session.id,
         messagesLoading: false,
       }));

@@ -42,7 +42,7 @@
 | F-MCP-03 | 支持 Streamable HTTP 传输类型 | P0 | ✅ |
 | F-MCP-04 | 配置服务端点 URL | P0 | ✅ |
 | F-MCP-05 | 配置自定义 HTTP 请求头（用于认证等） | P0 | ✅ |
-| F-MCP-06 | 配置工具名称前缀（避免不同 Server 之间的工具名冲突） | P1 | ✅ |
+| F-MCP-06 | 为同一租户内存在同名工具的服务配置区分前缀 | P1 | ✅ |
 | F-MCP-07 | 配置调用超时时间（5-600 秒） | P1 | ✅ |
 | F-MCP-08 | 编辑 MCP Server 配置 | P0 | ✅ |
 | F-MCP-09 | 删除 MCP Server（自动断开连接） | P0 | ✅ |
@@ -60,7 +60,7 @@
 | F-MCP-22 | MCP 工具注入 Agent 的 tools schema（每次 LLM 调用前） | P0 | ✅ |
 | F-MCP-23 | 工具前缀自动应用（如 `github_create_issue`） | P1 | ✅ |
 | F-MCP-24 | 工具列表 API 返回 MCP 工具（带 `category: mcp` 标识） | P1 | ✅ |
-| F-MCP-25 | 多个 MCP Server 的工具共存，无名称冲突 | P1 | ✅ |
+| F-MCP-25 | 不同租户可使用相同前缀和工具名，按执行租户路由到各自的服务 | P1 | ✅ |
 | F-MCP-26 | 分页获取工具列表（当工具数量很大时） | P3 | ⬜ |
 
 #### 2.3 工具调用

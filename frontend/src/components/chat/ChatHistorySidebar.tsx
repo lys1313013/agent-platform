@@ -1,4 +1,6 @@
-import { useState, useEffect, useRef, useMemo } from 'react';
+import SessionHistoryMore from '@/components/chat/SessionHistoryMore';
+import { useSessionHistory } from '@/hooks/useSessionHistory';
+import { useState, useRef, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useChatStore } from '@/stores/chatStore';
 import { formatRelativeTime, cn } from '@/lib/utils';
@@ -41,8 +43,8 @@ export default function ChatHistorySidebar() {
     renameSession,
     pinSession,
     archiveSession,
-    refreshSessions,
     isSessionsLoading,
+    sessionListError,
   } = useChatStore();
 
   const [panelOpen, setPanelOpen] = useState(false);
@@ -50,13 +52,6 @@ export default function ChatHistorySidebar() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState('');
   const sidebarRef = useRef<HTMLDivElement>(null);
-
-  // Load sessions when panel opens
-  useEffect(() => {
-    if (panelOpen) {
-      refreshSessions();
-    }
-  }, [panelOpen, refreshSessions]);
 
   // Close panel on click outside — removed: sidebar should only collapse via manual toggle
 
@@ -103,13 +98,9 @@ export default function ChatHistorySidebar() {
     // Keep sidebar open — user collapses manually via toggle button
   };
 
-  const filteredSessions = sessions.filter(
-    (s) =>
-      searchQuery === '' ||
-      (s.title || '').toLowerCase().includes(searchQuery.toLowerCase()),
-  );
+  const filteredSessions = useSessionHistory(panelOpen, searchQuery);
 
-  const pinnedSessions = filteredSessions.filter((s) => s.is_pinned);
+  const pinnedSessions = filteredSessions.filter((s) => s.is_pinned && !s.is_archived);
   const regularSessions = filteredSessions.filter((s) => !s.is_pinned && !s.is_archived);
   const archivedSessions = filteredSessions.filter((s) => s.is_archived);
 
@@ -199,11 +190,11 @@ export default function ChatHistorySidebar() {
 
           {/* Session list */}
           <div className="flex-1 overflow-y-auto px-2 pb-4">
-            {isSessionsLoading && sessions.length === 0 ? (
+            {isSessionsLoading && filteredSessions.length === 0 ? (
               <div className="px-3 py-8 text-center">
                 <Spin size="small" />
               </div>
-            ) : filteredSessions.length === 0 ? (
+            ) : !sessionListError && filteredSessions.length === 0 ? (
               <div className="flex flex-col items-center gap-2 px-3 py-10 text-center">
                 <MessageOutlined className="text-3xl text-muted-foreground/20" />
                 <span className="text-xs text-muted-foreground">
@@ -305,6 +296,7 @@ export default function ChatHistorySidebar() {
                 )}
               </div>
             )}
+            <SessionHistoryMore />
           </div>
         </div>
       )}

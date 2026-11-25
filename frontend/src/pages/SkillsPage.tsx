@@ -1,3 +1,4 @@
+import { errorMessage } from '@/lib/errors';
 import { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
@@ -169,8 +170,8 @@ export default function SkillsPage() {
       await skillsApi.importFromZip(importFile);
       message.success('导入成功');
       setImportOpen(false); setImportFile(null); fetchSkills();
-    } catch (e: any) {
-      message.error(e?.message || '导入失败');
+    } catch (e) {
+      message.error(errorMessage(e, '导入失败'));
     } finally { setImporting(false); }
   };
 
@@ -221,8 +222,8 @@ export default function SkillsPage() {
       if (results.length === 0) message.info('未找到匹配的技能');
       setShResults(results);
       setShSelected(new Set());
-    } catch (e: any) {
-      message.error(e?.message || '搜索失败');
+    } catch (e) {
+      message.error(errorMessage(e, '搜索失败'));
     } finally { setShLoading(false); }
   };
 
@@ -251,8 +252,8 @@ export default function SkillsPage() {
         setShOpen(false);
         fetchSkills();
       }
-    } catch (e: any) {
-      message.error(e?.message || '同步失败');
+    } catch (e) {
+      message.error(errorMessage(e, '同步失败'));
     } finally { setShImporting(false); }
   };
 
@@ -635,7 +636,7 @@ export default function SkillsPage() {
             <pre className="text-xs bg-muted p-3 rounded-lg leading-relaxed">{`skill-name/\n├── SKILL.md              ← 必填\n├── scripts/              ← 可选：可执行脚本\n├── references/           ← 可选：参考文档\n└── assets/               ← 可选：资源文件`}</pre>
             <Upload.Dragger
               accept=".zip" maxCount={1}
-              fileList={importFile ? [{ uid: '-1', name: importFile.name, status: 'done' } as any] : []}
+              fileList={importFile ? [{ uid: '-1', name: importFile.name, status: 'done' }] : []}
               beforeUpload={(file) => {
                 if (!file.name.toLowerCase().endsWith('.zip')) { message.error('只支持 .zip'); return false; }
                 if (file.size > 10 * 1024 * 1024) { message.error('超过 10MB'); return false; }

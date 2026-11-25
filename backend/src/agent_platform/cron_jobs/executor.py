@@ -222,6 +222,8 @@ async def execute_cron_job(job, db, run_id, *, tool_executor, push_to_channel):
             notify_ctx.active = False
             current_cron_notify_ctx.reset(notify_token)
 
+        if getattr(loop, "stop_reason", None) == "max_iterations":
+            error_msg = "智能体达到迭代上限，任务未完成"
         response = notify_ctx.response
         output = response.summary if response else (final_output or notify_ctx.legacy_text or "")
         succeeded = bool(output.strip()) and not error_msg

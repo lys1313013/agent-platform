@@ -12,7 +12,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
-from sqlalchemy import case, func, select
+from sqlalchemy import and_, case, func, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_platform.auth.dependencies import CurrentUser
@@ -66,6 +66,8 @@ def _resolve_range(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="start must be earlier than end",
             )
+        if end - start > timedelta(days=366):
+            raise HTTPException(422, detail="Maximum observation range is 366 days")
         return start, end
     now = datetime.now(UTC)
     if window == "1h":
@@ -89,27 +91,23 @@ def _bucket_step(window: str) -> timedelta:
     return timedelta(hours=1)
 
 
-def _fill_series(
-    start: datetime,
-    end: datetime,
-    step: timedelta,
-    data: dict[datetime, float],
-) -> list[dict]:
-    def align(dt: datetime) -> datetime:
-        # 对齐到 bucket 边界（UTC），与 date_trunc 返回的键保持一致
-        dt = dt.astimezone(UTC)
-        if step == timedelta(days=1):
-            return dt.replace(hour=0, minute=0, second=0, microsecond=0)
-        if step == timedelta(minutes=1):
-            return dt.replace(second=0, microsecond=0)
-        return dt.replace(minute=0, second=0, microsecond=0)
+def _series_bounds(start: datetime, end: datetime, step: timedelta) -> tuple[datetime, int]:
+    epoch = datetime(1970, 1, 1, tzinfo=UTC)
+    first = (start - epoch) // step
+    count = (end - epoch) // step - first + 1
+    if count > 1441:
+        raise HTTPException(422, detail="Maximum series length is 1441 points; choose a coarser granularity")
+    return epoch + first * step, count
 
-    points: list[dict] = []
-    t = align(start)
-    end_key = align(end)
-    while t <= end_key:
-        points.append({"ts": t.isoformat(), "value": data.get(t, 0.0)})
-        t += step
+
+def _fill_series(
+    start: datetime, end: datetime, step: timedelta, data: dict[datetime, float],
+) -> list[dict]:
+    first, count = _series_bounds(start, end, step)
+    points = []
+    for index in range(count):
+        bucket = first + step * index
+        points.append({"ts": bucket.isoformat(), "value": data.get(bucket, 0.0)})
     return points
 
 
@@ -147,6 +145,7 @@ class TraceItem(BaseModel):
     duration_ms: int | None
     created_at: datetime
     session_title: str | None = None
+    agent_name: str | None = None
 
 
 class TracePage(BaseModel):
@@ -210,62 +209,38 @@ async def get_overview(
     def _in_range(col, model):
         return [col >= start, col <= end, *_scope(user, model)]
 
-    # Cards
-    llm_total = await db.scalar(
-        select(func.count()).where(*_in_range(LLMCallLog.created_at, LLMCallLog))
-    ) or 0
-    llm_failed = await db.scalar(
-        select(func.count()).where(
-            *_in_range(LLMCallLog.created_at, LLMCallLog),
-            LLMCallLog.final_status == "failed",
-        )
-    ) or 0
-    tool_total = await db.scalar(
-        select(func.count()).where(*_in_range(ToolCallLog.created_at, ToolCallLog))
-    ) or 0
-    tool_failed = await db.scalar(
-        select(func.count()).where(
-            *_in_range(ToolCallLog.created_at, ToolCallLog),
-            ToolCallLog.is_error.is_(True),
-        )
-    ) or 0
-    avg_ttft = await db.scalar(
-        select(func.avg(LLMCallLog.ttft_ms)).where(*_in_range(LLMCallLog.created_at, LLMCallLog))
-    )
-    p95_latency = await db.scalar(
-        select(func.percentile_cont(0.95).within_group(LLMCallLog.duration_ms)).where(
-            *_in_range(LLMCallLog.created_at, LLMCallLog),
-            LLMCallLog.duration_ms.is_not(None),
-        )
-    )
-    total_tokens = await db.scalar(
-        select(func.coalesce(func.sum(LLMCallLog.total_tokens), 0)).where(
-            *_in_range(LLMCallLog.created_at, LLMCallLog)
-        )
-    )
-    prompt_tokens = await db.scalar(
-        select(func.coalesce(func.sum(LLMCallLog.prompt_tokens), 0)).where(
-            *_in_range(LLMCallLog.created_at, LLMCallLog)
-        )
-    )
-    completion_tokens = await db.scalar(
-        select(func.coalesce(func.sum(LLMCallLog.completion_tokens), 0)).where(
-            *_in_range(LLMCallLog.created_at, LLMCallLog)
-        )
-    )
-    cache_read_tokens = await db.scalar(
-        select(func.coalesce(func.sum(LLMCallLog.cache_read_tokens), 0)).where(
-            *_in_range(LLMCallLog.created_at, LLMCallLog)
-        )
-    )
-    ctx_p95 = await db.scalar(
+    step = _bucket_step(window)
+    _series_bounds(start, end, step)
+    llm_bucket = _bucket_expr(LLMCallLog.created_at, window)
+    tool_bucket = _bucket_expr(ToolCallLog.created_at, window)
+    # Each scan emits both its UTC buckets and the overall row (NULL bucket).
+    llm_rows = (await db.execute(
         select(
-            func.percentile_cont(0.95).within_group(LLMCallLog.context_utilization)
-        ).where(
-            *_in_range(LLMCallLog.created_at, LLMCallLog),
-            LLMCallLog.context_utilization.is_not(None),
-        )
-    )
+            llm_bucket.label("bucket"), func.count().label("requests"),
+            func.count().filter(LLMCallLog.final_status == "failed").label("failed"),
+            func.avg(LLMCallLog.ttft_ms).label("ttft"),
+            func.percentile_cont(0.95).within_group(LLMCallLog.duration_ms).label("latency"),
+            func.percentile_cont(0.95).within_group(LLMCallLog.context_utilization).label("util"),
+            func.coalesce(func.sum(LLMCallLog.total_tokens), 0).label("tokens"),
+            func.coalesce(func.sum(LLMCallLog.prompt_tokens), 0).label("prompt"),
+            func.coalesce(func.sum(LLMCallLog.completion_tokens), 0).label("completion"),
+            func.coalesce(func.sum(LLMCallLog.cache_read_tokens), 0).label("cached"),
+        ).where(*_in_range(LLMCallLog.created_at, LLMCallLog))
+        .group_by(func.grouping_sets(tuple_(llm_bucket), tuple_()))
+    )).all()
+    tool_rows = (await db.execute(
+        select(tool_bucket.label("bucket"), func.count().label("requests"),
+               func.count().filter(ToolCallLog.is_error.is_(True)).label("failed"))
+        .where(*_in_range(ToolCallLog.created_at, ToolCallLog))
+        .group_by(func.grouping_sets(tuple_(tool_bucket), tuple_()))
+    )).all()
+    llm = next(row for row in llm_rows if row.bucket is None)
+    tool = next(row for row in tool_rows if row.bucket is None)
+    llm_total, llm_failed = llm.requests, llm.failed
+    tool_total, tool_failed = tool.requests, tool.failed
+    avg_ttft, p95_latency, ctx_p95 = llm.ttft, llm.latency, llm.util
+    total_tokens, prompt_tokens = llm.tokens, llm.prompt
+    completion_tokens, cache_read_tokens = llm.completion, llm.cached
 
     cards = OverviewCards(
         llm_requests=llm_total,
@@ -282,54 +257,11 @@ async def get_overview(
         cache_hit_rate=round(cache_read_tokens / prompt_tokens * 100, 2) if prompt_tokens else 0.0,
     )
 
-    step = _bucket_step(window)
-
-    # Series: per-bucket aggregation
-    llm_bucket = _bucket_expr(LLMCallLog.created_at, window)
-    llm_rows = (
-        await db.execute(
-            select(llm_bucket, func.count()).where(*_in_range(LLMCallLog.created_at, LLMCallLog))
-            .group_by(llm_bucket).order_by(llm_bucket)
-        )
-    ).all()
-    llm_counts = {r[0]: float(r[1]) for r in llm_rows}
-
-    llm_fail_rows = (
-        await db.execute(
-            select(llm_bucket, func.count()).where(
-                *_in_range(LLMCallLog.created_at, LLMCallLog),
-                LLMCallLog.final_status == "failed",
-            ).group_by(llm_bucket).order_by(llm_bucket)
-        )
-    ).all()
-    llm_fail = {r[0]: float(r[1]) for r in llm_fail_rows}
-
-    token_rows = (
-        await db.execute(
-            select(llm_bucket, func.coalesce(func.sum(LLMCallLog.total_tokens), 0))
-            .where(*_in_range(LLMCallLog.created_at, LLMCallLog)).group_by(llm_bucket).order_by(llm_bucket)
-        )
-    ).all()
-    token_map = {r[0]: float(r[1]) for r in token_rows}
-
-    tool_bucket = _bucket_expr(ToolCallLog.created_at, window)
-    tool_rows = (
-        await db.execute(
-            select(tool_bucket, func.count()).where(*_in_range(ToolCallLog.created_at, ToolCallLog))
-            .group_by(tool_bucket).order_by(tool_bucket)
-        )
-    ).all()
-    tool_counts = {r[0]: float(r[1]) for r in tool_rows}
-
-    tool_fail_rows = (
-        await db.execute(
-            select(tool_bucket, func.count()).where(
-                *_in_range(ToolCallLog.created_at, ToolCallLog),
-                ToolCallLog.is_error.is_(True),
-            ).group_by(tool_bucket).order_by(tool_bucket)
-        )
-    ).all()
-    tool_fail = {r[0]: float(r[1]) for r in tool_fail_rows}
+    llm_counts = {r.bucket: float(r.requests) for r in llm_rows if r.bucket is not None}
+    llm_fail = {r.bucket: float(r.failed) for r in llm_rows if r.bucket is not None}
+    token_map = {r.bucket: float(r.tokens) for r in llm_rows if r.bucket is not None}
+    tool_counts = {r.bucket: float(r.requests) for r in tool_rows if r.bucket is not None}
+    tool_fail = {r.bucket: float(r.failed) for r in tool_rows if r.bucket is not None}
 
     return OverviewOut(
         cards=cards,
@@ -371,6 +303,8 @@ async def list_traces(
     status_filter: str | None = Query(default=None, alias="status"),
     agent_id: UUID | None = None,
     session_id: UUID | None = None,
+    trace_id: UUID | None = None,
+    roots_only: bool = False,
     window: str = Query(default="24h", pattern="^(1h|24h|7d)$"),
     start_at: datetime | None = Query(default=None, alias="start"),
     end_at: datetime | None = Query(default=None, alias="end"),
@@ -378,11 +312,13 @@ async def list_traces(
     _require_admin(user)
     start, end = _resolve_range(window, start_at, end_at)
 
-    conds = [
-        AgentTraceLog.created_at >= start,
-        AgentTraceLog.created_at <= end,
-        *_scope(user, AgentTraceLog),
-    ]
+    conds = _scope(user, AgentTraceLog)
+    if trace_id is not None:
+        conds.append(AgentTraceLog.trace_id == trace_id)
+    else:
+        conds.extend([AgentTraceLog.created_at >= start, AgentTraceLog.created_at <= end])
+        if roots_only:
+            conds.append(AgentTraceLog.root_trace_id.is_(None))
     if status_filter:
         conds.append(AgentTraceLog.status == status_filter)
     if agent_id:
@@ -395,10 +331,11 @@ async def list_traces(
     ) or 0
 
     stmt = (
-        select(AgentTraceLog, Session.title)
-        .outerjoin(Session, Session.id == AgentTraceLog.session_id)
+        select(AgentTraceLog, Session.title, Agent.name)
+        .outerjoin(Session, and_(Session.id == AgentTraceLog.session_id, Session.user_id == AgentTraceLog.user_id))
+        .outerjoin(Agent, and_(Agent.id == AgentTraceLog.agent_id, Agent.tenant_id == AgentTraceLog.tenant_id))
         .where(*conds)
-        .order_by(AgentTraceLog.created_at.desc())
+        .order_by(AgentTraceLog.created_at.desc(), AgentTraceLog.trace_id)
         .offset((page - 1) * page_size)
         .limit(page_size)
     )
@@ -417,6 +354,7 @@ async def list_traces(
                 duration_ms=r[0].duration_ms,
                 created_at=r[0].created_at,
                 session_title=r[1],
+                agent_name=r[2],
             )
             for r in rows
         ],
@@ -429,20 +367,45 @@ async def get_trace(
     trace_id: UUID,
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
+    include_children: bool = False,
 ) -> dict:
     _require_admin(user)
-    trace = await db.scalar(
-        select(AgentTraceLog).where(
+    trace_query = select(AgentTraceLog, Agent.name).outerjoin(
+        Agent, and_(Agent.id == AgentTraceLog.agent_id, Agent.tenant_id == AgentTraceLog.tenant_id),
+    )
+    row = (await db.execute(
+        trace_query.where(
             AgentTraceLog.trace_id == trace_id, *_scope(user, AgentTraceLog),
         )
-    )
-    if not trace:
+    )).one_or_none()
+    if row is None:
         raise HTTPException(status_code=404, detail="Trace not found")
+    trace, agent_name = row
+    children = []
+    if include_children:
+        ownership = (
+            AgentTraceLog.tenant_id == trace.tenant_id,
+            AgentTraceLog.user_id == trace.user_id,
+            AgentTraceLog.session_id == trace.session_id,
+        )
+        if trace.root_trace_id is not None:
+            root = (await db.execute(trace_query.where(
+                AgentTraceLog.trace_id == trace.root_trace_id,
+                AgentTraceLog.root_trace_id.is_(None),
+                *ownership,
+            ))).one_or_none()
+            if root is not None:
+                trace, agent_name = root
+        if trace.root_trace_id is None:
+            children = (await db.execute(trace_query.where(
+                AgentTraceLog.root_trace_id == trace.trace_id, *ownership,
+            ).order_by(AgentTraceLog.created_at, AgentTraceLog.trace_id))).all()
+    trace_ids = [trace.trace_id, *(child.trace_id for child, _ in children)]
 
     llm_calls = (
         (await db.execute(
             select(LLMCallLog).where(
-                LLMCallLog.trace_id == trace_id, *_scope(user, LLMCallLog),
+                LLMCallLog.trace_id.in_(trace_ids), *_scope(user, LLMCallLog),
             )
             .order_by(LLMCallLog.call_order)
         )).scalars().all()
@@ -450,7 +413,7 @@ async def get_trace(
     tool_calls = (
         (await db.execute(
             select(ToolCallLog).where(
-                ToolCallLog.trace_id == trace_id, *_scope(user, ToolCallLog),
+                ToolCallLog.trace_id.in_(trace_ids), *_scope(user, ToolCallLog),
             )
             .order_by(ToolCallLog.call_order)
         )).scalars().all()
@@ -463,11 +426,16 @@ async def get_trace(
         d.pop("id", None)
         return d
 
-    return {
-        "trace": _as_dict(trace),
+    result = {
+        "trace": {**_as_dict(trace), "agent_name": agent_name},
         "llm_calls": [_as_dict(c) for c in llm_calls],
-        "tool_calls": [_as_dict(t) for t in tool_calls],
+        "tool_calls": [{**_as_dict(t), "span_id": t.id} for t in tool_calls],
     }
+    if include_children:
+        result["child_traces"] = [
+            {**_as_dict(child), "agent_name": name} for child, name in children
+        ]
+    return result
 
 
 # ---- Stats ----
@@ -676,6 +644,12 @@ async def get_tool_trend(
 ) -> list[ToolTrendPoint]:
     _require_admin(user)
     s, e = _resolve_range(window, start_at, end_at)
+    step = {
+        "minute": timedelta(minutes=1),
+        "hour": timedelta(hours=1),
+        "day": timedelta(days=1),
+    }[granularity]
+    _series_bounds(s, e, step)
     # Use UTC wall-clock buckets consistently with the overview endpoint.
     bucket = func.timezone(
         "UTC",
@@ -706,11 +680,6 @@ async def get_tool_trend(
     ).all()
     count_map = {r[0]: float(r[1]) for r in rows}
     error_map = {r[0]: float(r[2]) for r in rows}
-    step = {
-        "minute": timedelta(minutes=1),
-        "hour": timedelta(hours=1),
-        "day": timedelta(days=1),
-    }[granularity]
     count_series = _fill_series(s, e, step, count_map)
     error_series = _fill_series(s, e, step, error_map)
     return [
@@ -736,6 +705,7 @@ async def get_quality(
 ) -> QualityOut:
     _require_admin(user)
     start, end = _resolve_range(window, start_at, end_at)
+    _series_bounds(start, end, _bucket_step(window))
 
     row = (
         await db.execute(

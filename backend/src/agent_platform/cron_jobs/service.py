@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from uuid import NAMESPACE_URL, UUID, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import structlog
 from sqlalchemy import select, text
@@ -77,10 +77,13 @@ class CronJobService:
         tenant_id: UUID | None,
         *,
         actor_user_id: UUID,
+        lock: bool = False,
     ) -> CronJob | None:
         query = select(CronJob).where(CronJob.id == job_id, CronJob.user_id == actor_user_id)
         if tenant_id is not None:
             query = query.where(CronJob.tenant_id == tenant_id)
+        if lock:
+            query = query.with_for_update()
         result = await db.execute(query)
         job = result.scalar_one_or_none()
         if job is not None:
@@ -190,7 +193,7 @@ class CronJobService:
         *,
         actor_user_id: UUID,
     ) -> CronJob | None:
-        job = await CronJobService.get_job(db, job_id, tenant_id, actor_user_id=actor_user_id)
+        job = await CronJobService.get_job(db, job_id, tenant_id, actor_user_id=actor_user_id, lock=True)
         if not job:
             return None
 
@@ -202,6 +205,10 @@ class CronJobService:
         if cron_expr is not None:
             # A legacy unchanged string is not reinterpreted on unrelated edits.
             cron_expr = normalize_cron(cron_expr, legacy=cron_expr == job.cron_expr) if cron_expr else cron_expr
+        if ((cron_expr is not None and cron_expr != job.cron_expr)
+                or (run_at is not None and run_at != job.run_at)
+                or (is_active is not None and is_active != job.is_active)):
+            job.schedule_version = uuid4()
         if name is not None:
             job.name = name
         if agent_id is not None:
@@ -238,7 +245,7 @@ class CronJobService:
         *,
         actor_user_id: UUID,
     ) -> bool:
-        job = await CronJobService.get_job(db, job_id, tenant_id, actor_user_id=actor_user_id)
+        job = await CronJobService.get_job(db, job_id, tenant_id, actor_user_id=actor_user_id, lock=True)
         if not job:
             return False
         await db.delete(job)

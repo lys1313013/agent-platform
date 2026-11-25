@@ -214,3 +214,62 @@ async def test_openai_payload_keeps_clock_at_tail_and_stays_plain():
     assert body["messages"][0]["content"] == str(prompt)
     assert body["messages"][-1] == {"role": "user", "content": "[平台时间上下文] 现在"}
     assert "cache_control" not in json.dumps(body, ensure_ascii=False)
+
+
+@pytest.mark.parametrize("api", ["anthropic", "openai"])
+async def test_turn_only_context_survives_provider_transport_and_is_omitted_from_traces(api, monkeypatch):
+    from unittest.mock import Mock
+
+    from agent_platform.core.agent import AgentLoop
+    from agent_platform.llm import client as llm
+
+    captured = []
+    trace = Mock()
+    recorder = Mock()
+    monkeypatch.setattr(llm, "get_recorder", lambda: recorder)
+    monkeypatch.setattr("agent_platform.observation.get_current_observation", lambda: None)
+    hooks = Mock()
+    monkeypatch.setattr("agent_platform.core.agent.get_hook_manager", lambda: hooks)
+    openai_sse = ('data: {"id":"x","object":"chat.completion.chunk","created":1,"model":"gpt-5",'
+                  '"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\n'
+                  'data: [DONE]\n\n')
+
+    def handle(req):
+        captured.append(json.loads(req.content))
+        if captured[-1].get("stream"):
+            return httpx.Response(200, headers={"content-type": "text/event-stream"},
+                                  text=_SSE if api == "anthropic" else openai_sse)
+        return httpx.Response(200, json={"id": "x", "object": "chat.completion", "created": 1, "model": "gpt-5",
+                              "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"},
+                                           "finish_reason": "stop"}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        if api == "anthropic":
+            provider = _provider()
+            sdk = anthropic.AsyncAnthropic(api_key="test", http_client=http)
+        else:
+            provider = OpenAIProvider(model="gpt-5", base_url="https://api.openai.com/v1", api_key="test")
+            sdk = openai.AsyncOpenAI(api_key="test", base_url="https://api.openai.com/v1", http_client=http)
+        await provider.client.close()
+        provider.client = sdk
+        provider.langfuse_client = trace
+        loop = AgentLoop(provider=provider, tool_executor=Mock(), system_prompt="stable", execution_tenant_id=uuid4())
+        loop.execution_agent_id = uuid4()
+        for value in ("turn-only-secret-first", "turn-only-secret-second"):
+            events = [e async for e in loop.run("question", uuid4(), uuid4(), [], [], request_context=value)]
+            assert events[-1].final_output == "ok"
+            wire = captured[-1]["messages"]
+            assert [m["role"] for m in wire[-3:]] == ["user", "user", "user"]
+            assert "question" in str(wire[-3]["content"]) and wire[-2]["content"] == value
+            assert "turn-only-secret" not in wire[-1]["content"]
+            assert "turn-only-secret" not in str(trace.start_observation.call_args.kwargs["input"])
+            if api == "anthropic":
+                assert wire[-3]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+                assert "cache_control" not in wire[-2] and "cache_control" not in wire[-1]
+        if api == "openai":
+            result = await provider.complete([LLMMessage(role="system", content="stable"),
+                                              LLMMessage(role="user", content="question")])
+            assert result.content == "ok"
+            assert len({body["prompt_cache_key"] for body in captured}) == 1
+        assert "turn-only-secret" not in str(hooks.mock_calls)
+        assert "turn-only-secret" not in str(recorder.mock_calls)

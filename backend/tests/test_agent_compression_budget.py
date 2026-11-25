@@ -142,3 +142,37 @@ async def test_small_context_never_triggers_compaction(monkeypatch):
     assert events[-1].done is True
     fired = [call.args[0] for call in hooks.fire_nowait.call_args_list]
     assert "PreCompact" not in fired and "PostCompact" not in fired
+
+
+async def test_model_overflow_retries_the_step_without_replaying_a_tool(monkeypatch):
+    from agent_platform.llm import LLMMessage
+
+    monkeypatch.setattr(agent_module, "get_recorder", Mock(return_value=Mock()))
+    monkeypatch.setattr(agent_module, "get_hook_manager", Mock(return_value=Mock()))
+    monkeypatch.setattr(agent_module, "record_llm_usage", Mock())
+    requests = []
+
+    async def stream(messages, tools=None):
+        requests.append(messages)
+        if len(requests) == 1:
+            yield _tool_call_chunk(1)
+        elif len(requests) == 2:
+            raise ValueError("too many tokens")
+        else:
+            yield LLMChunk(type="text_delta", content="completed")
+        yield _done()
+
+    provider = MagicMock(model="test", stream=stream)
+    executor = MagicMock()
+    executor.execute = AsyncMock(return_value=ToolResult(
+        tool_call_id="call-1", name="lookup", arguments={}, output="actual result", success=True,
+    ))
+    loop = AgentLoop(provider, executor, execution_tenant_id=uuid.uuid4(), max_iterations=2, trust_level="auto_all")
+    loop.execution_agent_id = uuid.uuid4()
+    history = [LLMMessage(role="user", content=f"history {n}") for n in range(16)]
+    events = [event async for event in loop.run("do once", uuid.uuid4(), uuid.uuid4(), history, [])]
+    assert events[-1].final_output == "completed"
+    executor.execute.assert_awaited_once()
+    assert len(requests) == 3 and len(requests[-1]) < len(requests[-2])
+    assert any(m.tool_calls and m.tool_calls[0].id == "call-1" for m in requests[-1])
+    assert any(m.tool_call_id == "call-1" and m.content == "actual result" for m in requests[-1])

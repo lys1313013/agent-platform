@@ -1,3 +1,4 @@
+import { errorMessage, isFormValidationError } from '@/lib/errors';
 import { useState, useEffect, useCallback } from 'react';
 import {
   ApiOutlined,
@@ -88,8 +89,8 @@ export default function ModelManagementPage() {
       ]);
       setProviders(p);
       setModels(m);
-    } catch (err: any) {
-      message.error(`加载数据失败：${err.message}`);
+    } catch (err) {
+      message.error(`加载数据失败：${errorMessage(err)}`);
     } finally {
       setLoading(false);
     }
@@ -145,9 +146,9 @@ export default function ModelManagementPage() {
       }
       setProviderModalOpen(false);
       fetchData();
-    } catch (err: any) {
-      if (err?.errorFields) return;
-      message.error(err.message || '操作失败');
+    } catch (err) {
+      if (isFormValidationError(err)) return;
+      message.error(errorMessage(err, '操作失败'));
     } finally {
       setProviderSaving(false);
     }
@@ -159,8 +160,8 @@ export default function ModelManagementPage() {
       await adminApi.deleteProvider(id);
       message.success('供应商已删除');
       fetchData();
-    } catch (err: any) {
-      message.error(err.message || '删除失败');
+    } catch (err) {
+      message.error(errorMessage(err, '删除失败'));
     } finally {
       setDeletingProviderId(null);
     }
@@ -210,9 +211,9 @@ export default function ModelManagementPage() {
       }
       setModelModalOpen(false);
       fetchData();
-    } catch (err: any) {
-      if (err?.errorFields) return;
-      message.error(err.message || '操作失败');
+    } catch (err) {
+      if (isFormValidationError(err)) return;
+      message.error(errorMessage(err, '操作失败'));
     } finally {
       setModelSaving(false);
     }
@@ -224,8 +225,8 @@ export default function ModelManagementPage() {
       await adminApi.deleteModel(id);
       message.success('模型已删除');
       fetchData();
-    } catch (err: any) {
-      message.error(err.message || '删除失败');
+    } catch (err) {
+      message.error(errorMessage(err, '删除失败'));
     } finally {
       setDeletingModelId(null);
     }
@@ -237,8 +238,8 @@ export default function ModelManagementPage() {
       await adminApi.setDefaultModel(id);
       message.success('已设为默认模型');
       fetchData();
-    } catch (err: any) {
-      message.error(err.message || '操作失败');
+    } catch (err) {
+      message.error(errorMessage(err, '操作失败'));
     } finally {
       setDefaultingModelId(null);
     }
@@ -249,8 +250,8 @@ export default function ModelManagementPage() {
     try {
       await adminApi.updateModel(id, { is_active: active });
       fetchData();
-    } catch (err: any) {
-      message.error(err.message || '操作失败');
+    } catch (err) {
+      message.error(errorMessage(err, '操作失败'));
     } finally {
       setTogglingModelId(null);
     }
@@ -280,8 +281,8 @@ export default function ModelManagementPage() {
       if (newModels.length === 0) {
         message.info('没有发现新的模型，所有模型已导入。');
       }
-    } catch (err: any) {
-      message.error(`拉取模型失败：${err.message}`);
+    } catch (err) {
+      message.error(`拉取模型失败：${errorMessage(err)}`);
     } finally {
       setFetchLoading(false);
     }
@@ -298,8 +299,8 @@ export default function ModelManagementPage() {
       message.success(`已导入 ${created.length} 个模型`);
       setFetchModalProvider(null);
       fetchData();
-    } catch (err: any) {
-      message.error(`导入失败：${err.message}`);
+    } catch (err) {
+      message.error(`导入失败：${errorMessage(err)}`);
     } finally {
       setImportLoading(false);
     }

@@ -78,6 +78,14 @@ describe('stream API adapters', () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
+  it('returns acceptance only once the server accepts the task-start request', async () => {
+    vi.mocked(fetch).mockRejectedValueOnce(new TypeError('offline')).mockResolvedValueOnce(response(''));
+    const failed = chatApi.stream({ message: 'first' }, vi.fn());
+    expect(await failed.accepted).toBe(false);
+    const received = chatApi.stream({ message: 'retry' }, vi.fn());
+    expect(await received.accepted).toBe(true);
+  });
+
   it('reports a failed live connection without replaying the task-start POST', async () => {
     let source!: ReadableStreamDefaultController<Uint8Array>;
     vi.mocked(fetch).mockResolvedValue(new Response(new ReadableStream({ start(controller) { source = controller; } })));

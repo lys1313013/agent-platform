@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { getAuthGeneration, isCurrentAuthGeneration, onAuthSessionChange } from '@/lib/authSession';
 import { petsApi } from '@/lib/api';
+import { useChatStore } from './chatStore';
 import type { PetActiveTask, PetMood, PetPackage, UserPet } from '@/lib/types';
 
 const ENABLED_KEY = 'pet-widget-enabled';
@@ -65,6 +66,13 @@ export interface PetTask {
   agentId?: string;
   /** 远端任务（渠道触发，轮询同步）；本地任务来自本页 SSE */
   remote?: boolean;
+  /** 会话实际所属工作区；切换显示范围不删除正在运行的任务。 */
+  workspaceId?: string | null;
+}
+
+export function tasksForWorkspace(tasks: Record<string, PetTask>, workspaceId: string | null): Record<string, PetTask> {
+  if (!workspaceId) return tasks;
+  return Object.fromEntries(Object.entries(tasks).filter(([, task]) => task.workspaceId === workspaceId));
 }
 
 interface PetState {
@@ -84,11 +92,9 @@ interface PetState {
   setEnabled: (enabled: boolean) => void;
   setSize: (size: number) => void;
   /** 开始一个任务（发送消息时调用），宠物旁展示任务条 */
-  startTask: (sessionId: string, label: string, agentId?: string) => void;
+  startTask: (sessionId: string, label: string, agentId?: string, workspaceId?: string | null) => void;
   /** 手动关闭任务条（用户点 × 移除，不走超时） */
   removeTask: (sessionId: string) => void;
-  /** 清空任务条（切换工作区时避免跨空间残留） */
-  clearTasks: () => void;
   /** SSE 事件驱动的状态机入口（ChatPage / AgentChatPage 每个事件调用一次） */
   reportEvent: (eventType: string, opts?: {
     sessionId?: string;
@@ -96,9 +102,9 @@ interface PetState {
     petAction?: { name?: string; row?: number };
   }) => void;
   /** 轮询同步渠道触发的在跑任务（全量替换 remote 条目） */
-  syncRemoteTasks: (list: PetActiveTask[]) => void;
+  syncRemoteTasks: (list: PetActiveTask[], workspaceId?: string | null) => void;
   /** SSE 事件处理：snapshot / started / tool / finished */
-  applyRemoteTaskEvent: (ev: Record<string, unknown>) => void;
+  applyRemoteTaskEvent: (ev: Record<string, unknown>, workspaceId?: string | null) => void;
   /** 播放指定精灵图行动画 + 后端 interact 互动上报（刷新实例数据） */
   playRow: (row: number, opts?: { durationMs?: number; fps?: number }) => Promise<void>;
   /** 按动作名播放动画（不调 interact；智能体触发的情绪动作走这里） */
@@ -173,6 +179,7 @@ function mergeIncoming(tasks: Record<string, PetTask>, t: PetActiveTask): Record
     source: t.source ?? existing?.source,
     chatKey: t.chat_key || existing?.chatKey || undefined,
     agentId: t.agent_id || existing?.agentId || undefined,
+    workspaceId: t.workspace_id || existing?.workspaceId || null,
     remote: true,
     status: undefined,
     doneAt: undefined,
@@ -227,8 +234,10 @@ export const usePetStore = create<PetState>((set, get) => ({
     set({ size });
   },
 
-  startTask: (sessionId, label, agentId) => {
+  startTask: (sessionId, label, agentId, workspaceId) => {
     const trimmed = label.trim().replace(/\s+/g, ' ');
+    const chat = useChatStore.getState();
+    const session = chat.sessions.find((s) => s.id === sessionId);
     if (resetTimer) { clearTimeout(resetTimer); resetTimer = null; }
     set((s) => ({
       tasks: {
@@ -237,6 +246,7 @@ export const usePetStore = create<PetState>((set, get) => ({
           label: trimmed ? trimmed.slice(0, 30) : null,
           tool: null,
           agentId: agentId ?? undefined,
+          workspaceId: workspaceId !== undefined ? workspaceId : session?.workspace_id ?? chat.selectedWorkspaceId,
           updatedAt: Date.now(),
         },
       },
@@ -251,8 +261,6 @@ export const usePetStore = create<PetState>((set, get) => ({
       return { tasks: next };
     });
   },
-
-  clearTasks: () => set({ tasks: {} }),
 
   reportEvent: (eventType, opts) => {
     if (!get().activePet) return;
@@ -313,7 +321,7 @@ export const usePetStore = create<PetState>((set, get) => ({
     }
   },
 
-  syncRemoteTasks: (list) => {
+  syncRemoteTasks: (list, workspaceId) => {
     const now = Date.now();
     // 同一渠道会话（chat_key）只保留最新一条（/new 会换 session_id，但用户视角是同一会话）
     const latestByChat = new Map<string, PetActiveTask>();
@@ -330,7 +338,7 @@ export const usePetStore = create<PetState>((set, get) => ({
     const newlyDone: string[] = [];
     let next: Record<string, PetTask> = {};
     for (const [sid, t] of Object.entries(current)) {
-      if (!t.remote) {
+      if (!t.remote || (workspaceId && t.workspaceId !== workspaceId)) {
         next[sid] = t;
         continue;
       }
@@ -352,11 +360,11 @@ export const usePetStore = create<PetState>((set, get) => ({
     for (const sid of newlyDone) scheduleRemoval(sid, now);
   },
 
-  applyRemoteTaskEvent: (ev) => {
+  applyRemoteTaskEvent: (ev, workspaceId) => {
     if (!get().activePet) return;
     const type = ev.type as string;
     if (type === 'pet_task_snapshot') {
-      get().syncRemoteTasks((ev.tasks as PetActiveTask[]) || []);
+      get().syncRemoteTasks((ev.tasks as PetActiveTask[]) || [], workspaceId);
       return;
     }
     if (type === 'pet_task_started') {

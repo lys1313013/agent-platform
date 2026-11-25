@@ -103,6 +103,39 @@ class ObjectStorage:
             resp.close()
             resp.release_conn()
 
+    def get_optional(self, key: str) -> bytes | None:
+        try:
+            return self.get(key)
+        except S3Error as exc:
+            if exc.code in {"NoSuchKey", "NoSuchObject", "NotFound"}:
+                return None
+            raise
+
+    def get_version(self, key: str, etag: str) -> bytes:
+        """Read exactly the object observed by the sync inventory."""
+        response = self._client.get_object(
+            self._bucket, key, request_headers={"If-Match": f'"{etag}"'},
+        )
+        try:
+            return response.read()
+        finally:
+            response.close()
+            response.release_conn()
+
+    def put_version(self, key: str, data: bytes, content_type: str, etag: str | None) -> str:
+        """Compare and swap an S3 object, including first creation.
+
+        minio-py's streaming put_object does not expose conditional headers.
+        Workspace-size limits fit S3's single-request PutObject.
+        """
+        condition = {"If-Match": f'"{etag}"'} if etag is not None else {"If-None-Match": "*"}
+        result = self._client._put_object(
+            self._bucket, key, data, headers={"Content-Type": content_type, **condition},
+        )
+        if not result.etag:
+            raise OSError("Object store did not return an ETag")
+        return result.etag
+
     def delete(self, key: str) -> None:
         """Delete a single object."""
         try:
@@ -120,6 +153,10 @@ class ObjectStorage:
             return False
         except Exception:
             return False
+
+    def head(self, key: str) -> ObjectInfo:
+        obj = self._client.stat_object(self._bucket, key)
+        return ObjectInfo(obj.object_name, obj.size, obj.etag, obj.content_type or "")
 
     def stat(self, key: str) -> ObjectInfo | None:
         """Get object metadata without downloading content."""

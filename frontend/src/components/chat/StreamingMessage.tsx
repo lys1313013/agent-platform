@@ -9,7 +9,8 @@ import CodeBlock from './CodeBlock';
 import ToolCallCard from './ToolCallCard';
 import DelegationCard from './DelegationCard';
 import { ConfirmationCard } from '../confirmation';
-import FileChangeList, { resolveToolFileChange } from './FileChangeList';
+import { resolveToolFileChange } from './artifacts';
+import FileChangeList from './FileChangeList';
 import { useReasoningVisibility, type ReasoningVisibility } from './useReasoningVisibility';
 
 interface Props {

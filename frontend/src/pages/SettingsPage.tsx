@@ -1,3 +1,4 @@
+import { errorMessage } from '@/lib/errors';
 import { useState, useEffect } from 'react';
 import {
   SettingOutlined,
@@ -22,6 +23,8 @@ import {
 } from 'antd';
 import type { TabsProps } from 'antd';
 import { settingsApi } from '@/lib/api';
+import { useAuthStore } from '@/stores/authStore';
+import { useNavigate } from 'react-router-dom';
 
 const { Text } = Typography;
 
@@ -73,6 +76,7 @@ function ProfileSettings() {
   const { message } = App.useApp();
   const [profileForm] = Form.useForm();
   const [passwordForm] = Form.useForm();
+  const navigate = useNavigate();
   const [profileLoading, setProfileLoading] = useState(false);
   const [passwordLoading, setPasswordLoading] = useState(false);
   const [initLoading, setInitLoading] = useState(true);
@@ -87,9 +91,9 @@ function ProfileSettings() {
           displayName: data.display_name,
         });
       })
-      .catch((err) => message.error(`加载个人信息失败：${err.message}`))
+      .catch((err) => message.error(`加载个人信息失败：${errorMessage(err)}`))
       .finally(() => setInitLoading(false));
-  }, [profileForm]);
+  }, [profileForm, message]);
 
   const handleProfileSave = async (values: { username?: string; email?: string; displayName?: string }) => {
     setProfileLoading(true);
@@ -100,8 +104,8 @@ function ProfileSettings() {
         display_name: values.displayName,
       });
       message.success('个人信息已保存');
-    } catch (err: any) {
-      message.error(err.message || '保存失败');
+    } catch (err) {
+      message.error(errorMessage(err, '保存失败'));
     } finally {
       setProfileLoading(false);
     }
@@ -118,10 +122,11 @@ function ProfileSettings() {
         current_password: values.currentPassword,
         new_password: values.newPassword,
       });
-      message.success('密码已更新');
       passwordForm.resetFields();
-    } catch (err: any) {
-      message.error(err.message || '更新密码失败');
+      void useAuthStore.getState().logout();
+      navigate('/login', { replace: true, state: { passwordChanged: true } });
+    } catch (err) {
+      message.error(errorMessage(err, '更新密码失败'));
     } finally {
       setPasswordLoading(false);
     }
@@ -205,17 +210,17 @@ function SecuritySettings() {
       .then((data) => {
         form.setFieldsValue({ trust: data.trust_level });
       })
-      .catch((err) => message.error(`加载安全设置失败：${err.message}`))
+      .catch((err) => message.error(`加载安全设置失败：${errorMessage(err)}`))
       .finally(() => setInitLoading(false));
-  }, [form]);
+  }, [form, message]);
 
   const handleSave = async (values: { trust: string }) => {
     setLoading(true);
     try {
       await settingsApi.updateSecurityConfig(values.trust);
       message.success('安全设置已保存');
-    } catch (err: any) {
-      message.error(err.message || '保存失败');
+    } catch (err) {
+      message.error(errorMessage(err, '保存失败'));
     } finally {
       setLoading(false);
     }
@@ -290,9 +295,9 @@ function MemorySettings() {
           compressThreshold: data.compress_threshold,
         });
       })
-      .catch((err) => message.error(`加载记忆配置失败：${err.message}`))
+      .catch((err) => message.error(`加载记忆配置失败：${errorMessage(err)}`))
       .finally(() => setInitLoading(false));
-  }, [configForm]);
+  }, [configForm, message]);
 
   const handleConfigSave = async (values: { topK: number; compressThreshold: number }) => {
     setConfigLoading(true);
@@ -302,8 +307,8 @@ function MemorySettings() {
         compress_threshold: values.compressThreshold,
       });
       message.success('记忆配置已保存');
-    } catch (err: any) {
-      message.error(err.message || '保存失败');
+    } catch (err) {
+      message.error(errorMessage(err, '保存失败'));
     } finally {
       setConfigLoading(false);
     }

@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { getAuthGeneration, isCurrentAuthGeneration, onAuthSessionChange } from '@/lib/authSession';
-import { tokenStorage, getUserRole } from '@/lib/auth';
+import { tokenStorage, getUserRole, rememberTenant } from '@/lib/auth';
 import { authApi, settingsApi } from '@/lib/api';
 
 interface AuthState {
@@ -109,16 +109,18 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   loadProfile: async () => {
     const generation = getAuthGeneration();
+    set({ error: null });
     try {
       const profile = await settingsApi.getProfile();
       if (!isCurrentAuthGeneration(generation)) return;
+      rememberTenant(profile.tenant_id);
       set({
         username: profile.display_name || profile.username,
         tenantId: profile.tenant_id,
         tenantName: profile.tenant_name,
       });
     } catch {
-      /* ignore */
+      if (isCurrentAuthGeneration(generation)) set({ error: '加载账号信息失败' });
     }
   },
 }));

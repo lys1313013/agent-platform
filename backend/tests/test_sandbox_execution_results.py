@@ -18,7 +18,7 @@ def sandbox_execution(tmp_path, monkeypatch):
     monkeypatch.setattr("agent_platform.tools.executor.get_hook_manager", lambda: hooks)
     monkeypatch.setattr("agent_platform.tools.executor.get_recorder", lambda: recorder)
 
-    async def execute(_sandbox, command, timeout=None):
+    async def execute(_sandbox, command, timeout=None, *, cleanup_file=None):
         command = command.replace("/tmp/_agent_code", str(tmp_path / "code"))
         command = command.replace("/workspace/project", str(tmp_path / "project"))
         if command.startswith("python3 "):
@@ -95,6 +95,15 @@ async def test_run_code_success(sandbox_execution):
     )
     assert result.success and result.error is None
     assert result.output == "hello\n"
+
+
+async def test_concurrent_programs_keep_private_source_and_results(sandbox_execution, tmp_path):
+    codes = [f"import time; time.sleep(0.05); print({i})" for i in range(6)]
+    results = await asyncio.gather(*(
+        execute_tool(sandbox_execution, "run_code", {"code": code}) for code in codes
+    ))
+    assert [result.output.strip() for result in results] == list(map(str, range(6)))
+    assert not list(tmp_path.glob("code_*.py"))
 
 
 async def test_run_code_does_not_execute_after_failed_upload(sandbox_execution):

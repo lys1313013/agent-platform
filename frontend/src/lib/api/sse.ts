@@ -86,22 +86,28 @@ export async function readJsonEvents<T>(
   }
 }
 
+export type EventStreamController = AbortController & { accepted: Promise<boolean> };
+
 export function openJsonEventStream(
   path: string,
   onEvent: (event: StreamEvent) => void,
   options: RequestInit = {},
   transportError: 'error' | 'transport_error' = 'transport_error',
-): AbortController {
-  const controller = new AbortController();
+): EventStreamController {
+  let acknowledge!: (accepted: boolean) => void;
+  const accepted = new Promise<boolean>(resolve => { acknowledge = resolve; });
+  const controller = Object.assign(new AbortController(), { accepted });
   const signal = AbortSignal.any([controller.signal, getAuthSignal(), ...(options.signal ? [options.signal] : [])]);
   const receive = scopeAuthCallback((event: StreamEvent) => {
     if (!signal.aborted) onEvent(event);
   });
   void (async () => {
     const response = await apiFetch(path, { ...options, signal }, { authRetry: 'never' });
+    acknowledge(true);
     await readJsonEvents(response, receive, signal);
     receive({ type: 'closed' });
   })().catch((error: unknown) => {
+    acknowledge(false);
     if (error instanceof DOMException && error.name === 'AbortError') return;
     const message = error instanceof Error ? error.message : '网络请求失败';
     receive({ type: error instanceof ApiError ? 'error' : transportError, message });

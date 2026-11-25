@@ -6,7 +6,7 @@ import { memoriesApi } from '@/lib/api';
 import type { MemoryHistory, MemoryOrganizePreview } from '@/lib/types';
 import MemoryOrganizationModal from './MemoryOrganizationModal';
 import MemoryHistoryDrawer from './MemoryHistoryDrawer';
-import { sourceIds } from './MemorySources';
+import { sourceIds } from './sourceIds';
 
 vi.mock('@/lib/api', () => ({ memoriesApi: {
   previewOrganization: vi.fn(), applyOrganization: vi.fn(), versions: vi.fn(), restoreVersion: vi.fn(),

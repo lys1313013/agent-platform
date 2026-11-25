@@ -25,6 +25,24 @@ class AgentRuntimeSource(Protocol):
 
 
 @dataclass(frozen=True)
+class PublishedBindings:
+    """Resource identifiers fixed at publication. Visibility is checked at execution."""
+
+    skill_ids: tuple[UUID, ...]
+    child_ids: tuple[UUID, ...]
+    knowledge_base_ids: tuple[UUID, ...]
+    graph_knowledge_base_ids: tuple[UUID, ...] | None
+
+    @classmethod
+    def from_snapshot(cls, snapshot: Mapping[str, Any]) -> PublishedBindings:
+        def ids(key: str) -> tuple[UUID, ...]:
+            return tuple(UUID(str(value)) for value in snapshot.get(key, []))
+        # Versions published before graph bindings were recorded used the live graph relation.
+        graphs = ids("graph_knowledge_base_ids") if "graph_knowledge_base_ids" in snapshot else None
+        return cls(ids("skill_ids"), ids("child_ids"), ids("knowledge_base_ids"), graphs)
+
+
+@dataclass(frozen=True)
 class AgentRuntimeConfig:
     """Model and loop settings; tenant authorization belongs to the execution entry."""
 

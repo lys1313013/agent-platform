@@ -204,9 +204,10 @@ def _make_transport(pipeline, channel_key: str) -> WeComWebhookTransport:
 
 
 def _pipeline():
-    pipeline = MagicMock()
+    pipeline = MagicMock(receive=AsyncMock())
+    pipeline.inbox.check_available = AsyncMock()
     pipeline.channel.id = uuid4()
-    pipeline.submit.return_value = None
+    pipeline.receive.return_value = None
     return pipeline
 
 
@@ -279,8 +280,8 @@ async def test_webhook_post_submits_event() -> None:
         )
     assert resp.status_code == 200
     assert resp.text == "success"
-    pipeline.submit.assert_called_once()
-    ev = pipeline.submit.call_args[0][0]
+    pipeline.receive.assert_called_once()
+    ev = pipeline.receive.call_args[0][0]
     assert isinstance(ev, InboundEvent)
     assert ev.text == "你好"
     assert ev.external_id == "zhangsan"
@@ -302,7 +303,7 @@ async def test_webhook_post_rejects_bad_signature() -> None:
             headers={"Content-Type": "application/xml"},
         )
     assert resp.status_code == 401
-    pipeline.submit.assert_not_called()
+    pipeline.receive.assert_not_called()
 
 
 async def test_webhook_unknown_channel_returns_404() -> None:

@@ -4,12 +4,16 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sqlalchemy import select
-
+from agent_platform.core.session_access import visible_sessions
 from agent_platform.db import Session
 
 from ..models import CommandArg, CommandContext, CommandResult
 from ..registry import command
+
+
+def _command_sessions(ctx: CommandContext):
+    return visible_sessions(UUID(ctx.user_id), ctx.tenant_id, command_scope=True,
+                            allow_private=ctx.allow_private_sessions)
 
 
 @command("new", aliases=["reset", "clear"], group="会话", desc="清空当前上下文，开启新会话")
@@ -28,8 +32,7 @@ async def cmd_new(ctx: CommandContext) -> CommandResult:
 @command("sessions", group="会话", desc="列出我的历史会话")
 async def cmd_sessions(ctx: CommandContext) -> CommandResult:
     result = await ctx.db.execute(
-        select(Session)
-        .where(Session.user_id == UUID(ctx.user_id))
+        _command_sessions(ctx)
         .order_by(Session.updated_at.desc())
         .limit(20)
     )
@@ -70,10 +73,15 @@ async def cmd_rename(ctx: CommandContext) -> CommandResult:
     args=[CommandArg(name="id", kind="uuid", required=True, hint="会话 ID")],
 )
 async def cmd_delete(ctx: CommandContext) -> CommandResult:
-    session = await ctx.db.get(Session, UUID(ctx.args["id"]))
-    if session is None or session.user_id != UUID(ctx.user_id):
-        return CommandResult(content="会话不存在。")
-    await ctx.db.delete(session)
+    from fastapi import HTTPException
+
+    from agent_platform.core.session_access import remove_session_history
+
+    try:
+        await remove_session_history(ctx.db, UUID(ctx.args["id"]), UUID(ctx.user_id), delete_session=True,
+                                     tenant_id=ctx.tenant_id)
+    except HTTPException as error:
+        return CommandResult(content=str(error.detail))
     return CommandResult(
         content=f"✅ 已删除会话 `{ctx.args['id']}`。",
         data={"deleted_session_id": ctx.args["id"]},
@@ -98,9 +106,9 @@ async def _switch_to(ctx: CommandContext, session: Session) -> CommandResult:
     args=[CommandArg(name="id", kind="uuid", required=True, hint="会话 ID")],
 )
 async def cmd_switch(ctx: CommandContext) -> CommandResult:
-    session = await ctx.db.get(Session, UUID(ctx.args["id"]))
-    if session is None or session.user_id != UUID(ctx.user_id):
-        return CommandResult(content="会话不存在。")
+    session = await ctx.db.scalar(_command_sessions(ctx).where(Session.id == UUID(ctx.args["id"])))
+    if session is None:
+        return CommandResult(content="无法切换到该会话。会话不存在或当前无权访问。")
     return await _switch_to(ctx, session)
 
 
@@ -114,8 +122,7 @@ async def cmd_resume(ctx: CommandContext) -> CommandResult:
     if ctx.args.get("id"):
         return await cmd_switch(ctx)
     result = await ctx.db.execute(
-        select(Session)
-        .where(Session.user_id == UUID(ctx.user_id))
+        _command_sessions(ctx)
         .order_by(Session.updated_at.desc())
         .limit(20)
     )

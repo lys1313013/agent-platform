@@ -8,6 +8,7 @@ from uuid import UUID
 import structlog
 from sqlalchemy import select
 
+from agent_platform.core.credentials import decrypt_fields
 from agent_platform.db.models import RemoteTool
 from agent_platform.tools.registry import Tool, ToolRegistry
 
@@ -46,9 +47,9 @@ class RemoteToolConfig:
             method=tool.method,
             url_template=tool.url_template,
             parameters_schema=tool.parameters_schema or {},
-            headers=tool.headers,
+            headers=decrypt_fields(tool.headers),
             auth_type=tool.auth_type or "none",
-            auth_config=tool.auth_config,
+            auth_config=decrypt_fields(tool.auth_config),
             query_params=tool.query_params,
             body_template=tool.body_template,
             response_extract=tool.response_extract,
@@ -74,7 +75,11 @@ class RemoteToolManager:
                 tools = result.scalars().all()
 
             for tool in tools:
-                config = RemoteToolConfig.from_db(tool)
+                try:
+                    config = RemoteToolConfig.from_db(tool)
+                except ValueError:
+                    logger.warning("remote_tool_credentials_unavailable", tool_id=str(tool.id))
+                    continue
                 await self._register(config)
 
             logger.info("remote_tools_initialized", count=len(self._tools))
@@ -83,6 +88,8 @@ class RemoteToolManager:
 
     async def _register(self, config: RemoteToolConfig) -> None:
         """Register a remote tool into the ToolRegistry and internal map."""
+        if not config.is_active:
+            return
         existing = self._registry.get(config.name)
         if existing is not None and config.name not in self._tools:
             # Never let a stored remote tool shadow a built-in (or another
@@ -108,7 +115,8 @@ class RemoteToolManager:
 
     async def _unregister(self, name: str) -> None:
         """Remove a remote tool from the ToolRegistry and internal map."""
-        self._tools.pop(name, None)
+        if self._tools.pop(name, None) is None:
+            return
         # Remove from registry
         if name in self._registry._tools:
             del self._registry._tools[name]

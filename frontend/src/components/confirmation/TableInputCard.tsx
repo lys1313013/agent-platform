@@ -26,7 +26,7 @@ function isEmpty(value: unknown): boolean {
 }
 
 export default function TableInputCard({ schema, onSubmit }: Props) {
-  const columns = schema.columns || [];
+  const columns = useMemo(() => schema.columns || [], [schema.columns]);
   const minRows = schema.min_rows ?? 1;
   const maxRows = schema.max_rows;
   const allowAdd = schema.allow_add_row ?? true;

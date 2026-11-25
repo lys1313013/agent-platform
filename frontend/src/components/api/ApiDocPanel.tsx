@@ -1,3 +1,4 @@
+import { errorMessage } from '@/lib/errors';
 import { useState, useEffect, useCallback } from 'react';
 import {
   ApiOutlined,
@@ -58,8 +59,8 @@ export default function ApiDocPanel({ agentId, onClose, embedded }: Props) {
       ]);
       setDoc(d);
       setVersions(v);
-    } catch (err: any) {
-      message.error(`加载 API 文档失败: ${err.message}`);
+    } catch (err) {
+      message.error(`加载 API 文档失败: ${errorMessage(err)}`);
     } finally {
       setLoading(false);
     }
@@ -390,7 +391,7 @@ console.log(data.markdown_response);`;
                 <td className="px-2 py-1 font-mono">variables</td>
                 <td className="px-2 py-1">object</td>
                 <td className="px-2 py-1"><Tag className="text-[10px]">可选</Tag></td>
-                <td className="px-2 py-1">初始变量键值对</td>
+                <td className="px-2 py-1">仅供本轮模型使用的 JSON 业务上下文，最多 32 KiB。后续调用需要时请再次传入。</td>
               </tr>
               <tr className="border-t border-border/30">
                 <td className="px-2 py-1 font-mono">session_rid</td>

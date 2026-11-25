@@ -1,3 +1,4 @@
+import { errorMessage } from '@/lib/errors';
 import { useChatDraft } from '@/hooks/useChatDraft';
 import LocalBrowserControl from './LocalBrowserControl';
 import { localBrowserApi, type BrowserSelection, type BrowserAuthorization } from '@/lib/api/localBrowser';
@@ -29,7 +30,7 @@ interface StarterPrompt {
 export interface ChatInputProps {
   draftScope?: string;
   browserAvailable?: boolean;
-  onSend: (text: string, attachments: ChatAttachment[], fileAttachments?: FileAttachmentRef[], browser?: BrowserAuthorization) => void | boolean | Promise<void | boolean>;
+  onSend: (text: string, attachments: ChatAttachment[], fileAttachments?: FileAttachmentRef[], browser?: BrowserAuthorization, onSessionCreated?: (id: string) => void) => void | boolean | Promise<void | boolean>;
   onStop?: () => void;
   disabled?: boolean;
   isStreaming?: boolean;
@@ -86,7 +87,7 @@ export default function ChatInput({ draftScope, browserAvailable, onSend, onStop
   const [isDragging, setIsDragging] = useState(false);
   const [commandIndex, setCommandIndex] = useState(0);
   const [commandDismissed, setCommandDismissed] = useState(false);
-  const textareaRef = useRef<any>(null);
+  const textareaRef = useRef<React.ElementRef<typeof Input.TextArea>>(null);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
   const { message } = App.useApp();
   const { workspaces, selectedWorkspaceId, isWorkspacesLoading, setSelectedWorkspace, loadWorkspaces } = useChatStore();
@@ -171,8 +172,8 @@ export default function ChatInput({ draftScope, browserAvailable, onSend, onStop
         setPending(prev => prev.map(p => p.localId === localId ? { ...p, thumb } : p));
         const attachment = await chatApi.uploadAttachment(file, sessionId);
         setPending((prev) => prev.map((p) => (p.localId === localId ? { ...p, status: 'done', attachment } : p)));
-      } catch (err: any) {
-        const errMsg = err?.message || '上传失败';
+      } catch (err) {
+        const errMsg = errorMessage(err, '上传失败');
         setPending((prev) => prev.map((p) => (p.localId === localId ? { ...p, status: 'error', error: errMsg } : p)));
         message.error(`${file.name}: ${errMsg}`);
       }
@@ -213,8 +214,8 @@ export default function ChatInput({ draftScope, browserAvailable, onSend, onStop
       try {
         const fileRef = await chatApi.uploadFile(file, effectiveSessionId);
         setPendingFiles((prev) => prev.map((p) => (p.localId === localId ? { ...p, status: 'done', fileRef } : p)));
-      } catch (err: any) {
-        const errMsg = err?.message || '上传失败';
+      } catch (err) {
+        const errMsg = errorMessage(err, '上传失败');
         setPendingFiles((prev) => prev.map((p) => (p.localId === localId ? { ...p, status: 'error', error: errMsg } : p)));
         message.error(`${file.name}: ${errMsg}`);
       }
@@ -318,7 +319,9 @@ export default function ChatInput({ draftScope, browserAvailable, onSend, onStop
         setBrowserRevision(v => v + 1);
       }
       const files = fileAttachments.length > 0 ? fileAttachments : undefined;
-      const accepted = await onSend(text, attachments, files, browser);
+      const accepted = !sessionId && onEnsureSession
+        ? await onSend(text, attachments, files, browser, draft.promote)
+        : await onSend(text, attachments, files, browser);
       if (accepted === false) return;
       setInput('');
       setPending([]);

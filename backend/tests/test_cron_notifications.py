@@ -63,6 +63,7 @@ def execution(monkeypatch):
                 yield f"text_delta:{d.output}"
             if d.error:
                 raise d.error
+            self.stop_reason = getattr(d, 'stop_reason', None)
             yield AgentStep(step=1, done=True, final_output=d.output)
 
     async def build_loop(*args, **kwargs):
@@ -528,3 +529,10 @@ async def test_cron_unavailable_override_fails_without_fallback(execution, monke
     assert d.run.session_id is None
     assert d.options is None
     d.pushed.assert_not_awaited()
+
+async def test_iteration_limit_is_failed_without_delivery(execution):
+    execution.stop_reason = "max_iterations"
+    await execute(execution)
+    assert execution.run.status == "failed"
+    assert execution.run.delivery_reason == "execution_failed"
+    execution.pushed.assert_not_awaited()

@@ -22,6 +22,7 @@ from agent_platform.core.chat_runs import shutdown as shutdown_chat_runs
 from agent_platform.core.task_events import broker
 from agent_platform.cron_jobs.scheduler import get_global_scheduler, set_global_scheduler
 from agent_platform.db.connection import close_db, get_session_factory, init_db
+from agent_platform.graph_knowledge.extraction import start_workers as start_graph_workers
 from agent_platform.hooks import get_hook_manager
 from agent_platform.interface.bootstrap import (
     connect_mcp_servers,
@@ -234,6 +235,7 @@ async def lifespan(app: FastAPI):
         hooks.start(sandbox)
         app.state.hook_manager = hooks
         owned_state.append(("hook_manager", hooks))
+        own(runs, "graph_extraction", start_graph_workers(factory))
         own(runs, "background_tasks", shutdown_background_tasks)
         own(runs, "rooms", shutdown_rooms)
         own(runs, "chat_runs", shutdown_chat_runs)

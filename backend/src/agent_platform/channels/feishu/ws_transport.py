@@ -234,7 +234,7 @@ class FeishuWebSocketTransport(Transport):
             else:
                 inbound = None
             if inbound is not None:
-                self.pipeline.submit(inbound)
+                await self.pipeline.receive(inbound)
         except Exception:
             logger.exception("feishu_ws_event_handle_failed")
             code = 500

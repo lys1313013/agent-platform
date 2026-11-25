@@ -33,7 +33,7 @@ export default function AgentChatPage() {
   // onDone 需要 flushNext，但 useChatStream 初始化早于 useMessageQueue —— 用 ref 打破循环依赖
   const flushNextRef = useRef<() => void>(() => {});
 
-  const { run, stopping, resume, streaming, error, setError, abortRef, turnSessionIdRef, beginTurn, interrupt, handleEvent } =
+  const { run, stopping, resume, streaming, error, setError, abortRef, turnSessionIdRef, beginTurn, interrupt } =
     useChatStream({
       onEvent: (event) => {
         // ui_* 页内操作事件统一进全局 store（runner 在 AppLayout 执行）
@@ -62,7 +62,7 @@ export default function AgentChatPage() {
 
   // Codex-style message queue: while streaming, sent messages are queued and
   // flushed one by one as each turn completes.
-  const handleSendRef = useRef<(content: string, attachments?: ChatAttachment[], fileAttachments?: FileAttachmentRef[]) => Promise<void> | void>();
+  const handleSendRef = useRef<(content: string, attachments?: ChatAttachment[], fileAttachments?: FileAttachmentRef[]) => Promise<void | boolean> | void>();
   const interruptStream = useCallback(() => {
     const stopped = interrupt();
     usePetStore.getState().reportEvent('interrupt', {
@@ -125,7 +125,7 @@ export default function AgentChatPage() {
   }, [agentId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleSend = useCallback(
-    async (content: string, attachments: ChatAttachment[] = [], fileAttachments?: FileAttachmentRef[], browser?: BrowserAuthorization) => {
+    async (content: string, attachments: ChatAttachment[] = [], fileAttachments?: FileAttachmentRef[], browser?: BrowserAuthorization, onSessionCreated?: (id: string) => void) => {
       let sessionId = browser?.sessionId || activeSessionId;
 
       // Create a new session if none is active
@@ -134,6 +134,7 @@ export default function AgentChatPage() {
         const title = content.slice(0, 100) || (hasFiles ? '文件消息' : '新对话');
         sessionId = await createSession(title, agentId);
         if (sessionId) {
+          onSessionCreated?.(sessionId);
           navigate(`/agents/${agentId}/chat/${sessionId}`, { replace: true });
         }
       } else if (content.trim()) {
@@ -149,15 +150,6 @@ export default function AgentChatPage() {
         return;
       }
 
-      // Add user message to local store immediately
-      addMessage(sessionId, {
-        id: `msg-user-${Date.now()}`,
-        role: 'user',
-        content,
-        attachments: attachments.length > 0 ? attachments : null,
-        file_attachments: fileAttachments && fileAttachments.length > 0 ? fileAttachments : null,
-        created_at: new Date().toISOString(),
-      });
 
       const consume = beginTurn(sessionId);
       usePetStore.getState().startTask(sessionId, content || '文件任务', agentId);
@@ -176,8 +168,18 @@ export default function AgentChatPage() {
       );
 
       abortRef.current = controller;
+      if (!await controller.accepted) return false;
+      addMessage(sessionId, {
+        id: `msg-user-${Date.now()}`,
+        role: 'user',
+        content,
+        attachments: attachments.length > 0 ? attachments : null,
+        file_attachments: fileAttachments && fileAttachments.length > 0 ? fileAttachments : null,
+        created_at: new Date().toISOString(),
+      });
+      return true;
     },
-    [activeSessionId, sessions, agentId, navigate, createSession, renameSession, addMessage, message, beginTurn, handleEvent, abortRef],
+    [activeSessionId, sessions, agentId, navigate, createSession, renameSession, addMessage, message, beginTurn, abortRef],
   );
 
   handleSendRef.current = handleSend;
@@ -225,13 +227,13 @@ export default function AgentChatPage() {
     return newId || null;
   }, [activeSessionId, createSession, agentId]);
 
-  const handleEditResend = (content: string) => {
+  const handleEditResend = useCallback((content: string) => {
     if (streaming.isStreaming) {
       enqueue(content, []);
       return;
     }
     handleSend(content);
-  };
+  }, [streaming.isStreaming, enqueue, handleSend]);
 
   const handleStarterPrompt = (prompt: string) => {
     if (streaming.isStreaming) {
@@ -256,10 +258,9 @@ export default function AgentChatPage() {
     const controller = sessionsApi.watchEvents(urlSessionId, consume);
 
     abortRef.current = controller;
-  }, [urlSessionId, agentId, sessionStatus?.label, beginTurn, handleEvent, abortRef]);
+  }, [urlSessionId, agentId, sessionStatus?.label, beginTurn, abortRef]);
 
-  const currentMessages = (activeSessionId ? messages[activeSessionId] || [] : [])
-    .filter((item) => !(streaming.isStreaming && run && item.id === run.assistant_message_id));
+  const currentMessages = activeSessionId ? messages[activeSessionId] || [] : [];
 
   const activeSession = useMemo(
     () => sessions.find((s) => s.id === activeSessionId) ?? null,
@@ -321,7 +322,7 @@ export default function AgentChatPage() {
         {/* Chat area */}
         <ChatWindow
           loading={messagesLoading || agentLoading}
-          messages={{ messages: currentMessages, streaming, conversationId: activeSessionId, agent, onNewChat: handleNewChat, onEditResend: handleEditResend }}
+          messages={{ messages: currentMessages, streaming, streamingMessageId: streaming.isStreaming ? run?.assistant_message_id : undefined, conversationId: activeSessionId, agent, onNewChat: handleNewChat, onEditResend: handleEditResend }}
           status={<>
             <ChatRunNotice run={run} stopping={stopping} onResume={resume} />
             {error && (

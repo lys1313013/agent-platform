@@ -4,8 +4,7 @@ Documents are split into chunks; each chunk is sent to the LLM which returns a
 JSON payload of entities + relationships. Results are deduplicated by normalized
 entity name (within a knowledge base) and by (source, target, relation_type).
 
-Extraction runs as a fire-and-forget background task: it creates its own DB
-session, so it never blocks the request that triggered it.
+Workers claim durable jobs in short transactions and checkpoint graph writes together with each chunk.
 """
 
 from __future__ import annotations
@@ -13,25 +12,33 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from datetime import UTC, datetime
-from uuid import UUID
+from datetime import UTC, datetime, timedelta
+from uuid import UUID, uuid4
 
 import structlog
-from sqlalchemy import func, select
+from sqlalchemy import func, insert, literal, or_, select, tuple_, update
 
-from agent_platform.db.connection import current_user_id, get_session_factory
+from agent_platform.core.execution_scope import (
+    ExecutionAccessError,
+    bind_execution_scope,
+    require_execution_user,
+)
+from agent_platform.db.connection import get_session_factory, set_db_user
 from agent_platform.db.models import (
     GraphChunk,
     GraphEntity,
+    GraphExtractionChunk,
     GraphExtractionJob,
+    GraphKnowledgeBase,
     GraphRelationship,
 )
 
 logger = structlog.get_logger(__name__)
 
-# Knowledge bases with an extraction running in this process (prevents duplicate
-# concurrent runs that would fight over the same entities).
-_running_kbs: set[UUID] = set()
+# A model call times out before its claim can be taken over.
+_MODEL_TIMEOUT = 120
+_LEASE = timedelta(seconds=150)
+
 
 _EXTRACTION_PROMPT = """你是知识图谱构建助手。从给定的文档片段中抽取实体与关系，严格输出 JSON，不要输出其他文字。
 
@@ -77,7 +84,7 @@ async def _get_default_provider(tenant_id: UUID):
                 .limit(1)
             )
             model = result.scalar_one_or_none()
-        if not model or not model.provider:
+        if not model or not model.provider or not model.provider.is_active or model.provider.tenant_id != tenant_id:
             return None, None
         provider = create_provider(
             provider=model.provider.provider_type,
@@ -116,48 +123,31 @@ async def _extract_from_chunk(provider, llm_message_cls, chunk_text: str) -> dic
     return _parse_llm_json(response.content or "")
 
 
-async def _load_existing_entities(db, kb_id: UUID) -> dict[str, UUID]:
-    result = await db.execute(
-        select(GraphEntity.name_norm, GraphEntity.id).where(
-            GraphEntity.knowledge_base_id == kb_id
-        )
-    )
-    existing: dict[str, UUID] = {}
-    for norm, entity_id in result.all():
-        existing[norm] = entity_id
-    return existing
-
-
-async def _load_existing_relationship_keys(db, kb_id: UUID) -> set[str]:
-    result = await db.execute(
-        select(
-            GraphRelationship.source_entity_id,
-            GraphRelationship.target_entity_id,
-            GraphRelationship.relation_type,
-        ).where(GraphRelationship.knowledge_base_id == kb_id)
-    )
-    return {f"{s}|{t}|{rt}" for s, t, rt in result.all()}
-
-
 async def _upsert_extraction_result(
     db,
     kb_id: UUID,
     data: dict,
     chunk_id: UUID,
     created_by: UUID,
-    existing_entities: dict[str, UUID],
-    existing_rel_keys: set[str],
 ) -> tuple[int, int]:
-    """Write entities & relationships from one chunk, dedup on the fly. Returns (new_entities, new_rels)."""
-    entity_ids = dict(existing_entities)  # per-chunk view; merged back after
+    """Resolve only the names and edges referenced by this chunk."""
+    entities = data.get("entities") or []
+    relations = data.get("relationships") or []
+    names = {normalize_name(str(item.get("name") or "")) for item in entities}
+    for rel in relations:
+        names.update(normalize_name(str(rel.get(key) or "")) for key in ("source", "target"))
+    entity_ids = dict((await db.execute(
+        select(GraphEntity.name_norm, GraphEntity.id).where(
+            GraphEntity.knowledge_base_id == kb_id, GraphEntity.name_norm.in_(names)
+        )
+    )).all())
     new_entities = 0
-    for item in data.get("entities") or []:
+    for item in entities:
         name = str(item.get("name") or "").strip()
         if not name or len(name) > 128:
             continue
         norm = normalize_name(name)
-        if norm in existing_entities:
-            entity_ids[norm] = existing_entities[norm]
+        if norm in entity_ids:
             continue
         entity = GraphEntity(
             knowledge_base_id=kb_id,
@@ -170,22 +160,31 @@ async def _upsert_extraction_result(
         )
         db.add(entity)
         await db.flush()
-        existing_entities[norm] = entity.id
         entity_ids[norm] = entity.id
         new_entities += 1
 
+    relation_keys = {
+        (entity_ids.get(normalize_name(str(r.get("source") or ""))),
+         entity_ids.get(normalize_name(str(r.get("target") or ""))),
+         str(r.get("relation_type") or "").strip()[:64])
+        for r in relations
+    }
+    cols = (GraphRelationship.source_entity_id, GraphRelationship.target_entity_id, GraphRelationship.relation_type)
+    existing_rel_keys = set((await db.execute(
+        select(*cols).where(GraphRelationship.knowledge_base_id == kb_id, tuple_(*cols).in_(relation_keys))
+    )).all()) if relation_keys else set()
     new_rels = 0
-    for rel in data.get("relationships") or []:
+    for rel in relations:
         source = str(rel.get("source") or "").strip()
         target = str(rel.get("target") or "").strip()
-        rel_type = str(rel.get("relation_type") or "").strip()
+        rel_type = str(rel.get("relation_type") or "").strip()[:64]
         if not source or not target or not rel_type:
             continue
         source_id = entity_ids.get(normalize_name(source))
         target_id = entity_ids.get(normalize_name(target))
         if not source_id or not target_id or source_id == target_id:
             continue
-        key = f"{source_id}|{target_id}|{rel_type}"
+        key = (source_id, target_id, rel_type)
         if key in existing_rel_keys:
             continue
         existing_rel_keys.add(key)
@@ -210,132 +209,169 @@ async def _upsert_extraction_result(
     return new_entities, new_rels
 
 
-async def _execute_job(db, job: GraphExtractionJob) -> None:
-    job.status = "running"
-    job.error = None
-    await db.commit()
+async def claim_job(factory) -> tuple[UUID, UUID, UUID] | None:
+    """Claim a pending job, or fence out a worker whose lease has expired."""
+    async with factory.begin() as db:
+        job = await db.scalar(
+            select(GraphExtractionJob)
+            .where(GraphExtractionJob.status.in_(("pending", "running")),
+                   or_(GraphExtractionJob.lease_until.is_(None), GraphExtractionJob.lease_until <= func.now()))
+            .order_by(GraphExtractionJob.created_at, GraphExtractionJob.id)
+            .limit(1).with_for_update(skip_locked=True)
+        )
+        if job is None:
+            return None
+        token = uuid4()
+        job.status = "running"
+        job.lease_token = token
+        job.lease_until = func.now() + _LEASE
+        has_manifest = await db.scalar(select(GraphExtractionChunk.chunk_id).where(
+            GraphExtractionChunk.job_id == job.id).limit(1))
+        if has_manifest is None:
+            # Historical interrupted jobs lack per-chunk checkpoints. Re-read
+            # their manifests once; writes resolve existing entities and edges.
+            await db.execute(insert(GraphExtractionChunk).from_select(
+                ["job_id", "chunk_id"],
+                select(literal(job.id), GraphChunk.id).where(GraphChunk.knowledge_base_id == job.knowledge_base_id),
+            ))
+            job.total_chunks = await db.scalar(select(func.count()).select_from(GraphExtractionChunk)
+                                              .where(GraphExtractionChunk.job_id == job.id))
+            job.processed_chunks = 0
+        return job.id, job.knowledge_base_id, token
 
-    # Background task writes as the job creator (RLS context).
-    current_user_id.set(str(job.created_by))
-    await db.execute(select(func.set_config("app.current_user_id", str(job.created_by), True)))
 
-    # Resolve tenant from the knowledge base
-    from agent_platform.db.models import GraphKnowledgeBase
-    kb_result = await db.execute(
-        select(GraphKnowledgeBase.tenant_id).where(GraphKnowledgeBase.id == job.knowledge_base_id)
-    )
-    tenant_id = kb_result.scalar_one_or_none()
-    if tenant_id is None:
-        job.status = "failed"
-        job.error = "知识库不存在"
-        job.finished_at = datetime.now(UTC)
-        await db.commit()
-        return
+async def _owned_job(db, claim):
+    job_id, kb_id, token = claim
+    # Serialize mutations with job admission/deletion using the same lock order.
+    kb = await db.scalar(select(GraphKnowledgeBase).where(GraphKnowledgeBase.id == kb_id).with_for_update())
+    job = await db.scalar(select(GraphExtractionJob).where(
+        GraphExtractionJob.id == job_id, GraphExtractionJob.status == "running",
+        GraphExtractionJob.lease_token == token).with_for_update())
+    if job is None:
+        return None, None
+    if kb is None or (kb.visibility != "tenant" and kb.created_by != job.created_by):
+        raise ExecutionAccessError("知识库不存在或已不可见")
+    await set_db_user(db, job.created_by)
+    user = await require_execution_user(db, job.created_by, kb.tenant_id)
+    if user.role not in {"admin", "superadmin"}:
+        raise ExecutionAccessError("图谱抽取需要管理员权限")
+    return job, kb
 
-    provider, llm_message_cls = await _get_default_provider(tenant_id)
-    if provider is None:
-        job.status = "failed"
-        job.error = "没有可用的默认模型，请先在模型管理中配置"
-        job.finished_at = datetime.now(UTC)
-        await db.commit()
-        return
 
-    chunks_result = await db.execute(
-        select(GraphChunk)
-        .where(GraphChunk.knowledge_base_id == job.knowledge_base_id)
-        .order_by(GraphChunk.seq)
-    )
-    chunks = list(chunks_result.scalars().all())
-    job.total_chunks = len(chunks)
-    await db.commit()
-
-    existing_entities = await _load_existing_entities(db, job.knowledge_base_id)
-    existing_rel_keys = await _load_existing_relationship_keys(db, job.knowledge_base_id)
-
-    total_entities = 0
-    total_rels = 0
-    failed_chunks = 0
-    for idx, chunk in enumerate(chunks, start=1):
-        try:
-            data = await _extract_from_chunk(provider, llm_message_cls, chunk.content)
-            new_e, new_r = await _upsert_extraction_result(
-                db,
-                job.knowledge_base_id,
-                data,
-                chunk.id,
-                job.created_by,
-                existing_entities,
-                existing_rel_keys,
-            )
-            total_entities += new_e
-            total_rels += new_r
-        except Exception as exc:
-            failed_chunks += 1
-            logger.warning(
-                "graph_extraction_chunk_failed",
-                job_id=str(job.id),
-                chunk_id=str(chunk.id),
-                error=str(exc),
-            )
-        job.processed_chunks = idx
-        job.entities_found = total_entities
-        job.relationships_found = total_rels
-        await db.commit()
-
-    if chunks and failed_chunks == len(chunks):
-        job.status = "failed"
-        job.error = f"全部 {failed_chunks} 个分块抽取失败，请检查模型配置后重试"
-    else:
-        job.status = "done"
+def _finish(job, error=None):
+    job.status = "failed" if error else "done"
+    job.error = error
     job.finished_at = datetime.now(UTC)
-    await db.commit()
-    logger.info(
-        "graph_extraction_job_done",
-        job_id=str(job.id),
-        entities=total_entities,
-        relationships=total_rels,
-        failed_chunks=failed_chunks,
-    )
+    job.lease_token = None
+    job.lease_until = None
 
 
-async def _run_extraction_job(job_id: UUID) -> None:
+async def _process_claim(factory, claim):
+    job_id, _, _ = claim
+    provider = None
     try:
-        factory = get_session_factory()
-        async with factory() as db:
-            job = await db.get(GraphExtractionJob, job_id)
-            if not job:
-                return
-            if job.knowledge_base_id in _running_kbs:
-                job.status = "failed"
-                job.error = "该知识库已有抽取任务运行中"
-                job.finished_at = datetime.now(UTC)
-                await db.commit()
-                return
-            _running_kbs.add(job.knowledge_base_id)
-            try:
-                await _execute_job(db, job)
-            finally:
-                _running_kbs.discard(job.knowledge_base_id)
-    except Exception:
-        logger.exception("graph_extraction_job_failed", job_id=str(job_id))
+        while True:
+            async with factory.begin() as db:
+                job, kb = await _owned_job(db, claim)
+                if job is None:
+                    return
+                user_id, tenant_id = job.created_by, kb.tenant_id
+                part = await db.scalar(select(GraphExtractionChunk).where(
+                    GraphExtractionChunk.job_id == job_id,
+                    GraphExtractionChunk.status == "pending",
+                ).order_by(GraphExtractionChunk.chunk_id).limit(1))
+                if part is None:
+                    failed = await db.scalar(select(func.count()).select_from(GraphExtractionChunk).where(
+                        GraphExtractionChunk.job_id == job_id, GraphExtractionChunk.status == "failed"))
+                    _finish(job, f"{failed} 个分块抽取失败，可以重试" if failed else None)
+                    return
+                chunk_id = part.chunk_id
+                content = await db.scalar(select(GraphChunk.content).where(
+                    GraphChunk.id == chunk_id, GraphChunk.knowledge_base_id == kb.id))
+                if content is None:
+                    part.status = "skipped"
+                    job.processed_chunks += 1
+                    continue
+                job.lease_until = func.now() + _LEASE
+
+            with bind_execution_scope(user_id, tenant_id):
+                if provider is None:
+                    provider, llm_message_cls = await _get_default_provider(tenant_id)
+                    if provider is None:
+                        raise ValueError("没有可用的默认模型，请先在模型管理中配置")
+                try:
+                    async with asyncio.timeout(_MODEL_TIMEOUT):
+                        data = await _extract_from_chunk(provider, llm_message_cls, content)
+                except Exception:
+                    logger.exception("graph_extraction_chunk_failed", job_id=str(job_id), chunk_id=str(chunk_id))
+                    data = None
+
+            async with factory.begin() as db:
+                job, kb = await _owned_job(db, claim)
+                if job is None:
+                    return
+                part = await db.get(GraphExtractionChunk, (job_id, chunk_id))
+                exists = await db.scalar(select(GraphChunk.id).where(
+                    GraphChunk.id == chunk_id, GraphChunk.knowledge_base_id == kb.id).with_for_update())
+                if exists is None:
+                    part.status = "skipped"
+                elif data is None:
+                    part.status = "failed"
+                else:
+                    try:
+                        async with db.begin_nested():
+                            new_e, new_r = await _upsert_extraction_result(
+                                db, kb.id, data, chunk_id, job.created_by)
+                    except Exception:
+                        logger.exception("graph_chunk_write_failed", job_id=str(job_id), chunk_id=str(chunk_id))
+                        part.status = "failed"
+                    else:
+                        job.entities_found += new_e
+                        job.relationships_found += new_r
+                        part.status = "done"
+                job.processed_chunks += 1
+    finally:
+        client = getattr(provider, "client", None)
+        if client is not None:
+            await client.close()
+
+
+async def _worker(factory):
+    while True:
+        claim = None
         try:
-            factory = get_session_factory()
-            async with factory() as db:
-                job = await db.get(GraphExtractionJob, job_id)
-                if job:
-                    job.status = "failed"
-                    job.error = "抽取过程发生未知错误"
-                    job.finished_at = datetime.now(UTC)
-                    await db.commit()
-        except Exception:
-            logger.exception("graph_extraction_job_mark_failed_failed", job_id=str(job_id))
+            claim = await claim_job(factory)
+            if claim:
+                await _process_claim(factory, claim)
+                continue
+        except asyncio.CancelledError:
+            if claim:
+                async with factory.begin() as db:
+                    await db.execute(update(GraphExtractionJob).where(
+                        GraphExtractionJob.id == claim[0], GraphExtractionJob.lease_token == claim[2]
+                    ).values(lease_token=None, lease_until=None))
+            raise
+        except Exception as error:
+            logger.exception("graph_extraction_job_failed")
+            if claim:
+                try:
+                    async with factory.begin() as db:
+                        job = await db.scalar(select(GraphExtractionJob).where(
+                            GraphExtractionJob.id == claim[0], GraphExtractionJob.lease_token == claim[2],
+                        ).with_for_update())
+                        if job:
+                            _finish(job, str(error) if isinstance(error, (ValueError, ExecutionAccessError)) else "抽取过程发生错误，可以重试")
+                except Exception:
+                    logger.exception("graph_extraction_claim_cleanup_failed")
+        await asyncio.sleep(2)
 
 
-_background_tasks: set[asyncio.Task] = set()
+def start_workers(factory):
+    tasks = [asyncio.create_task(_worker(factory)) for _ in range(2)]
 
+    async def shutdown():
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
-def start_extraction_job(job_id: UUID) -> None:
-    """Fire-and-forget: schedule the extraction job on the running event loop."""
-    task = asyncio.create_task(_run_extraction_job(job_id))
-    _background_tasks.add(task)
-    task.add_done_callback(_background_tasks.discard)
+    return shutdown

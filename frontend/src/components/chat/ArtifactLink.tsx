@@ -2,28 +2,8 @@ import { useCallback, useState, type ReactNode } from 'react';
 import { App } from 'antd';
 import { webpagesApi, workspacesApi } from '@/lib/api';
 import { useWebpagePreviewStore } from '@/stores/webpagePreviewStore';
+import { parseArtifactLink, workspaceRelativePath } from './artifacts';
 import WorkspaceFilePreview from '@/components/files/WorkspaceFilePreview';
-
-export function parseArtifactLink(href: string) {
-  const page = /^\/artifacts\/webpages\/([a-f0-9]{32})$/.exec(href);
-  if (page) return { kind: 'webpage' as const, pageId: page[1] };
-  if (!href.startsWith('/workspace/')) return null;
-  try {
-    const path = decodeURIComponent(href.slice('/workspace/'.length));
-    // Reject control characters in decoded artifact paths, including NUL.
-    // eslint-disable-next-line no-control-regex
-    const hasUnsafeCharacters = /[\\\u0000-\u001f]/.test(path);
-    if (!path || path.split('/').some((part) => !part || part === '.' || part === '..')
-      || hasUnsafeCharacters) return null;
-    return { kind: 'file' as const, path, filename: path.split('/').pop()! };
-  } catch {
-    return null;
-  }
-}
-
-export function workspaceRelativePath(path: string, slug: string) {
-  return path.startsWith(`${slug}/`) ? path.slice(slug.length + 1) : path;
-}
 
 export default function ArtifactLink({ href = '', children, workspaceId }: {
   href?: string; children?: ReactNode; workspaceId?: string | null;

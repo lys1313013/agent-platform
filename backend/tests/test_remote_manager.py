@@ -221,3 +221,28 @@ class TestRemoteToolConfigFromDb:
         assert config.auth_type == "none"
         assert config.auth_config is None
         assert config.response_extract is None
+
+
+async def test_inactive_create_and_admin_test_never_publish(monkeypatch):
+    import httpx
+
+    from agent_platform.tools.remote import executor as module
+
+    registry = ToolRegistry()
+    manager = RemoteToolManager(registry)
+    config = make_config(is_active=False)
+    await manager.add_tool(config)
+    assert manager.list_all_tools() == [] and registry.get(config.name) is None
+
+    def upstream(request):
+        assert manager.list_all_tools() == [] and registry.get(config.name) is None
+        return httpx.Response(200, stream=httpx.ByteStream(b"ok"))
+
+    monkeypatch.setattr(module, "MetadataGuardTransport", lambda: httpx.MockTransport(upstream))
+    executor = module.RemoteToolExecutor(manager)
+    try:
+        assert await executor.call_config(config, {}) == "ok"
+        with pytest.raises(module.RemoteToolError, match="not found"):
+            await executor.call(config.name, {})
+    finally:
+        await executor.aclose()

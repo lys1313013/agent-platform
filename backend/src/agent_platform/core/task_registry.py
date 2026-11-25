@@ -123,6 +123,7 @@ async def task_started(
         return
     await _publish(str(user_id), {
         "type": "pet_task_started",
+        "workspace_id": task.workspace_id,
         "task": {
             "session_id": task.session_id,
             "label": task.label,
@@ -152,16 +153,27 @@ async def task_tool(user_id: UUID, session_id: UUID, tool: str) -> None:
     except Exception:
         logger.warning("task_registry_write_failed", op="tool", user_id=str(user_id))
         return
-    await _publish(str(user_id), {"type": "pet_task_tool", "session_id": str(session_id), "tool": tool})
+    await _publish(str(user_id), {
+        "type": "pet_task_tool", "session_id": str(session_id), "tool": tool,
+        "workspace_id": task.workspace_id,
+    })
 
 
 async def task_finished(user_id: UUID, session_id: UUID) -> None:
     try:
-        await _redis().hdel(_key(user_id), str(session_id))
+        # Capture routing metadata in the same transaction that removes it.
+        pipe = _redis().pipeline()
+        pipe.hget(_key(user_id), str(session_id))
+        pipe.hdel(_key(user_id), str(session_id))
+        raw, _ = await pipe.execute()
+        task = RunningTask.loads(raw) if raw is not None else None
     except Exception:
         logger.warning("task_registry_write_failed", op="finish", user_id=str(user_id))
         return
-    await _publish(str(user_id), {"type": "pet_task_finished", "session_id": str(session_id)})
+    await _publish(str(user_id), {
+        "type": "pet_task_finished", "session_id": str(session_id),
+        "workspace_id": task.workspace_id if task else "",
+    })
 
 
 async def get_task(user_id: UUID, session_id: UUID) -> RunningTask | None:

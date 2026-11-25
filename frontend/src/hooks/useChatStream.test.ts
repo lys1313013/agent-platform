@@ -50,6 +50,22 @@ afterEach(async () => {
 });
 
 describe('background chat subscriptions', () => {
+  it('stops polling idle sessions and checks on visibility or reconnection', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(chatApi.latestRun).mockResolvedValue(null);
+      await act(async () => useChatStore.setState({ activeSessionId: 'idle' }));
+      expect(chatApi.latestRun).toHaveBeenLastCalledWith('idle');
+      vi.mocked(chatApi.latestRun).mockClear();
+      await act(async () => { await vi.advanceTimersByTimeAsync(120_000); });
+      expect(chatApi.latestRun).not.toHaveBeenCalled();
+      await act(async () => { window.dispatchEvent(new Event('online')); });
+      expect(chatApi.latestRun).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('reconnects on mount and deduplicates events without replaying browser actions', async () => {
     expect(chatApi.watchRun).toHaveBeenCalledWith('run-1', expect.any(Function));
     await act(async () => {
@@ -81,6 +97,24 @@ describe('background chat subscriptions', () => {
     expect(result.error).toContain('权限已失效');
     await act(async () => old({ type: 'text_delta', content: 'private' }));
     expect(result.streaming.finalText).toBe('');
+  });
+
+  it('releases the composer when a disconnected submission never reached the backend', async () => {
+    vi.mocked(chatApi.latestRun).mockResolvedValue(null);
+    await act(async () => {
+      const receive = result.beginTurn('s1');
+      receive({ type: 'transport_error', message: 'offline' });
+    });
+    expect(result.streaming.isStreaming).toBe(true);
+    await act(async () => { window.dispatchEvent(new Event('online')); });
+    expect(result.streaming.isStreaming).toBe(false);
+    expect(result.error).toContain('未发现已受理');
+  });
+
+  it('applies a successful slash deletion locally without repeating it', async () => {
+    useChatStore.setState({ sessions: [{ id: 'removed' } as import('@/lib/types').Session] });
+    await act(async () => consume({ type: 'command_result', data: { deleted_session_id: 'removed' } }));
+    expect(useChatStore.getState().sessions).toEqual([]);
   });
 
   it('explicit stop waits for the server and loads persisted history', async () => {

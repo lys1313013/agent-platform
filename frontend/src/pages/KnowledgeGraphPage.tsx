@@ -1,3 +1,4 @@
+import { errorMessage, isFormValidationError } from '@/lib/errors';
 import { useState, useEffect, useCallback } from 'react';
 import {
   ApartmentOutlined,
@@ -57,8 +58,8 @@ function KnowledgeGraphPageContent() {
     setLoading(true);
     try {
       setKnowledgeBases(await graphKnowledgeApi.list());
-    } catch (err: any) {
-      message.error(`加载数据失败：${err.message}`);
+    } catch (err) {
+      message.error(`加载数据失败：${errorMessage(err)}`);
     } finally {
       setLoading(false);
     }
@@ -102,9 +103,9 @@ function KnowledgeGraphPageContent() {
       }
       setModalOpen(false);
       fetchData();
-    } catch (err: any) {
-      if (err?.errorFields) return;
-      message.error(err.message || '操作失败');
+    } catch (err) {
+      if (isFormValidationError(err)) return;
+      message.error(errorMessage(err, '操作失败'));
     } finally {
       setSaving(false);
     }
@@ -115,8 +116,8 @@ function KnowledgeGraphPageContent() {
       await graphKnowledgeApi.delete(id);
       message.success('知识库已删除');
       fetchData();
-    } catch (err: any) {
-      message.error(`删除失败：${err.message}`);
+    } catch (err) {
+      message.error(`删除失败：${errorMessage(err)}`);
     }
   };
 

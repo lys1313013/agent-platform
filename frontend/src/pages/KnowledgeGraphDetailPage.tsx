@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from 'react';
+import { errorMessage, isFormValidationError } from '@/lib/errors';
+import { lazy, Suspense, useCallback, useEffect, useState, type ComponentProps } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
   ArrowLeftOutlined,
@@ -38,7 +39,6 @@ import {
 } from 'antd';
 import type { UploadFile } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import GraphCanvas from '@/components/graph/GraphCanvas';
 import { graphKnowledgeApi } from '@/lib/api';
 import type {
   GraphChunk,
@@ -49,6 +49,14 @@ import type {
   GraphRelationship,
   GraphRetrieveResult,
 } from '@/lib/api';
+
+const Graph = lazy(() => import('@/components/graph/GraphCanvas'));
+
+function GraphCanvas(props: ComponentProps<typeof Graph>) {
+  return <Suspense fallback={<div className="grid place-items-center" style={{ height: props.height }}><Spin /></div>}>
+    <Graph {...props} />
+  </Suspense>;
+}
 
 const { Text } = Typography;
 const { TextArea } = Input;
@@ -75,7 +83,7 @@ export default function KnowledgeGraphDetailPage() {
       .then((kbs) => {
         setKb(kbs.find((k) => k.id === kbId) ?? null);
       })
-      .catch((err: any) => message.error(`加载知识库失败：${err.message}`))
+      .catch((err: unknown) => message.error(`加载知识库失败：${errorMessage(err)}`))
       .finally(() => setLoading(false));
   }, [kbId, message]);
 
@@ -168,8 +176,8 @@ function GraphViewTab({ kbId }: { kbId: string }) {
       ]);
       setEntities(ents.items);
       setRelationships(rels.items);
-    } catch (err: any) {
-      message.error(`加载图谱失败：${err.message}`);
+    } catch (err) {
+      message.error(`加载图谱失败：${errorMessage(err)}`);
     } finally {
       setLoading(false);
     }
@@ -313,8 +321,8 @@ function DocumentsTab({ kbId }: { kbId: string }) {
     if (!silent) setLoading(true);
     try {
       setDocuments(await graphKnowledgeApi.documents(kbId));
-    } catch (err: any) {
-      if (!silent) message.error(`加载文档失败：${err.message}`);
+    } catch (err) {
+      if (!silent) message.error(`加载文档失败：${errorMessage(err)}`);
     } finally {
       if (!silent) setLoading(false);
     }
@@ -354,9 +362,9 @@ function DocumentsTab({ kbId }: { kbId: string }) {
       setFileList([]);
       setUploadTitle('');
       fetchDocs();
-    } catch (err: any) {
-      if (err?.errorFields) return;
-      message.error(err.message || '添加失败');
+    } catch (err) {
+      if (isFormValidationError(err)) return;
+      message.error(errorMessage(err, '添加失败'));
     } finally {
       setSaving(false);
     }
@@ -367,8 +375,8 @@ function DocumentsTab({ kbId }: { kbId: string }) {
       await graphKnowledgeApi.deleteDocument(kbId, docId);
       message.success('文档已删除');
       fetchDocs();
-    } catch (err: any) {
-      message.error(`删除失败：${err.message}`);
+    } catch (err) {
+      message.error(`删除失败：${errorMessage(err)}`);
     }
   };
 
@@ -377,8 +385,8 @@ function DocumentsTab({ kbId }: { kbId: string }) {
     setChunks(null);
     try {
       setChunks(await graphKnowledgeApi.chunks(kbId, doc.id));
-    } catch (err: any) {
-      message.error(`加载分块失败：${err.message}`);
+    } catch (err) {
+      message.error(`加载分块失败：${errorMessage(err)}`);
       setChunks([]);
     }
   };
@@ -567,8 +575,8 @@ function EntitiesTab({ kbId }: { kbId: string }) {
       });
       setItems(result.items);
       setTotal(result.total);
-    } catch (err: any) {
-      message.error(`加载实体失败：${err.message}`);
+    } catch (err) {
+      message.error(`加载实体失败：${errorMessage(err)}`);
     } finally {
       setLoading(false);
     }
@@ -599,9 +607,9 @@ function EntitiesTab({ kbId }: { kbId: string }) {
       message.success('实体已更新');
       setEditOpen(false);
       fetchEntities();
-    } catch (err: any) {
-      if (err?.errorFields) return;
-      message.error(err.message || '更新失败');
+    } catch (err) {
+      if (isFormValidationError(err)) return;
+      message.error(errorMessage(err, '更新失败'));
     } finally {
       setSaving(false);
     }
@@ -612,8 +620,8 @@ function EntitiesTab({ kbId }: { kbId: string }) {
       await graphKnowledgeApi.deleteEntity(kbId, id);
       message.success('实体已删除');
       fetchEntities();
-    } catch (err: any) {
-      message.error(`删除失败：${err.message}`);
+    } catch (err) {
+      message.error(`删除失败：${errorMessage(err)}`);
     }
   };
 
@@ -625,8 +633,8 @@ function EntitiesTab({ kbId }: { kbId: string }) {
       message.success(`已采纳 ${approved} 个实体`);
       setSelected([]);
       fetchEntities();
-    } catch (err: any) {
-      message.error(err.message || '采纳失败');
+    } catch (err) {
+      message.error(errorMessage(err, '采纳失败'));
     } finally {
       setApproving(false);
     }
@@ -750,8 +758,8 @@ function RelationshipsTab({ kbId }: { kbId: string }) {
       });
       setItems(result.items);
       setTotal(result.total);
-    } catch (err: any) {
-      message.error(`加载关系失败：${err.message}`);
+    } catch (err) {
+      message.error(`加载关系失败：${errorMessage(err)}`);
     } finally {
       setLoading(false);
     }
@@ -782,9 +790,9 @@ function RelationshipsTab({ kbId }: { kbId: string }) {
       message.success('关系已更新');
       setEditOpen(false);
       fetchRels();
-    } catch (err: any) {
-      if (err?.errorFields) return;
-      message.error(err.message || '更新失败');
+    } catch (err) {
+      if (isFormValidationError(err)) return;
+      message.error(errorMessage(err, '更新失败'));
     } finally {
       setSaving(false);
     }
@@ -795,8 +803,8 @@ function RelationshipsTab({ kbId }: { kbId: string }) {
       await graphKnowledgeApi.deleteRelationship(kbId, id);
       message.success('关系已删除');
       fetchRels();
-    } catch (err: any) {
-      message.error(`删除失败：${err.message}`);
+    } catch (err) {
+      message.error(`删除失败：${errorMessage(err)}`);
     }
   };
 
@@ -808,8 +816,8 @@ function RelationshipsTab({ kbId }: { kbId: string }) {
       message.success(`已采纳 ${approved} 条关系`);
       setSelected([]);
       fetchRels();
-    } catch (err: any) {
-      message.error(err.message || '采纳失败');
+    } catch (err) {
+      message.error(errorMessage(err, '采纳失败'));
     } finally {
       setApproving(false);
     }
@@ -952,8 +960,8 @@ function RetrieveTab({ kbId }: { kbId: string }) {
           top_k_entities: topK,
         }),
       );
-    } catch (err: any) {
-      setError(err.message || '检索失败');
+    } catch (err) {
+      setError(errorMessage(err, '检索失败'));
     } finally {
       setLoading(false);
     }
@@ -1109,8 +1117,8 @@ function JobsTab({ kbId }: { kbId: string }) {
     setLoading(true);
     try {
       setJobs(await graphKnowledgeApi.jobs(kbId));
-    } catch (err: any) {
-      message.error(`加载任务失败：${err.message}`);
+    } catch (err) {
+      message.error(`加载任务失败：${errorMessage(err)}`);
     } finally {
       setLoading(false);
     }
@@ -1132,8 +1140,8 @@ function JobsTab({ kbId }: { kbId: string }) {
       await graphKnowledgeApi.extract(kbId);
       message.success('抽取任务已启动');
       fetchJobs();
-    } catch (err: any) {
-      message.error(err.message || '启动失败');
+    } catch (err) {
+      message.error(errorMessage(err, '启动失败'));
     } finally {
       setStarting(false);
     }
@@ -1145,8 +1153,8 @@ function JobsTab({ kbId }: { kbId: string }) {
       await graphKnowledgeApi.retryJob(kbId, jobId);
       message.success('已重新启动抽取');
       fetchJobs();
-    } catch (err: any) {
-      message.error(err.message || '重试失败');
+    } catch (err) {
+      message.error(errorMessage(err, '重试失败'));
     } finally {
       setRetryingId(null);
     }

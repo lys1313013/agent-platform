@@ -11,17 +11,21 @@ import hashlib
 import json
 import os
 import shlex
-from contextlib import asynccontextmanager
+import time
+from contextlib import asynccontextmanager, closing
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 import docker
 import structlog
 from docker.errors import DockerException, NotFound
 
 from agent_platform.core.config import settings
+from agent_platform.sandbox_docker_client import UnixSandboxClient
+from agent_platform.sandbox_policy import container_name, container_options
 
 if TYPE_CHECKING:
     import docker.models.containers
@@ -29,6 +33,11 @@ if TYPE_CHECKING:
     from agent_platform.storage.workspace import WorkspaceStorage
 
 logger = structlog.get_logger()
+
+_COMMAND_RUNNER = Path(__file__).with_name("command_runner.py").read_text(encoding="utf-8")
+# Includes room for image previews and skill file transfers. The model-facing
+# text budget is applied separately by ToolExecutor.
+_COMMAND_OUTPUT_LIMIT = 8 * 1024 * 1024
 
 
 def docker_unavailable_reason(exc: Exception) -> str:
@@ -63,6 +72,46 @@ class ExecResult:
     stdout: str
     stderr: str
     exit_code: int
+    output_truncated: bool = False
+
+
+def _run_docker_command(api, container_id: str, command: str, timeout: float, cancel_path: str,
+                        cleanup_file: str | None = None) -> ExecResult:
+    argv = ["python3", "-I", "-S", "-c", _COMMAND_RUNNER,
+            str(timeout), cancel_path, str(_COMMAND_OUTPUT_LIMIT), cleanup_file or "", command]
+    exec_id = api.exec_create(container_id, argv, workdir="/workspace", user="sandbox")["Id"]
+    stdout, stderr = bytearray(), bytearray()
+    # Independently bound the Docker connection; the container also caps its
+    # output before transmission. Reserve room for runner diagnostics.
+    remaining = _COMMAND_OUTPUT_LIMIT + 1024
+    truncated = False
+    frames = api.exec_start(exec_id, stream=True, demux=True)
+    # The docker SDK's CancellableStream.close() forcibly shuts down a live
+    # socket. After natural EOF the daemon has already disconnected, so close
+    # the owning HTTP response (as the SDK does for non-streaming execs).
+    with closing(getattr(frames, "_response", frames)):
+        for out, err in frames:
+            for chunk, target in ((out, stdout), (err, stderr)):
+                if chunk:
+                    accepted = min(len(chunk), remaining)
+                    target.extend(memoryview(chunk)[:accepted])
+                    remaining -= accepted
+                    truncated |= accepted < len(chunk)
+    if truncated:
+        stderr.extend(b"\n[Docker command output truncated]")
+    # Docker can close the output stream just before publishing ExitCode.
+    deadline = time.monotonic() + timeout + 2
+    state = api.exec_inspect(exec_id)
+    while state["Running"] and time.monotonic() < deadline:
+        time.sleep(0.05)
+        state = api.exec_inspect(exec_id)
+    if state["Running"] or state["ExitCode"] is None:
+        raise RuntimeError("Docker did not confirm command completion")
+    clipped_notice = f"[Sandbox output truncated at {_COMMAND_OUTPUT_LIMIT} bytes]".encode()
+    return ExecResult(
+        stdout.decode(errors="replace"), stderr.decode(errors="replace"), state["ExitCode"],
+        output_truncated=truncated or stderr.rstrip().endswith(clipped_notice),
+    )
 
 
 @dataclass
@@ -113,7 +162,11 @@ class SandboxManager:
 
     @staticmethod
     def _connect_client() -> docker.DockerClient:
-        client = docker.from_env(timeout=3)
+        broker_socket = os.environ.get("SANDBOX_BROKER_SOCKET")
+        if broker_socket:
+            client = UnixSandboxClient(base_url=f"unix://{broker_socket}", timeout=3)
+        else:
+            client = docker.from_env(timeout=3)
         # A short connection probe must not shorten actual command execution.
         client.api.timeout = docker.constants.DEFAULT_TIMEOUT_SECONDS
         return client
@@ -140,8 +193,7 @@ class SandboxManager:
                 ) from None
 
     def _name(self, user_id: str) -> str:
-        digest = hashlib.sha256(f"{self._namespace}:{user_id}".encode()).hexdigest()[:32]
-        return f"aio-sandbox-{digest}"
+        return container_name(self._namespace, user_id)
 
     def _lock_path(self, user_id: str) -> Path:
         return self._lock_dir / f"{self._name(user_id)}.lock"
@@ -356,7 +408,9 @@ class SandboxManager:
         self,
         sandbox: Sandbox,
         command: str,
-        timeout: int | None = None,
+        timeout: float | None = None,
+        *,
+        cleanup_file: str | None = None,
     ) -> ExecResult:
         """Execute a command in the sandbox container."""
         internal = self._owners.get(sandbox.user_id) is asyncio.current_task()
@@ -367,24 +421,74 @@ class SandboxManager:
                     raise RuntimeError(
                         "Sandbox is no longer running; obtain a new sandbox before executing"
                     )
-                exec_result = await self._docker_call(
-                    container.exec_run,
-                    ["bash", "-c", command],
-                    workdir="/workspace",
-                    user="sandbox",
-                    stdout=True,
-                    stderr=True,
-                    demux=True,
-                )
-                stdout_b, stderr_b = exec_result.output
-                return ExecResult(
-                    stdout=(stdout_b or b"").decode("utf-8", errors="replace"),
-                    stderr=(stderr_b or b"").decode("utf-8", errors="replace"),
-                    exit_code=exec_result.exit_code,
-                )
+                cancel_path = f"/tmp/.aio-command-{uuid4().hex}.cancel"
+                duration = settings.sandbox.command_timeout if timeout is None else timeout
+                task = asyncio.create_task(asyncio.to_thread(
+                    _run_docker_command, self._client.api, container.id, command, duration, cancel_path, cleanup_file,
+                ))
+                try:
+                    return await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    async def cancel_and_wait():
+                        try:
+                            await asyncio.to_thread(container.exec_run, ["touch", "--", cancel_path], user="sandbox")
+                        finally:
+                            try:
+                                await task
+                            finally:
+                                # Also handles a cancellation racing natural completion.
+                                await asyncio.to_thread(container.exec_run, ["rm", "-f", "--", cancel_path], user="sandbox")
+
+                    try:
+                        await self._finish_task(asyncio.create_task(cancel_and_wait()))
+                    except Exception as error:
+                        logger.warning("sandbox_command_cancel_failed", error=str(error))
+                    raise
             finally:
                 if not internal:
                     self._touch(sandbox)
+
+    async def reconcile_uploaded_workspace(
+        self, user_id: str, workspace_id: str, workspace_slug: str,
+    ) -> Sandbox | None:
+        """Merge external uploads before serving a mounted workspace, across workers."""
+        async with self._user_lock(user_id):
+            sandbox = self._active.get(self._key(user_id)) or await self._discover(user_id)
+            if sandbox is None:
+                return None
+            await self._read_workspaces(sandbox)
+            if sandbox.workspaces.get(workspace_id) != workspace_slug:
+                return None
+            storage = self._workspace_storage
+            if storage is None:
+                raise RuntimeError("Object storage unavailable")
+            if await self._docker_call(storage.remote_changed, workspace_id, sandbox.container_id):
+                stats = await storage.extract_and_sync(self, sandbox, workspace_id, workspace_slug)
+                if stats.errors:
+                    raise RuntimeError("Workspace refresh failed: " + "; ".join(stats.errors))
+            return sandbox
+
+    async def delete_workspace_data(self, user_id: str, workspace_id: str, storage) -> None:
+        async with self._user_lock(user_id):
+            await self._docker_call(storage.delete_workspace, workspace_id)
+
+    async def delete_workspace_path(
+        self, user_id: str, workspace_id: str, workspace_slug: str, path: str, storage,
+    ) -> bool:
+        """Serialize deletion against local commands, sync and other backend workers."""
+        from agent_platform.storage.workspace import WorkspaceStorage
+
+        async with self._user_lock(user_id):
+            # Keep the live copy intact if object storage rejects the delete.
+            deleted = await self._docker_call(storage.delete_file, workspace_id, path)
+            sandbox = self._active.get(self._key(user_id)) or await self._discover(user_id)
+            if sandbox is None:
+                return deleted
+            await self._read_workspaces(sandbox)
+            if sandbox.workspaces.get(workspace_id) != workspace_slug:
+                return deleted
+            local = await WorkspaceStorage.delete_file_live(self, sandbox, path, workspace_slug)
+            return local or deleted
 
     async def inject_uploaded_file(
         self, user_id: str, workspace_id: str, workspace_slug: str, path: str, content: bytes,
@@ -627,42 +731,19 @@ class SandboxManager:
         self, user_id: str, session_id: str, workspace_id: str, workspace_slug: str
     ) -> Sandbox:
         """Create a new sandbox container with tmpfs /workspace (no Docker volumes)."""
-        container_name = self._name(user_id)
-
-        # Both /tmp and /workspace are tmpfs — fully ephemeral
-        # uid=1000,gid=1000 matches the sandbox user created in the Dockerfile
-        tmpfs = {
-            "/tmp": f"size={settings.sandbox.tmpfs_size},uid=1000,gid=1000",
-            "/workspace": f"size={settings.sandbox.workspace_quota_mb}m,uid=1000,gid=1000",
+        labels = {
+            "aio.namespace": self._namespace,
+            "aio.config": self._fingerprint(),
+            "aio.user_id": user_id,
+            "aio.session_id": session_id,
+            "aio.workspace_id": workspace_id,
+            "aio.workspace_slug": workspace_slug,
+            "aio.ephemeral": "true",
         }
-
-        # Split create/start so a failed start can still remove its container.
-        create_task = asyncio.create_task(
-            asyncio.to_thread(
-                self._client.containers.create,
-                settings.sandbox.image,
-                "sleep infinity",
-                name=container_name,
-                user="sandbox",
-                read_only=True,
-                mounts=[],
-                tmpfs=tmpfs,
-                mem_limit=settings.sandbox.memory_limit,
-                cpu_quota=int(settings.sandbox.cpu_limit * 100_000),
-                network_disabled=settings.sandbox.network_disabled,
-                security_opt=["no-new-privileges"],
-                cap_drop=["ALL"],
-                labels={
-                    "aio.namespace": self._namespace,
-                    "aio.config": self._fingerprint(),
-                    "aio.user_id": user_id,
-                    "aio.session_id": session_id,
-                    "aio.workspace_id": workspace_id,
-                    "aio.workspace_slug": workspace_slug,
-                    "aio.ephemeral": "true",
-                },
-            )
-        )
+        create_task = asyncio.create_task(asyncio.to_thread(
+            self._client.containers.create, settings.sandbox.image, "sleep infinity",
+            **container_options(settings.sandbox, labels),
+        ))
         try:
             container = await asyncio.shield(create_task)
         except asyncio.CancelledError:

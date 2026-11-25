@@ -1,11 +1,12 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { usePetStore } from './petStore';
-import type { UserPet } from '@/lib/types';
+import { tasksForWorkspace, usePetStore } from './petStore';
+import { useChatStore } from './chatStore';
+import type { Session, UserPet } from '@/lib/types';
 
 const mockPet = { id: 'pet-1', package: { row_mapping: {} } } as unknown as UserPet;
 
 /** 构造一条渠道任务事件（形状与后端 task_registry._publish 一致） */
-function started(label: string, sessionId: string, chatKey: string, startedAt = 0) {
+function started(label: string, sessionId: string, chatKey: string, startedAt = 0, workspaceId = 'ws-a') {
   return {
     type: 'pet_task_started',
     task: {
@@ -15,6 +16,7 @@ function started(label: string, sessionId: string, chatKey: string, startedAt = 
       source: 'feishu',
       chat_key: chatKey,
       agent_id: 'agent-1',
+      workspace_id: workspaceId,
       started_at: startedAt,
     },
   };
@@ -26,6 +28,47 @@ function finished(sessionId: string) {
 
 beforeEach(() => {
   usePetStore.setState({ activePet: mockPet, tasks: {} });
+  useChatStore.setState({ sessions: [], selectedWorkspaceId: 'ws-a' });
+});
+
+describe('pet task workspace switching', () => {
+  it('preserves and updates a local task while another workspace is selected', () => {
+    const s = usePetStore.getState();
+    s.startTask('local-a', 'Local task');
+    useChatStore.getState().setSelectedWorkspace('ws-b');
+    expect(tasksForWorkspace(usePetStore.getState().tasks, 'ws-b')).toEqual({});
+    s.reportEvent('tool_call', { sessionId: 'local-a', tool: 'lookup' });
+    s.applyRemoteTaskEvent({ type: 'pet_task_snapshot', tasks: [] }, 'ws-b');
+    useChatStore.getState().setSelectedWorkspace('ws-a');
+    expect(tasksForWorkspace(usePetStore.getState().tasks, 'ws-a')['local-a']?.tool).toBe('lookup');
+  });
+
+  it('uses the existing session workspace rather than the current selector', () => {
+    useChatStore.setState({
+      selectedWorkspaceId: 'ws-b',
+      sessions: [{ id: 'local-a', workspace_id: 'ws-a' } as Session],
+    });
+    usePetStore.getState().startTask('local-a', 'Existing conversation');
+    expect(tasksForWorkspace(usePetStore.getState().tasks, 'ws-b')).toEqual({});
+    expect(tasksForWorkspace(usePetStore.getState().tasks, 'ws-a')).toHaveProperty('local-a');
+  });
+
+  it('uses the pet dialog workspace for a session absent from the sidebar', () => {
+    useChatStore.setState({ selectedWorkspaceId: 'ws-b' });
+    usePetStore.getState().startTask('pet-a', 'Pet task', 'agent-1', 'ws-a');
+    expect(tasksForWorkspace(usePetStore.getState().tasks, 'ws-a')).toHaveProperty('pet-a');
+  });
+
+  it('does not finish another workspace task when applying a scoped snapshot', () => {
+    const s = usePetStore.getState();
+    s.applyRemoteTaskEvent(started('A', 'remote-a', 'K-a'));
+    s.applyRemoteTaskEvent(started('B', 'remote-b', 'K-b', 0, 'ws-b'));
+    s.applyRemoteTaskEvent({ type: 'pet_task_snapshot', tasks: [] }, 'ws-b');
+    const tasks = usePetStore.getState().tasks;
+    expect(tasks['remote-b']?.status).toBe('done');
+    expect(tasks['remote-a']?.status).toBeUndefined();
+    expect(tasksForWorkspace(tasks, 'ws-a')).toHaveProperty('remote-a');
+  });
 });
 
 describe('pet 渠道任务替换逻辑（回归：飞书同会话新消息卡在旧 label）', () => {

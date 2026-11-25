@@ -1,17 +1,16 @@
 import type { Session, SessionDetail, ChatAttachment, ChatResponse, ChatRequest } from '../types';
-import { API_BASE, request, uploadForm } from './transport';
-import { tokenStorage } from '../auth';
-import { openJsonEventStream } from './sse';
+import { API_BASE, queryString, request, uploadForm } from './transport';
+import { openJsonEventStream, type EventStreamController } from './sse';
 
 // ---- Sessions ----
 
 export const sessionsApi = {
-  list(agentId?: string | null) {
-    return request<Session[]>(agentId ? `/sessions?agent_id=${agentId}` : '/sessions');
+  list(agentId?: string | null, page: { search?: string; source?: string; pinned_first?: boolean; limit?: number; offset?: number } = {}) {
+    return request<Session[]>(`/sessions${queryString({ agent_id: agentId ?? undefined, ...page })}`);
   },
 
-  get(id: string) {
-    return request<SessionDetail>(`/sessions/${id}`);
+  get(id: string, before?: string) {
+    return request<SessionDetail>(`/sessions/${id}${queryString({ message_limit: 50, before })}`);
   },
 
   getStatus(id: string) {
@@ -77,7 +76,7 @@ function openChatStream(
   path: string,
   onEvent: (event: Record<string, unknown>) => void,
   req?: ChatRequest | Record<string, never>,
-): AbortController {
+): EventStreamController {
   return openJsonEventStream(path, onEvent, {
     method: req ? 'POST' : 'GET',
     body: req ? JSON.stringify(req) : undefined,
@@ -97,7 +96,7 @@ export const chatApi = {
    * Calls `onEvent` for each SSE event, returns an AbortController
    * so the caller can detach the subscription; stopRun cancels execution.
    */
-  stream(req: ChatRequest, onEvent: (event: Record<string, unknown>) => void): AbortController {
+  stream(req: ChatRequest, onEvent: (event: Record<string, unknown>) => void): EventStreamController {
     return openChatStream('/chat/stream', onEvent, req);
   },
 
@@ -105,7 +104,7 @@ export const chatApi = {
     return request<ChatRunInfo | null>(`/chat/sessions/${sessionId}/run`);
   },
 
-  watchRun(id: string, onEvent: (event: Record<string, unknown>) => void, after = 0) {
+  watchRun(id: string, onEvent: (event: Record<string, unknown>) => void, after = 0): AbortController {
     return openChatStream(`/chat/runs/${id}/events?after=${after}`, onEvent);
   },
 
@@ -113,7 +112,7 @@ export const chatApi = {
     return request<ChatRunInfo>(`/chat/runs/${id}/stop`, { method: 'POST' });
   },
 
-  resumeRun(id: string, onEvent: (event: Record<string, unknown>) => void) {
+  resumeRun(id: string, onEvent: (event: Record<string, unknown>) => void): AbortController {
     return openChatStream(`/chat/runs/${id}/resume`, onEvent, {});
   },
 
@@ -138,9 +137,8 @@ export const chatApi = {
 
   /** Build the WebSocket URL for a session (legacy) */
   wsUrl(sessionId: string): string {
-    const token = tokenStorage.getAccess() || '';
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const host = window.location.host;
-    return `${protocol}//${host}${API_BASE}/chat/ws/${sessionId}?token=${encodeURIComponent(token)}`;
+    return `${protocol}//${host}${API_BASE}/chat/ws/${sessionId}`;
   },
 };

@@ -1,6 +1,8 @@
 import { lazy, Suspense, useEffect } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { useAuthStore } from '@/stores/authStore';
+// Imperative dialogs and notifications are used only after authentication.
+const AntdApp = lazy(() => import('antd/es/app'));
 const AppLayout = lazy(() => import('@/components/layout/AppLayout'));
 const PortalLayout = lazy(() => import('@/components/layout/PortalLayout'));
 
@@ -41,6 +43,9 @@ const PortalSkillsPage = lazy(() => import('@/pages/portal/PortalSkillsPage'));
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const tenantId = useAuthStore((s) => s.tenantId);
+  const error = useAuthStore((s) => s.error);
+  const loadProfile = useAuthStore((s) => s.loadProfile);
   const checkAuth = useAuthStore((s) => s.checkAuth);
 
   useEffect(() => {
@@ -51,7 +56,12 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
     return <Navigate to="/login" replace />;
   }
 
-  return <>{children}</>;
+  if (!tenantId) {
+    return <div role="status" className="p-6">{error
+      ? <button onClick={() => void loadProfile()}>加载账号信息失败，点击重试</button>
+      : '正在加载账号信息…'}</div>;
+  }
+  return <AntdApp>{children}</AntdApp>;
 }
 
 function PublicRoute({ children }: { children: React.ReactNode }) {
@@ -114,6 +124,7 @@ export default function App() {
         <Route path="/dashboard" element={<DashboardPage />} />
         <Route path="/usage" element={<UsagePage />} />
         <Route path="/observability" element={<ObservabilityPage />} />
+        <Route path="/execution-traces" element={<ObservabilityPage traceOnly />} />
         <Route path="/memory" element={<MemoryPage />} />
         <Route path="/skills" element={<SkillsPage />} />
         <Route path="/pets" element={<PetsPage />} />

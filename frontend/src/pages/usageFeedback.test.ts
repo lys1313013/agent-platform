@@ -4,7 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { analyticsApi } from '@/lib/api';
 import UsagePage from './UsagePage';
 
-vi.mock('@ant-design/plots', () => ({ Bar: () => null, Column: () => null, Line: () => null, Pie: () => null }));
+vi.mock('@/components/charts/Plots', () => ({ Bar: () => null, Column: () => null, Line: () => null, Pie: () => null }));
 let root: Root;
 let host: HTMLDivElement;
 const summary = { sessions: 1, messages: 2, prompt_tokens: 100, completion_tokens: 11, total_tokens: 111, request_count: 1, active_users: null, prev_sessions: 0, prev_messages: 0, prev_total_tokens: 0, prev_request_count: 0 };

@@ -1,3 +1,4 @@
+import { isFormValidationError } from '@/lib/errors';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Navigate } from 'react-router-dom';
 import {
@@ -123,8 +124,8 @@ export default function UserManagementPage() {
       }
       setModalOpen(false);
       await loadData();
-    } catch (error: any) {
-      if (!error?.errorFields) {
+    } catch (error) {
+      if (!isFormValidationError(error)) {
         message.error(error instanceof Error ? error.message : '保存失败');
       }
     } finally {

@@ -261,7 +261,7 @@ class WeComBotTransport(Transport):
                 logger.exception("wecom_bot_event_normalize_failed")
                 return
             if inbound is not None:
-                self.pipeline.submit(inbound)
+                await self.pipeline.receive(inbound)
         elif cmd == "aibot_event_callback":
             event = (frame.get("body") or {}).get("event") or {}
             if event.get("eventtype") == "disconnected_event":

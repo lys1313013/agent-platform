@@ -6,8 +6,9 @@ import { Dropdown, Slider, message } from 'antd';
 import { CommentOutlined } from '@ant-design/icons';
 import { petsApi } from '@/lib/api';
 import type { UserPet } from '@/lib/types';
-import { PET_SIZE_MAX, PET_SIZE_MIN, PET_SIZE_STEP, rowName, usePetStore } from '@/stores/petStore';
+import { PET_SIZE_MAX, PET_SIZE_MIN, PET_SIZE_STEP, rowName, tasksForWorkspace, usePetStore } from '@/stores/petStore';
 import { useChatStore } from '@/stores/chatStore';
+import { usePetChatDialog } from '@/hooks/usePetChatDialog';
 import PetCanvas from './PetCanvas';
 import PetChatPanel from './PetChatPanel';
 
@@ -112,6 +113,7 @@ function PetWidgetInner() {
   const { activePet, enabled, mood, actionRow, actionFps, size, loaded, tasks, loadActive, setEnabled, setSize, playRow, removeTask } = usePetStore();
   const navigate = useNavigate();
   const selectedWorkspaceId = useChatStore((s) => s.selectedWorkspaceId);
+  const chatDlg = usePetChatDialog(activePet?.id ?? null, selectedWorkspaceId);
 
   // 点击任务条进入对应会话：有 agentId 走 Agent 会话路由，否则通用聊天页 + 激活会话
   const openSession = useCallback(
@@ -133,11 +135,6 @@ function PetWidgetInner() {
   const [dragRow, setDragRow] = useState<number | null>(null);
   const [tasksExpanded, setTasksExpanded] = useState(false);
   const [myPets, setMyPets] = useState<UserPet[]>([]);
-  const [chatDlg, setChatDlg] = useState<{ open: boolean; sessionId: string | null; agentId: string | null }>({
-    open: false,
-    sessionId: null,
-    agentId: null,
-  });
   const bubbleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const bounceRef = useRef<HTMLDivElement | null>(null);
 
@@ -206,11 +203,6 @@ function PetWidgetInner() {
     petsApi.myPets().then(setMyPets).catch(() => {});
   }, []);
 
-  // 切换工作区时清空任务条，避免跨空间残留。
-  useEffect(() => {
-    usePetStore.getState().clearTasks();
-  }, [selectedWorkspaceId]);
-
   // 渠道任务通过短请求刷新；后台暂停，避免多页面长连接耗尽同源连接。
   useEffect(() => {
     if (!enabled || !activePet) return;
@@ -233,7 +225,7 @@ function PetWidgetInner() {
           retryTimer = setTimeout(connect, 3000);
           return;
         }
-        usePetStore.getState().applyRemoteTaskEvent(ev);
+        usePetStore.getState().applyRemoteTaskEvent(ev, selectedWorkspaceId);
       }, selectedWorkspaceId);
     };
     // 返回前台立即获取快照，补齐后台期间的任务状态。
@@ -567,7 +559,7 @@ function PetWidgetInner() {
   if (!enabled || !activePet) return null;
 
   // 任务条：最多平铺 2 条，超出折叠为「还有 N 个」可展开；展开后超高滚动
-  const taskList = Object.entries(tasks).sort((a, b) => {
+  const taskList = Object.entries(tasksForWorkspace(tasks, selectedWorkspaceId)).sort((a, b) => {
     const da = a[1].status === 'done' ? 1 : 0;
     const db = b[1].status === 'done' ? 1 : 0;
     return da - db || b[1].updatedAt - a[1].updatedAt;
@@ -706,8 +698,7 @@ function PetWidgetInner() {
       // 开启/复用宠物闲聊会话并打开弹窗；未绑定智能体时后端返回 400 提示
       void (async () => {
         try {
-          const r = await petsApi.petChat(activePet.id, { workspaceId: selectedWorkspaceId });
-          setChatDlg({ open: true, sessionId: r.conversation_id, agentId: r.agent_id ?? null });
+          await chatDlg.openChat();
         } catch (err) {
           message.warning(err instanceof Error ? err.message : '请先为该宠物绑定智能体');
         }
@@ -801,12 +792,14 @@ function PetWidgetInner() {
       </Dropdown>
       {taskPills}
       <PetChatPanel
+        key={`${activePet.id}:${selectedWorkspaceId ?? ''}`}
         open={chatDlg.open}
         pet={activePet}
         sessionId={chatDlg.sessionId}
         agentId={chatDlg.agentId}
-        onClose={() => setChatDlg((d) => ({ ...d, open: false }))}
-        onSessionChange={(sid, aid) => setChatDlg({ open: true, sessionId: sid, agentId: aid })}
+        workspaceId={selectedWorkspaceId}
+        onClose={chatDlg.closeChat}
+        onNewConversation={() => chatDlg.openChat(true)}
       />
     </div>
   );

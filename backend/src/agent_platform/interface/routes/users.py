@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from agent_platform.auth.dependencies import SuperAdminUser
-from agent_platform.auth.password import NewPassword, async_hash_password
+from agent_platform.auth.password import NewPassword, async_hash_password, replace_password
 from agent_platform.db.connection import get_db
 from agent_platform.db.models import Tenant, TenantMembership, User, UserConfig, UserProfile
 
@@ -139,6 +139,7 @@ async def update_user(
 ) -> dict:
     result = await db.execute(
         select(User).options(selectinload(User.memberships)).where(User.id == user_id)
+        .with_for_update().execution_options(populate_existing=True)
     )
     user = result.scalar_one_or_none()
     if not user:
@@ -158,7 +159,7 @@ async def update_user(
             raise HTTPException(status_code=409, detail="邮箱已存在")
         user.email = str(req.email)
     if req.password is not None:
-        user.password_hash = await async_hash_password(req.password)
+        await replace_password(db, user, req.password)
     if req.role is not None:
         user.role = req.role
     if req.is_active is not None:

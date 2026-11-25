@@ -355,3 +355,43 @@ class TestCall:
 
             result = await executor.call("text_tool", {})
             assert result == "plain text response"
+
+
+async def test_shared_origin_uses_request_local_cookies_and_limits_body(monkeypatch):
+    import gzip
+
+    from agent_platform.tools.remote import executor as module
+
+    registry = ToolRegistry()
+    manager = RemoteToolManager(registry)
+    first = make_config(name="first", tenant_id=uuid4())
+    second = make_config(name="second", tenant_id=uuid4())
+    await manager.add_tool(first)
+    await manager.add_tool(second)
+    seen = []
+
+    def upstream(request):
+        seen.append(request.headers.get("Cookie"))
+        paths = {
+            "/first": (302, {"Location": "/finish", "Set-Cookie": "session=one; Path=/"}, b""),
+            "/finish": (200, {}, b"first ok"),
+            "/second": (200, {}, b"second ok"),
+            "/large": (200, {"Content-Encoding": "gzip"}, gzip.compress(b"a" * 256)),
+        }
+        status, headers, body = paths[request.url.path]
+        return httpx.Response(status, headers=headers, stream=httpx.ByteStream(body))
+
+    monkeypatch.setattr(module, "MetadataGuardTransport", lambda: httpx.MockTransport(upstream))
+    monkeypatch.setattr(module, "MAX_REMOTE_RESPONSE_BYTES", 128)
+    executor = RemoteToolExecutor(manager)
+    try:
+        first.url_template = "https://business.example/first"
+        second.url_template = "https://business.example/second"
+        assert await executor.call(first.name, {}) == "first ok"
+        assert await executor.call(second.name, {}) == "second ok"
+        assert seen == [None, "session=one", None]
+        second.url_template = "https://business.example/large"
+        with pytest.raises(module.RemoteToolError, match="size limit"):
+            await executor.call(second.name, {})
+    finally:
+        await executor.aclose()

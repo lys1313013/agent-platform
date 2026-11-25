@@ -17,22 +17,21 @@ from fastapi import (
     Request,
 )
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, JsonValue, field_validator
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_platform.auth.dependencies import AdminUser, CurrentUser, ExecutionUser
-from agent_platform.core.agent import AgentLoop, AgentStep
+from agent_platform.core.agent import AgentLoop, AgentStep, DelegationContext
 from agent_platform.core.chat import ModelUnavailableError, build_tools_schema
 from agent_platform.core.chat_history import ChatTurnRecorder
+from agent_platform.core.config import settings
 from agent_platform.core.context import (
-    emergency_compress,
-    is_context_overflow_error,
     prepare_context,
     prepared_history,
 )
 from agent_platform.core.execution import ChatExecutionService
-from agent_platform.core.runtime_config import AgentRuntimeConfig
+from agent_platform.core.runtime_config import AgentRuntimeConfig, PublishedBindings
 from agent_platform.core.session_access import owned_session
 from agent_platform.db import Message, Session
 from agent_platform.db.connection import get_db
@@ -50,8 +49,17 @@ router = APIRouter(tags=["agent-api"])
 
 class ExecuteRequest(BaseModel):
     user_input: str = Field(..., min_length=1, max_length=10000)
-    variables: dict | None = None
+    variables: dict[str, JsonValue] | None = Field(default=None, description="仅用于本轮模型输入的业务上下文，JSON 编码最多 32 KiB")
     session_rid: str | None = None
+
+    @field_validator("variables")
+    @classmethod
+    def validate_variables(cls, value: dict[str, JsonValue] | None) -> dict[str, JsonValue] | None:
+        if value is not None:
+            encoded = json.dumps(value, ensure_ascii=False, allow_nan=False)
+            if len(encoded.encode("utf-8")) > 32 * 1024:
+                raise ValueError("variables JSON 不能超过 32 KiB")
+        return value
 
 
 class ExecuteResponse(BaseModel):
@@ -178,6 +186,7 @@ def _filter_tools_for_agent(
     return filtered, build_tools_schema(
         tool_executor,
         filtered,
+        tenant_id=tenant_id,
         mcp_server_ids={str(sid) for sid in config_snapshot.get("mcp_server_ids", [])},
         enabled_tools=set(enabled_tools) if enabled_tools else None,
         mcp_all_tools_server_ids={
@@ -198,6 +207,7 @@ def _build_config_snapshot(agent: Agent) -> dict:
         ],
         "skill_ids": [str(s.id) for s in agent.skills] if agent.skills else [],
         "knowledge_base_ids": [str(kb.id) for kb in agent.knowledge_bases] if agent.knowledge_bases else [],
+        "graph_knowledge_base_ids": [str(kb.id) for kb in agent.graph_knowledge_bases],
         "child_ids": [str(c.id) for c in agent.children] if agent.children else [],
         "welcome_message": agent.welcome_message,
         "enable_memory_extraction": agent.enable_memory_extraction,
@@ -452,12 +462,22 @@ async def _execute_agent_inner(
     # Build agent loop
     agent_loop = await execution.build_loop(
         tool_executor, system_prompt, db,
+        delegation=DelegationContext(
+            parent_agent_id=agent.id, delegation_depth=0, max_depth=settings.agent.max_delegation_depth,
+            workspace_id=workspace_id, workspace_slug=workspace_slug, tenant_id=agent.tenant_id,
+            published_bindings=PublishedBindings.from_snapshot(config_snapshot),
+        ),
         workspace_id=workspace_id,
         workspace_slug=workspace_slug,
         allowed_tools={s["function"]["name"] for s in tools_schema},
     )
 
     agent_loop.execution_agent_id = agent.id
+
+    request_context = None
+    if req.variables:
+        context = json.dumps(req.variables, ensure_ascii=False, allow_nan=False)
+        request_context = f"本轮业务上下文（JSON）\n{context}"
 
     # Prepare context
     prepared_messages, _ = await prepare_context(
@@ -466,6 +486,7 @@ async def _execute_agent_inner(
         user_input=req.user_input,
         provider=agent_loop.provider,
         existing_summary=session.context_summary,
+        request_context=request_context,
     )
 
     processed_history = prepared_history(
@@ -490,29 +511,14 @@ async def _execute_agent_inner(
             user_id=user.id,
             session_id=session.id,
             conversation_history=processed_history,
+            request_context=request_context,
             tools=tools_schema,
         ):
             if isinstance(event, AgentStep) and event.done:
                 final_output = event.final_output
     except Exception as e:
-        if is_context_overflow_error(e):
-            logger.warning(f"Context overflow in execute, emergency compress: {e}")
-            emergency_history = emergency_compress(prepared_messages, level=1)
-            emergency_hist = prepared_history(
-                emergency_history, system_prompt=system_prompt, user_input=req.user_input,
-            )
-            async for event in agent_loop.run(
-                user_input=req.user_input,
-                user_id=user.id,
-                session_id=session.id,
-                conversation_history=emergency_hist,
-                tools=tools_schema,
-            ):
-                if isinstance(event, AgentStep) and event.done:
-                    final_output = event.final_output
-        else:
-            logger.error("execute_agent_error", error=str(e), exc_info=True)
-            raise HTTPException(status_code=500, detail=f"Agent execution failed: {type(e).__name__}: {e}") from e
+        logger.error("execute_agent_error", error=str(e), exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Agent execution failed: {type(e).__name__}: {e}") from e
 
     # Save assistant message
     assistant_msg = Message(
@@ -658,6 +664,11 @@ async def sse_chat(
             # Build agent loop
             agent_loop = await execution.build_loop(
                 tool_executor, system_prompt, db_session,
+                delegation=DelegationContext(
+                    parent_agent_id=agent.id, delegation_depth=0, max_depth=settings.agent.max_delegation_depth,
+                    workspace_id=workspace_id, workspace_slug=workspace_slug, tenant_id=agent.tenant_id,
+                    published_bindings=PublishedBindings.from_snapshot(config_snapshot),
+                ),
                 workspace_id=workspace_id,
                 workspace_slug=workspace_slug,
                 allowed_tools={s["function"]["name"] for s in tools_schema},
@@ -783,20 +794,9 @@ async def clear_session(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict:
     """Clear all messages in a session (keep the session)."""
-    await owned_session(db, session_id, user.id)
-    result = await db.execute(
-        select(Session).where(Session.id == session_id, Session.user_id == user.id, Session.source != "room")
-    )
-    session = result.scalar_one_or_none()
-    if session is not None and session.browser_private:
-        raise HTTPException(403, "本地浏览器私密会话仅支持 Web 聊天")
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
+    from agent_platform.core.session_access import remove_session_history
 
-    from sqlalchemy import delete
-    await db.execute(delete(Message).where(Message.session_id == session_id))
-    session.context_summary = None
-
+    await remove_session_history(db, session_id, user.id, delete_session=False, allow_browser_private=False)
     return {"code": 0, "data": {"message": "Session cleared"}}
 
 
@@ -823,6 +823,7 @@ async def submit_message_feedback(
     result = await db.execute(
         select(Message)
         .where(Message.id == message_id, Message.session_id == session_id)
+        .with_for_update()
     )
     msg = result.scalar_one_or_none()
     if not msg:
@@ -833,8 +834,6 @@ async def submit_message_feedback(
         raise HTTPException(status_code=400, detail="feedback must be 'up' or 'down'")
 
     # Store feedback in token_usage JSONB (reuse field for simplicity)
-    token_usage = msg.token_usage or {}
-    token_usage["feedback"] = feedback
-    msg.token_usage = token_usage
+    msg.token_usage = {**(msg.token_usage or {}), "feedback": feedback}
 
     return {"code": 0, "data": {"message": "Feedback recorded"}}

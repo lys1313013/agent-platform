@@ -9,7 +9,6 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from agent_platform.auth.jwt_handler import (
     TokenPair,
@@ -58,19 +57,33 @@ def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
-async def _store_refresh_token(
-    db: AsyncSession, user_id: UUID, token: str, expire_days: int
-) -> None:
-    """Persist a refresh token hash to the database."""
-    expires_at = datetime.now(UTC) + timedelta(days=expire_days)
-    db.add(
-        RefreshToken(
-            user_id=user_id,
-            token_hash=_hash_token(token),
-            expires_at=expires_at,
-        )
+def _issue_tokens(db: AsyncSession, user: User, record: RefreshToken | None = None) -> TokenPair:
+    """Keep one current refresh hash per login, including across rotations."""
+    family_id = record.family_id if record is not None else uuid4()
+    refresh = create_refresh_token(user.id, family_id=family_id, credential_version=user.credential_version)
+    if record is None:
+        record = RefreshToken(user_id=user.id, family_id=family_id)
+        db.add(record)
+    record.token_hash = _hash_token(refresh)
+    record.expires_at = datetime.now(UTC) + timedelta(days=settings.jwt.refresh_token_expire_days)
+    return TokenPair(access_token=create_access_token(user.id, user.role, user.credential_version),
+                     refresh_token=refresh)
+
+
+async def _ensure_login_tenant(db: AsyncSession, user: User) -> None:
+    if not user.is_active:
+        raise HTTPException(403, "Account is disabled")
+    # An active membership is required. Recover a stale UI selection so the
+    # existing profile and landing-page requests can succeed immediately.
+    tenant_id = await db.scalar(
+        select(Tenant.id).join(TenantMembership, TenantMembership.tenant_id == Tenant.id)
+        .where(TenantMembership.user_id == user.id, Tenant.is_active)
+        .order_by((Tenant.id == user.tenant_id).desc(), Tenant.created_at, Tenant.id).limit(1)
     )
-    await db.flush()
+    if tenant_id is None:
+        raise HTTPException(403, "Account has no active tenant")
+    if tenant_id != user.tenant_id:
+        user.tenant_id = tenant_id
 
 
 # ---- Register ----
@@ -124,13 +137,7 @@ async def register(
     db.add(UserConfig(user_id=user.id))
     await db.flush()
 
-    # Issue tokens
-    access = create_access_token(user.id, user.role)
-    refresh = create_refresh_token(user.id)
-
-    await _store_refresh_token(db, user.id, refresh, settings.jwt.refresh_token_expire_days)
-
-    return TokenPair(access_token=access, refresh_token=refresh)
+    return _issue_tokens(db, user)
 
 
 # ---- Login ----
@@ -155,7 +162,7 @@ async def login(
         )
 
     result = await db.execute(
-        select(User).options(selectinload(User.tenant)).where(
+        select(User).where(
             (User.username == req.username_or_email) | (User.email == req.username_or_email)
         )
     )
@@ -167,22 +174,16 @@ async def login(
             detail="Invalid credentials",
         )
 
-    if not user.is_active or not user.tenant.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Account is disabled",
-        )
-
-    access = create_access_token(user.id, user.role)
-    refresh = create_refresh_token(user.id)
-
+    # Serialize issuance with a password reset. Verify the previously checked
+    # password still belongs to this credential generation after taking the lock.
+    generation = user.credential_version
+    await db.refresh(user, with_for_update={"of": User})
+    if generation != user.credential_version:
+        raise HTTPException(401, "Credentials changed")
+    await _ensure_login_tenant(db, user)
     await clear_counter(user_key)
     await clear_counter(ip_key)
-
-    # Persist refresh token
-    await _store_refresh_token(db, user.id, refresh, settings.jwt.refresh_token_expire_days)
-
-    return TokenPair(access_token=access, refresh_token=refresh)
+    return _issue_tokens(db, user)
 
 
 # ---- Refresh ----
@@ -207,49 +208,25 @@ async def refresh(
             detail="Not a refresh token",
         )
 
-    # Verify token hash exists and not expired
     token_hash = _hash_token(req.refresh_token)
-    result = await db.execute(
-        select(RefreshToken).where(
-            RefreshToken.token_hash == token_hash,
-            RefreshToken.expires_at > datetime.now(UTC),
-        )
-    )
-    token_record = result.scalar_one_or_none()
-    if not token_record:
-        # A correctly signed token that is no longer stored was rotated or
-        # revoked. Treat replay as compromise and revoke the whole family.
-        try:
-            await db.execute(delete(RefreshToken).where(
-                RefreshToken.user_id == UUID(payload.sub),
-            ))
-            await db.commit()
-        except Exception:
-            await db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Refresh token revoked or expired",
-        )
-
-    # Fetch user
-    user_result = await db.execute(
-        select(User).options(selectinload(User.tenant)).where(User.id == UUID(payload.sub))
-    )
-    user = user_result.scalar_one()
-    if not user.is_active or not user.tenant.is_active:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
-
-    # Delete old refresh token (rotate)
-    await db.execute(delete(RefreshToken).where(RefreshToken.id == token_record.id))
-
-    # Issue new tokens
-    access = create_access_token(user.id, user.role)
-    new_refresh = create_refresh_token(user.id)
-
-    # Persist new refresh token
-    await _store_refresh_token(db, user.id, new_refresh, settings.jwt.refresh_token_expire_days)
-
-    return TokenPair(access_token=access, refresh_token=new_refresh)
+    family_id = payload.family_id or UUID(token_hash[:32])
+    user = await db.scalar(select(User).where(User.id == UUID(payload.sub))
+                           .with_for_update().execution_options(populate_existing=True))
+    if user is None or payload.ver != user.credential_version:
+        raise HTTPException(401, "Refresh token revoked or expired")
+    record = await db.scalar(select(RefreshToken).where(
+        RefreshToken.user_id == user.id, RefreshToken.family_id == family_id,
+        RefreshToken.expires_at > datetime.now(UTC),
+    ).with_for_update().execution_options(populate_existing=True))
+    if record is None:
+        raise HTTPException(401, "Refresh token revoked or expired")
+    if record.token_hash != token_hash:
+        # A validly signed earlier token from this login was presented again.
+        await db.delete(record)
+        await db.commit()
+        raise HTTPException(401, "Refresh token already rotated")
+    await _ensure_login_tenant(db, user)
+    return _issue_tokens(db, user, record)
 
 
 # ---- Logout ----
@@ -266,10 +243,9 @@ async def logout(
     except Exception:
         return  # Silently succeed on invalid token
 
-    token_hash = _hash_token(req.refresh_token)
-    await db.execute(
-        delete(RefreshToken).where(
-            RefreshToken.user_id == UUID(payload.sub),
-            RefreshToken.token_hash == token_hash,
-        )
-    )
+    if payload.type != "refresh":
+        return
+    family_id = payload.family_id or UUID(_hash_token(req.refresh_token)[:32])
+    await db.execute(delete(RefreshToken).where(
+        RefreshToken.user_id == UUID(payload.sub), RefreshToken.family_id == family_id,
+    ))

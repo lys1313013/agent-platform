@@ -59,6 +59,7 @@ class CommandContext:
     args: dict[str, Any] = field(default_factory=dict)
     tool_executor: Any | None = None
     execution_tenant_id: UUID | None = None
+    allow_private_sessions: bool = True
 
     @property
     def tenant_id(self) -> UUID:

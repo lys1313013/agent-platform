@@ -21,6 +21,7 @@ import structlog
 from fastapi import HTTPException
 from sqlalchemy import delete, select, text
 
+from agent_platform.core import run_confirmations
 from agent_platform.core.chat_history import _merge_file_changes
 from agent_platform.core.chat_run_notify import notifier
 from agent_platform.core.session_access import authorize_session
@@ -181,12 +182,22 @@ async def save_snapshot(db, run: ChatRun) -> None:
 
 
 async def expire_run(db, run: ChatRun) -> None:
-    heartbeat = run.heartbeat_at
-    if heartbeat.tzinfo is None:
-        heartbeat = heartbeat.replace(tzinfo=UTC)
-    if run.status == "running" and heartbeat < now() - timedelta(seconds=LEASE_SECONDS):
-        run.status = "completed" if run.snapshot.get("completed") else "interrupted"
-        await save_snapshot(db, run)
+    def lease_expired(current: ChatRun) -> bool:
+        heartbeat = current.heartbeat_at
+        if heartbeat.tzinfo is None:
+            heartbeat = heartbeat.replace(tzinfo=UTC)
+        return current.status == "running" and heartbeat < now() - timedelta(seconds=LEASE_SECONDS)
+
+    if not lease_expired(run):
+        return
+    # A heartbeat or completion can commit after the optimistic read.
+    locked = await db.scalar(select(ChatRun).where(
+        ChatRun.id == run.id, ChatRun.user_id == run.user_id,
+    ).with_for_update().execution_options(populate_existing=True))
+    if locked is not None and lease_expired(locked):
+        locked.status = "completed" if locked.snapshot.get("completed") else "interrupted"
+        run_confirmations.clear(locked)
+        await save_snapshot(db, locked)
         await db.flush()
 
 
@@ -196,7 +207,7 @@ async def latest(db, user_id: UUID, session_id: UUID) -> ChatRun | None:
     if not session:
         raise HTTPException(404, "Session not found")
     run = await db.scalar(select(ChatRun).where(ChatRun.session_id == session_id, ChatRun.user_id == user_id)
-                          .order_by(ChatRun.created_at.desc()).limit(1).with_for_update())
+                          .order_by(ChatRun.created_at.desc()).limit(1))
     if run:
         await authorize_run(db, run)
         await expire_run(db, run)
@@ -306,6 +317,7 @@ async def append(
             run.last_sequence += 1
             payload = sanitize_pg_text(event)
             _apply_event(state, payload)
+            run_confirmations.record_event(run, payload)
             db.add(ChatRunEvent(
                 run_id=run_id, user_id=user_id, sequence=run.last_sequence, payload=payload,
             ))
@@ -332,6 +344,7 @@ async def finish(run_id: UUID, user_id: UUID, status: str) -> None:
             if state is not None:
                 run.snapshot = copy.deepcopy(state)
             run.status = status
+            run_confirmations.clear(run)
             await save_snapshot(db, run)
             await db.commit()
             changed = True
@@ -354,6 +367,7 @@ async def heartbeat(run_id: UUID, user_id: UUID, worker: asyncio.Task) -> None:
                     return
                 run.heartbeat_at = now()
                 await db.commit()
+                run_confirmations.deliver(run)
     except asyncio.CancelledError:
         raise
     except Exception:
@@ -373,6 +387,7 @@ async def produce(run: ChatRun, source: AsyncIterator[str]) -> None:
     grant_id = run.request.get("browser_grant_id")
     browser_token = browser_run.set(BrowserRunContext(run.id, UUID(grant_id), run.user_id) if grant_id else None)
     token = current_user_id.set(str(run.user_id))
+    web_run_token = run_confirmations.current_web_run.set(run.id)
     children: set[asyncio.Task] = set()
     child_token = child_tasks.set(children)
     completed_token = completed_calls.set(run.request.get("completed_calls", {}))
@@ -388,7 +403,7 @@ async def produce(run: ChatRun, source: AsyncIterator[str]) -> None:
             if event.get("type") in {"ui_action_heartbeat", "delegation_heartbeat"}:
                 continue
             pending.append(event)
-            if (event.get("type") not in {"thinking", "text_delta"}
+            if (event.get("type") not in _DELTA_TYPES
                     or time.monotonic() - last_flush >= 0.1 or len(pending) >= 64):
                 await append(run.id, run.user_id, pending)
                 pending.clear()
@@ -438,6 +453,7 @@ async def produce(run: ChatRun, source: AsyncIterator[str]) -> None:
         child_tasks.reset(child_token)
         completed_calls.reset(completed_token)
         current_user_id.reset(token)
+        run_confirmations.current_web_run.reset(web_run_token)
 
 
 def start(run: ChatRun, source: AsyncIterator[str]) -> None:
@@ -497,7 +513,7 @@ async def _subscribe(run_id: UUID, user_id: UUID, after: int = 0, *, replay: boo
                 break
             yield sse({**row.payload, "run_id": str(run_id), "sequence": cursor,
                        "replay": cursor <= replay_until})
-        if info["status"] != "running" and cursor >= info["last_sequence"]:
+        if info["status"] != "running" and (not rows or cursor >= info["last_sequence"]):
             yield sse({"type": "run_status", **info})
             return
         if not rows:

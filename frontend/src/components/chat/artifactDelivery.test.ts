@@ -2,7 +2,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { act, createElement } from 'react';
 import { createRoot } from 'react-dom/client';
 import ReactMarkdown from 'react-markdown';
-import ArtifactLink, { parseArtifactLink, workspaceRelativePath } from './ArtifactLink';
+import ArtifactLink from './ArtifactLink';
+import { parseArtifactLink, workspaceRelativePath } from './artifacts';
 import { useWebpagePreviewStore } from '@/stores/webpagePreviewStore';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });

@@ -15,6 +15,7 @@ import httpx
 import structlog
 
 if TYPE_CHECKING:
+    from anyio.streams.memory import MemoryObjectSendStream
     from mcp import ClientSession
 
 logger = structlog.get_logger()
@@ -89,10 +90,19 @@ class MCPServerConnection:
         self._lifecycle_lock = asyncio.Lock()
         self._closed = False
         self._connected = False
+        self._write_stream: MemoryObjectSendStream | None = None
 
     @property
     def connected(self) -> bool:
-        return self._connected and self.session is not None
+        if not self._connected or self.session is None:
+            return False
+        # The SSE SDK can swallow a POST failure while its GET stream stays
+        # open. Its writer then closes the memory stream; the owner task alone
+        # cannot tell us whether the transport still accepts requests.
+        if self._write_stream is not None:
+            stats = self._write_stream.statistics()
+            return stats.open_receive_streams > 0 and stats.open_send_streams > 0
+        return True
 
     async def connect(self) -> None:
         """Establish connection and discover tools."""
@@ -134,6 +144,7 @@ class MCPServerConnection:
 
             async with AsyncExitStack() as stack:
                 streams = await stack.enter_async_context(self._transport())
+                self._write_stream = streams[1]
                 self.session = await stack.enter_async_context(ClientSession(*streams[:2]))
                 await self.session.initialize()
                 await self.refresh_tools()
@@ -167,6 +178,7 @@ class MCPServerConnection:
         finally:
             self._connected = False
             self.session = None
+            self._write_stream = None
             self._ready.set()
 
     def _transport(self):

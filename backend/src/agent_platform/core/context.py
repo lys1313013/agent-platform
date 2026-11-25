@@ -321,7 +321,7 @@ def _summarize_tool_result(msg: LLMMessage) -> str:
     if not content:
         return "[tool executed]"
     # Keep the full file reference after old results become one-line summaries.
-    if content.startswith("[Full tool output saved: "):
+    if content.startswith(("[Full tool output saved: ", "[Captured tool output saved: ")):
         return content.split("\n", 1)[0]
     # Take first line or first 100 chars
     first_line = content.split("\n")[0][:100]
@@ -383,7 +383,7 @@ async def generate_summary(
     except Exception:
         logger.exception("Failed to generate context summary")
         # Fallback: simple concatenation of first/last messages
-        return _fallback_summary(messages, max_chars)
+        return existing_summary or _fallback_summary(messages, max_chars)
 
 
 def _fallback_summary(messages: list[LLMMessage], max_chars: int) -> str:
@@ -427,6 +427,7 @@ async def prepare_context(
     user_input: str,
     provider: LLMProvider,
     existing_summary: str | None = None,
+    request_context: str | None = None,
 ) -> tuple[list[LLMMessage], bool]:
     """Prepare the message list with context window management.
 
@@ -444,6 +445,9 @@ async def prepare_context(
         a new summary was generated.
     """
     budget = ContextBudget.from_settings()
+    # Count the transient user message on the wire but never feed it into the summary.
+    extra_tokens = estimate_message_tokens(LLMMessage(role="user", content=request_context)) if request_context else 0
+    history_budget = max(0, budget.history_budget - extra_tokens)
 
     # Build preliminary message list
     messages: list[LLMMessage] = []
@@ -462,7 +466,7 @@ async def prepare_context(
     messages.extend(history)
     messages.append(LLMMessage(role="user", content=user_input))
 
-    total_tokens = estimate_messages_tokens(messages)
+    total_tokens = estimate_messages_tokens(messages) + extra_tokens
     logger.debug(
         "Context check: %d messages, ~%d tokens (budget: %d, trigger: %d)",
         len(messages),
@@ -490,10 +494,10 @@ async def prepare_context(
     system_msgs = [m for m in messages if m.role == "system"]
     non_system = [m for m in messages if m.role != "system"]
 
-    truncated_history = truncate_history_messages(non_system, budget.history_budget)
+    truncated_history = truncate_history_messages(non_system, history_budget)
 
     messages = system_msgs + truncated_history
-    total_tokens = estimate_messages_tokens(messages)
+    total_tokens = estimate_messages_tokens(messages) + extra_tokens
 
     if total_tokens <= budget.trigger_at:
         logger.info("Light truncation sufficient: %d tokens", total_tokens)
@@ -501,7 +505,7 @@ async def prepare_context(
 
     # Step 2: LLM summary compression
     # Split into "to summarize" (older half) and "to keep" (newer half)
-    split_point = _find_split_point(messages, budget.history_budget)
+    split_point = _find_split_point(messages, history_budget)
 
     if split_point <= 1:
         # Nothing to summarize (only 1 message or less before split)
@@ -529,7 +533,7 @@ async def prepare_context(
         )
     new_messages.extend(to_keep)
 
-    final_tokens = estimate_messages_tokens(new_messages)
+    final_tokens = estimate_messages_tokens(new_messages) + extra_tokens
     logger.info(
         "Context compression complete: %d -> %d messages, ~%d -> ~%d tokens",
         len(messages),
@@ -628,6 +632,21 @@ def emergency_compress(
     )
 
     return system_msgs + kept
+
+
+def compact_model_retry(messages: list[LLMMessage], turn_start: int) -> list[LLMMessage]:
+    """Keep the whole current turn, including every tool-call/result pair."""
+    history = emergency_compress(messages[:turn_start], level=1)
+    # A truncated history must not start halfway through a tool exchange.
+    first_user = next((i for i, item in enumerate(history) if item.role == "user"), len(history))
+    kept = [item for item in history[:first_user] if item.role == "system"]
+    kept.extend(history[first_user:])
+    for message in messages[turn_start:]:
+        if message.role == "tool" and isinstance(message.content, str):
+            message = LLMMessage(role="tool", tool_call_id=message.tool_call_id, name=message.name,
+                                 content=truncate_message_content(message.content, max_chars=2000))
+        kept.append(message)
+    return kept
 
 
 # ---- System Prompt Budget Control ----

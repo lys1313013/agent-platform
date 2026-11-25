@@ -355,10 +355,15 @@ export default function WorkspacesPage() {
                       customRequest={async ({ file, onSuccess, onError }) => {
                         setUploading(true);
                         try {
-                          const target = joinPath(currentPath, (file as File).name);
-                          await workspacesApi.uploadFile(selectedWorkspace.id, target, file as File);
-                          message.success(`已上传 ${(file as File).name}`);
-                          onSuccess?.({});
+                          const upload = file as File;
+                          const target = joinPath(currentPath, upload.name);
+                          const result = await workspacesApi.uploadFile(selectedWorkspace.id, target, upload);
+                          if (result.sandbox_sync_status === 'pending') {
+                            message.warning(`已上传 ${upload.name}，沙箱待同步`);
+                          } else {
+                            message.success(`已上传 ${upload.name}`);
+                          }
+                          onSuccess?.(result);
                           fetchFiles(selectedWorkspace.id, currentPath);
                         } catch (e) {
                           message.error('上传失败');

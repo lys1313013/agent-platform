@@ -2,6 +2,8 @@
 
 > 由后端路由代码生成，共 224 个端点。路径为装饰器声明值，实际挂载以 `interface/api.py` 为准；完整 Schema 见运行中的 `/docs`。
 
+管理界面写入时可以携带 `X-Expected-User-ID` 和 `X-Expected-Tenant-ID`。服务端发现账号或管理租户与页面预期不符时返回 409。执行已有对象时，仍按对象所属租户校验权限。
+
 ## interface/routes/admin_models.py（11）
 
 | 方法 | 路径 | 函数 | 说明 |
@@ -23,12 +25,12 @@
 | 方法 | 路径 | 函数 | 说明 |
 |---|---|---|---|
 | GET | `/api/agents/{agent_id}/api-doc` | `get_api_doc` | Get API documentation metadata for an agent. |
-| POST | `/api/agents/{agent_id}/execute` | `execute_agent` | Synchronous one-shot execution of an agent. |
+| POST | `/api/agents/{agent_id}/execute` | `execute_agent` | 执行已发布版本，`variables` 仅送入本轮模型，会话历史中的用户消息只保存 `user_input`。 |
 | POST | `/api/agents/{agent_id}/sessions` | `create_external_session` | Create a new session for external API calls (SSE streaming). |
 | GET | `/api/agents/{agent_id}/versions` | `list_versions` | List all published versions of an agent (visible to the caller only). |
 | POST | `/api/agents/{agent_id}/versions` | `publish_version` | Publish a new version of an agent (admin/owner only). |
 | POST | `/api/sessions/{session_id}/chat` | `sse_chat` | SSE streaming chat for external API sessions. |
-| POST | `/api/sessions/{session_id}/clear` | `clear_session` | Clear all messages in a session (keep the session). |
+| POST | `/api/sessions/{session_id}/clear` | `clear_session` | 清除消息、摘要和运行回放，保留会话。会话正在运行时返回 409。 |
 | GET | `/api/sessions/{session_id}/messages` | `get_session_messages` | Get conversation history for an external API session. |
 | POST | `/api/sessions/{session_id}/messages/{message_id}/feedback` | `submit_message_feedback` | Submit feedback (up/down) for a message (session owner only). |
 
@@ -261,11 +263,11 @@
 
 | 方法 | 路径 | 函数 | 说明 |
 |---|---|---|---|
-| GET | `/api/sessions` | `list_sessions` | List all sessions for the current user, optionally filtered by agent. |
+| GET | `/api/sessions` | `list_sessions` | 在仍有访问权限的会话中按 `agent_id`、`source`、标题 `search` 筛选。`limit` 接受正整数，默认 50；`offset` 默认 0。默认按更新时间降序，同一时间按会话 ID 降序。传 `pinned_first=true` 时先列置顶会话，组内仍按上述顺序分页。 |
 | POST | `/api/sessions` | `create_session` | Create a new conversation session, auto-bound to user's default workspace. |
 | DELETE | `/api/sessions/{session_id}` | `delete_session` | Delete a session and all its messages. |
-| GET | `/api/sessions/{session_id}` | `get_session` | Get a session with its message history. |
-| PATCH | `/api/sessions/{session_id}` | `update_session` | Update a session (rename title and/or rebind agent). |
+| GET | `/api/sessions/{session_id}` | `get_session` | 按时间顺序返回历史消息。传 `message_limit` 可读最近一页，再传首条消息 ID 作为 `before` 游标读取上一页。用 `has_more_messages` 判断是否继续。 |
+| PATCH | `/api/sessions/{session_id}` | `update_session` | 支持标题、智能体绑定、`is_pinned` 和 `is_archived`，返回保存后的会话。 |
 | GET | `/api/sessions/{session_id}/events` | `session_events_stream` | SSE 回放渠道任务在跑期间的完整 Agent 事件（连接即回放 + 实时尾随）。 |
 | GET | `/api/sessions/{session_id}/status` | `get_session_status` | 查询会话当前是否有 AgentLoop / 渠道任务在跑。 |
 

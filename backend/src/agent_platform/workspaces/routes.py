@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import Response
+from minio.error import S3Error
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -41,15 +43,14 @@ def _get_workspace_storage() -> WorkspaceStorage | None:
         return None
 
 
-def _get_live_sandbox(request: Request, user_id: UUID) -> Sandbox | None:
-    """Return the user's running sandbox, if any."""
+async def _get_live_sandbox(request: Request, user_id: UUID, workspace) -> Sandbox | None:
     mgr = getattr(request.app.state, "sandbox_mgr", None)
     if mgr is None:
         return None
     try:
-        return mgr.get_active_for_user(str(user_id))
-    except Exception as e:
-        logger.warning("live_sandbox_lookup_failed", error=str(e))
+        return await mgr.reconcile_uploaded_workspace(str(user_id), str(workspace.id), workspace.slug)
+    except Exception as exc:
+        logger.warning("live_workspace_refresh_failed", error=str(exc))
         return None
 
 
@@ -90,6 +91,12 @@ class FileEntryOut(BaseModel):
 class FileListOut(BaseModel):
     entries: list[FileEntryOut]
     source: str  # "sandbox" (live container) | "storage" (MinIO)
+
+
+class UploadedFileOut(BaseModel):
+    path: str
+    size: int
+    sandbox_sync_status: Literal["pending"] | None = None
 
 
 class PresignedUrlOut(BaseModel):
@@ -173,6 +180,7 @@ async def update_workspace(
 
 @router.delete("/{workspace_id}", status_code=204)
 async def delete_workspace(
+    request: Request,
     workspace_id: UUID,
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -187,9 +195,14 @@ async def delete_workspace(
     if not deleted:
         raise HTTPException(status_code=404, detail="Workspace not found")
 
-    ws_storage = _get_workspace_storage()
-    if ws_storage:
-        ws_storage.delete_workspace(str(workspace_id))
+    ws_storage = await asyncio.to_thread(_get_workspace_storage)
+    if not ws_storage:
+        raise HTTPException(503, "Object storage unavailable")
+    mgr = getattr(request.app.state, "sandbox_mgr", None)
+    if mgr is None:
+        await asyncio.to_thread(ws_storage.delete_workspace, str(workspace_id))
+    else:
+        await mgr.delete_workspace_data(str(user.id), str(workspace_id), ws_storage)
 
 
 # ---- File browsing ----
@@ -214,7 +227,7 @@ async def list_files(
         raise HTTPException(status_code=404, detail="Workspace not found")
 
     mgr = getattr(request.app.state, "sandbox_mgr", None)
-    sandbox = _get_live_sandbox(request, user.id)
+    sandbox = await _get_live_sandbox(request, user.id, workspace)
     if sandbox is not None and mgr is not None:
         try:
             entries = await WorkspaceStorage.list_files_live(mgr, sandbox, path, workspace.slug)
@@ -226,11 +239,11 @@ async def list_files(
         except Exception as e:
             logger.warning("live_list_failed", workspace_id=str(workspace_id), error=str(e))
 
-    ws_storage = _get_workspace_storage()
+    ws_storage = await asyncio.to_thread(_get_workspace_storage)
     if not ws_storage:
         raise HTTPException(status_code=503, detail="Object storage unavailable")
 
-    entries = ws_storage.list_files(str(workspace_id), path)
+    entries = await asyncio.to_thread(ws_storage.list_files, str(workspace_id), path)
     return FileListOut(
         entries=[FileEntryOut(path=e.path, size=e.size, is_dir=e.is_dir) for e in entries],
         source="storage",
@@ -252,11 +265,11 @@ async def presign_upload(
     if not workspace:
         raise HTTPException(status_code=404, detail="Workspace not found")
 
-    ws_storage = _get_workspace_storage()
+    ws_storage = await asyncio.to_thread(_get_workspace_storage)
     if not ws_storage:
         raise HTTPException(status_code=503, detail="Object storage unavailable")
 
-    url = ws_storage.presign_upload(str(workspace_id), req.path)
+    url = await asyncio.to_thread(ws_storage.presign_upload, str(workspace_id), req.path)
     from agent_platform.core.config import settings
     return PresignedUrlOut(
         url=url,
@@ -277,14 +290,14 @@ async def presign_download(
     if not workspace:
         raise HTTPException(status_code=404, detail="Workspace not found")
 
-    ws_storage = _get_workspace_storage()
+    ws_storage = await asyncio.to_thread(_get_workspace_storage)
     if not ws_storage:
         raise HTTPException(status_code=503, detail="Object storage unavailable")
 
-    if not ws_storage.file_exists(str(workspace_id), path):
+    if not await asyncio.to_thread(ws_storage.file_exists, str(workspace_id), path):
         raise HTTPException(status_code=404, detail="File not found in workspace")
 
-    url = ws_storage.presign_download(str(workspace_id), path)
+    url = await asyncio.to_thread(ws_storage.presign_download, str(workspace_id), path)
     from agent_platform.core.config import settings
     return PresignedUrlOut(
         url=url,
@@ -295,7 +308,7 @@ async def presign_download(
 # ---- Server-proxied upload/download (fallback) ----
 
 
-@router.post("/{workspace_id}/files/content", status_code=201)
+@router.post("/{workspace_id}/files/content", status_code=201, response_model_exclude_none=True)
 async def upload_file_content(
     request: Request,
     workspace_id: UUID,
@@ -303,34 +316,35 @@ async def upload_file_content(
     db: Annotated[AsyncSession, Depends(get_db)],
     file: UploadFile = File(...),
     path: str = Query(..., description="Target file path in workspace"),
-) -> dict:
+) -> UploadedFileOut:
     """Upload a file directly through the server (fallback for small files)."""
     workspace = await WorkspaceService.get_workspace(db, workspace_id, user.id)
     if not workspace:
         raise HTTPException(status_code=404, detail="Workspace not found")
 
-    ws_storage = _get_workspace_storage()
+    ws_storage = await asyncio.to_thread(_get_workspace_storage)
     if not ws_storage:
         raise HTTPException(status_code=503, detail="Object storage unavailable")
 
-    content = await file.read()
+    content = await file.read(_MAX_SERVER_UPLOAD_BYTES + 1)
     if len(content) > _MAX_SERVER_UPLOAD_BYTES:
         raise HTTPException(
             status_code=413,
             detail=f"文件过大，单次上传最多 {_MAX_SERVER_UPLOAD_BYTES // (1024 * 1024)} MB",
         )
-    ws_storage.put_file(str(workspace_id), path, content)
+    await asyncio.to_thread(ws_storage.put_file, str(workspace_id), path, content)
 
+    result = UploadedFileOut(path=path, size=len(content))
     # Mirror into the live sandbox so the running agent sees it immediately
     mgr = getattr(request.app.state, "sandbox_mgr", None)
-    sandbox = _get_live_sandbox(request, user.id)
-    if sandbox is not None and mgr is not None:
+    if mgr is not None:
         try:
-            await WorkspaceStorage.write_file_live(mgr, sandbox, path, content, workspace.slug)
-        except Exception as e:
-            logger.warning("live_write_failed", workspace_id=str(workspace_id), error=str(e))
+            await mgr.reconcile_uploaded_workspace(str(user.id), str(workspace_id), workspace.slug)
+        except Exception as exc:
+            logger.warning("workspace_upload_refresh_pending", workspace_id=str(workspace_id), error=str(exc))
+            result.sandbox_sync_status = "pending"
 
-    return {"path": path, "size": len(content)}
+    return result
 
 
 @router.get("/{workspace_id}/files/content")
@@ -351,7 +365,7 @@ async def download_file_content(
 
     # Prefer the live sandbox — it may hold files not yet synced to MinIO
     mgr = getattr(request.app.state, "sandbox_mgr", None)
-    sandbox = _get_live_sandbox(request, user.id)
+    sandbox = await _get_live_sandbox(request, user.id, workspace)
     if sandbox is not None and mgr is not None:
         try:
             content = await WorkspaceStorage.read_file_live(mgr, sandbox, path, workspace.slug)
@@ -360,14 +374,14 @@ async def download_file_content(
         except Exception as e:
             logger.warning("live_read_failed", workspace_id=str(workspace_id), error=str(e))
 
-    ws_storage = _get_workspace_storage()
+    ws_storage = await asyncio.to_thread(_get_workspace_storage)
     if not ws_storage:
         raise HTTPException(status_code=503, detail="Object storage unavailable")
 
-    if not ws_storage.file_exists(str(workspace_id), path):
+    if not await asyncio.to_thread(ws_storage.file_exists, str(workspace_id), path):
         raise HTTPException(status_code=404, detail="File not found in workspace")
 
-    content = ws_storage.get_file(str(workspace_id), path)
+    content = await asyncio.to_thread(ws_storage.get_file, str(workspace_id), path)
 
     return Response(
         content=content,
@@ -389,17 +403,20 @@ async def delete_file(
     if not workspace:
         raise HTTPException(status_code=404, detail="Workspace not found")
 
+    ws_storage = await asyncio.to_thread(_get_workspace_storage)
+    if not ws_storage:
+        raise HTTPException(status_code=503, detail="Object storage unavailable")
     mgr = getattr(request.app.state, "sandbox_mgr", None)
-    sandbox = _get_live_sandbox(request, user.id)
-    deleted_live = False
-    if sandbox is not None and mgr is not None:
-        try:
-            deleted_live = await WorkspaceStorage.delete_file_live(mgr, sandbox, path, workspace.slug)
-        except Exception as e:
-            logger.warning("live_delete_failed", workspace_id=str(workspace_id), error=str(e))
-
-    ws_storage = _get_workspace_storage()
-    if ws_storage and ws_storage.file_exists(str(workspace_id), path):
-        ws_storage.delete_file(str(workspace_id), path)
-    elif not deleted_live:
+    try:
+        if mgr is None:
+            deleted = await asyncio.to_thread(ws_storage.delete_file, str(workspace_id), path)
+        else:
+            deleted = await mgr.delete_workspace_path(
+                str(user.id), str(workspace_id), workspace.slug, path, ws_storage,
+            )
+    except S3Error as exc:
+        if exc.code == "PreconditionFailed":
+            raise HTTPException(409, "File changed during deletion; refresh and retry") from exc
+        raise
+    if not deleted:
         raise HTTPException(status_code=404, detail="File not found in workspace")

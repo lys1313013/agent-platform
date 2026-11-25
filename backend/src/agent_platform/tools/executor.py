@@ -19,7 +19,7 @@ import structlog
 from agent_platform.core.config import settings
 from agent_platform.db.sanitize import sanitize_pg_text
 from agent_platform.hooks import get_hook_manager
-from agent_platform.observation.recorder import get_recorder
+from agent_platform.observation.recorder import bind_tool_span, get_recorder
 from agent_platform.tools.registry import ToolRegistry
 
 if TYPE_CHECKING:
@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from agent_platform.sandbox import ExecResult, SandboxManager
     from agent_platform.tools.mcp.manager import MCPManager
     from agent_platform.tools.remote.executor import RemoteToolExecutor
-    from agent_platform.tools.remote.manager import RemoteToolManager
+    from agent_platform.tools.remote.manager import RemoteToolConfig, RemoteToolManager
 
 logger = structlog.get_logger(__name__)
 
@@ -96,6 +96,7 @@ class ToolExecutor:
     """
 
     MAX_OUTPUT_SIZE = 50_000
+    _CAPTURE_NOTICE = "[Sandbox capture limit reached. For larger results, direct output to a workspace file.]"
     # Ceiling for direct-handler tools that have no registry metadata.
     DEFAULT_DIRECT_TOOL_TIMEOUT = 300.0
 
@@ -157,6 +158,7 @@ class ToolExecutor:
         allowed_tools: set[str] | None = None,
         trust_level: str = "ask_dangerous",
         approved: bool = False,
+        outer_timeout: asyncio.Timeout | None = None,
     ) -> ToolResult:
         """Execute a tool with security checks and sandbox dispatch.
 
@@ -192,33 +194,45 @@ class ToolExecutor:
             },
         )
         timeout_s = self.tool_timeout(tool_name)
-        try:
-            async with asyncio.timeout(timeout_s):
-                result = await self._execute_impl(
-                    tool_name=tool_name,
-                    arguments=arguments,
+        with bind_tool_span() as span_id:
+            try:
+                async with asyncio.timeout(timeout_s):
+                    result = await self._execute_impl(
+                        tool_name=tool_name,
+                        arguments=arguments,
+                        tool_call_id=tool_call_id,
+                        user_id=user_id,
+                        session_id=session_id,
+                        delegation=delegation,
+                        event_queue=event_queue,
+                        workspace_id=workspace_id,
+                        workspace_slug=workspace_slug,
+                        allowed_tools=allowed_tools,
+                        t_start=t_start,
+                        trust_level=trust_level,
+                        approved=approved,
+                    )
+            except TimeoutError:
+                result = ToolResult(
                     tool_call_id=tool_call_id,
-                    user_id=user_id,
-                    session_id=session_id,
-                    delegation=delegation,
-                    event_queue=event_queue,
-                    workspace_id=workspace_id,
-                    workspace_slug=workspace_slug,
-                    allowed_tools=allowed_tools,
-                    t_start=t_start,
-                    trust_level=trust_level,
-                    approved=approved,
+                    name=tool_name,
+                    arguments=arguments,
+                    output="",
+                    success=False,
+                    error=f"Tool '{tool_name}' timed out after {timeout_s:g}s",
+                    duration_ms=(time.monotonic() - t_start) * 1000,
                 )
-        except TimeoutError:
-            result = ToolResult(
-                tool_call_id=tool_call_id,
-                name=tool_name,
-                arguments=arguments,
-                output="",
-                success=False,
-                error=f"Tool '{tool_name}' timed out after {timeout_s:g}s",
-                duration_ms=(time.monotonic() - t_start) * 1000,
-            )
+            except asyncio.CancelledError:
+                if span_id is not None:
+                    get_recorder().record_tool_call(
+                        span_id=span_id,
+                        tool_name=tool_name,
+                        exec_type=self._exec_type(tool_name),
+                        duration_ms=(time.monotonic() - t_start) * 1000,
+                        is_error=True,
+                        error_type="timeout" if outer_timeout is not None and outer_timeout.expired() else "interrupted",
+                    )
+                raise
         if tool_name in {"run_shell", "run_code"}:
             self.skill_execution_evidence[(user_id, session_id, tool_call_id)] = {
                 "tool": tool_name, "arguments": arguments,
@@ -232,7 +246,7 @@ class ToolExecutor:
         if result.success and not tool_name.startswith("local_browser_"):
             await self._prepare_output(result, user_id, session_id, workspace_id, workspace_slug)
         result.duration_ms = (time.monotonic() - t_start) * 1000
-        self._record_tool_call(result, user_id, session_id)
+        self._record_tool_call(result, user_id, session_id, span_id=span_id)
         get_hook_manager().fire_nowait(
             "PostToolUse",
             user_id=user_id,
@@ -295,8 +309,8 @@ class ToolExecutor:
         # ---- MCP tool routing ----
         if not reserved and self.mcp_manager and self.mcp_manager.is_mcp_tool(tool_name):
             try:
-                await self._authorize_mcp_tool(tool_name, user_id)
-                output = await self.mcp_manager.call_tool(tool_name, arguments)
+                server_id = await self._authorize_mcp_tool(tool_name, user_id)
+                output = await self.mcp_manager.call_tool(tool_name, arguments, server_id=server_id)
                 return ToolResult(
                     tool_call_id=tool_call_id,
                     name=tool_name,
@@ -319,8 +333,8 @@ class ToolExecutor:
         # ---- Remote tool routing ----
         if not reserved and self.remote_manager and self.remote_manager.is_remote_tool(tool_name):
             try:
-                await self._authorize_remote_tool(tool_name, user_id)
-                output = await self.remote_executor.call(tool_name, arguments)
+                config = await self._authorize_remote_tool(tool_name, user_id)
+                output = await self.remote_executor.call_config(config, arguments)
                 return ToolResult(
                     tool_call_id=tool_call_id,
                     name=tool_name,
@@ -455,7 +469,7 @@ class ToolExecutor:
                 duration_ms=(time.monotonic() - t_start) * 1000,
             )
 
-    async def _authorize_mcp_tool(self, tool_name: str, user_id: str) -> None:
+    async def _authorize_mcp_tool(self, tool_name: str, user_id: str) -> UUID:
         """Recheck live tenant membership and service ownership at dispatch."""
         from uuid import UUID
 
@@ -472,7 +486,7 @@ class ToolExecutor:
         tenant = execution_tenant_id(uid)
         if tenant is None:
             raise SecurityError("MCP execution requires an authorized tenant context")
-        server_id = self.mcp_manager._tool_to_server.get(tool_name)
+        server_id = self.mcp_manager.server_for_tool(tool_name, tenant)
         async with get_session_factory()() as db:
             await require_execution_user(db, uid, tenant)
             server = await db.scalar(select(MCPServer.id).where(
@@ -480,26 +494,38 @@ class ToolExecutor:
             ))
             if server is None:
                 raise SecurityError("MCP service is not available in the execution tenant")
+            return server
 
-    async def _authorize_remote_tool(self, tool_name: str, user_id: str) -> None:
+    async def _authorize_remote_tool(self, tool_name: str, user_id: str) -> RemoteToolConfig:
         """A remote tool may only run in the tenant that owns its configuration."""
         from uuid import UUID
+
+        from sqlalchemy import select
 
         from agent_platform.core.execution_scope import (
             execution_tenant_id,
             require_execution_user,
         )
         from agent_platform.db.connection import get_session_factory
+        from agent_platform.db.models import RemoteTool
+        from agent_platform.tools.remote.manager import RemoteToolConfig
 
         uid = UUID(user_id)
         tenant = execution_tenant_id(uid)
         if tenant is None:
             raise SecurityError("Remote tool execution requires an authorized tenant context")
         config = self.remote_manager.get_config(tool_name) if self.remote_manager else None
-        if config is None or config.tenant_id != tenant:
+        if config is None or not config.is_active or config.tenant_id != tenant:
             raise SecurityError("Remote tool is not available in the execution tenant")
         async with get_session_factory()() as db:
             await require_execution_user(db, uid, tenant)
+            row = await db.scalar(select(RemoteTool).where(
+                RemoteTool.id == config.id, RemoteTool.name == tool_name,
+                RemoteTool.tenant_id == tenant, RemoteTool.is_active,
+            ))
+            if row is None or row.method != config.method:
+                raise SecurityError("Remote tool is disabled or has changed")
+            return RemoteToolConfig.from_db(row)
 
     def visible_tools(self, tenant_id: UUID | None) -> list:
         return visible_registry_tools(self, tenant_id)
@@ -539,9 +565,13 @@ class ToolExecutor:
 
     @staticmethod
     def _error_type(result: ToolResult) -> str | None:
+        if result.name == "delegate_task" and (result.error or result.output).startswith("Error: delegation timed out"):
+            return "timeout"
         if result.success or not result.error:
             return None
         err = result.error
+        if err.startswith(f"Tool '{result.name}' timed out"):
+            return "timeout"
         if "Security error" in err:
             return "security"
         if "Permission denied" in err:
@@ -554,7 +584,9 @@ class ToolExecutor:
             return "unknown"
         return "tool_error"
 
-    def _record_tool_call(self, result: ToolResult, user_id: str, session_id: str) -> None:
+    def _record_tool_call(
+        self, result: ToolResult, user_id: str, session_id: str, *, span_id: UUID | None = None,
+    ) -> None:
         try:
             output = result.output if result.success else (result.error or "")
             output_chars = result.output_chars if result.success else len(output)
@@ -562,12 +594,13 @@ class ToolExecutor:
             args_json = json.dumps(result.arguments, ensure_ascii=False, default=str)
             arg_chars = len(args_json)
             arg_bytes = len(args_json.encode("utf-8", errors="replace"))
+            error_type = self._error_type(result)
             get_recorder().record_tool_call(
                 tool_name=result.name,
                 exec_type=self._exec_type(result.name),
                 duration_ms=result.duration_ms,
-                is_error=not result.success,
-                error_type=self._error_type(result),
+                is_error=not result.success or error_type == "timeout",
+                error_type=error_type,
                 user_id=user_id,
                 session_id=session_id,
                 arg_bytes=arg_bytes,
@@ -576,6 +609,7 @@ class ToolExecutor:
                 output_chars=output_chars,
                 est_injected_tokens=int(len(output) / 4) if output else None,
                 is_truncated=result.output_file is not None,
+                span_id=span_id,
             )
         except Exception:
             logger.exception("tool_observation_record_failed", tool_name=result.name)
@@ -611,6 +645,8 @@ class ToolExecutor:
         result.output_bytes = len(data)
         if len(output) <= self.MAX_OUTPUT_SIZE:
             return
+        clipped = output.startswith(self._CAPTURE_NOTICE)
+        result_label = "Captured tool output" if clipped else "Full tool output"
 
         ws_id, ws_slug = workspace_id or user_id, workspace_slug or "default"
         relative_path = f"tool-results/{uuid4().hex}.txt"
@@ -625,7 +661,7 @@ class ToolExecutor:
             # The tool may have performed a mutation. Do not turn a storage failure
             # into a tool failure that invites a duplicate execution.
             result.output = (
-                "[Full tool result could not be saved to a file; returning the complete output. "
+                f"[{result_label} could not be saved to a file. Returning captured text. "
                 "Do not rerun the tool just to recover its output.]\n" + output
             )
             return
@@ -637,7 +673,7 @@ class ToolExecutor:
             "size": len(data),
         })
         header = (
-            f"[Full tool output saved: {path}]\n"
+            f"[{result_label} saved: {path}]\n"
             f"Total: {len(raw)} characters. The following is a preview, not the complete result.\n"
             f'Read with read_file({{"path": "{path}", "offset_chars": 0, "limit_chars": 20000}}); '
             "advance offset_chars to continue, or use file_grep to search.\n"
@@ -1496,23 +1532,21 @@ elif isinstance(data, list):
         language = args.get("language", "python")
 
         ext = {"python": ".py", "javascript": ".js", "bash": ".sh"}.get(language, ".txt")
-        filename = f"/tmp/_agent_code{ext}"
-
-        # Use base64 to avoid shell escaping issues
+        filename = f"/tmp/_agent_code_{uuid4().hex}{ext}"
         b64_code = base64.b64encode(code.encode()).decode()
-        save_cmd = f"echo '{b64_code}' | base64 -d > {filename}"
-        result = await self.sandbox_mgr.execute(sandbox, save_cmd)
-        if result.exit_code != 0:
-            return result
-
-        # Execute
         run_cmd = {
             "python": f"python3 {filename}",
             "javascript": f"node {filename}",
             "bash": f"bash {filename}",
         }.get(language, f"cat {filename}")
 
-        return await self.sandbox_mgr.execute(sandbox, run_cmd)
+        # One exec owns creation, execution and cleanup of this invocation's
+        # private file; code and input remain valid for multiline programs.
+        command = (
+            f"trap 'rm -f {filename}' EXIT; "
+            f"(umask 077; printf %s '{b64_code}' | base64 -d > {filename}) && {run_cmd}"
+        )
+        return await self.sandbox_mgr.execute(sandbox, command, cleanup_file=filename)
 
     async def _edit_file_in_sandbox(self, sandbox, path: str, old_str: str, new_str: str, workspace_slug: str | None = None) -> tuple[str, bool]:
         """
@@ -1581,6 +1615,8 @@ except Exception as e:
     def _format_exec_result(result) -> str:
         """Format sandbox ExecResult into a human-readable string."""
         parts = []
+        if getattr(result, "output_truncated", False):
+            parts.append(ToolExecutor._CAPTURE_NOTICE)
         if result.stdout:
             parts.append(result.stdout)
         if result.stderr:

@@ -33,3 +33,4 @@ services:
       retries: 3
     networks:
       - app-network
+      - infra-network

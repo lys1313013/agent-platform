@@ -5,17 +5,17 @@ from __future__ import annotations
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from agent_platform.auth.dependencies import CurrentUser
+from agent_platform.auth.dependencies import CurrentUser, ExecutionUser, require_expected_tenant
 from agent_platform.auth.password import (
     NewPassword,
     Password,
-    async_hash_password,
     async_verify_password,
+    replace_password,
 )
 from agent_platform.db import (
     PortraitVersion,
@@ -142,16 +142,24 @@ async def _get_or_create_profile(
 
 @router.get("/profile", response_model=ProfileOut)
 async def get_profile(
-    user: CurrentUser,
+    user: ExecutionUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict:
-    profile = await _get_or_create_profile(db, user.id, user.tenant_id)
+    # Keep account and tenant-selection UI usable after membership revocation.
+    # Only authorized memberships can supply tenant-specific profile fields.
+    profile = (await db.execute(
+        select(Tenant.name, UserProfile.display_name)
+        .join(TenantMembership, TenantMembership.tenant_id == Tenant.id)
+        .outerjoin(UserProfile, (UserProfile.tenant_id == Tenant.id) & (UserProfile.user_id == user.id))
+        .where(Tenant.id == user.tenant_id, Tenant.is_active, TenantMembership.user_id == user.id)
+    )).one_or_none()
+    tenant_name, display_name = profile if profile is not None else ("", None)
     return {
         "username": user.username,
         "email": user.email,
-        "display_name": profile.display_name,
+        "display_name": display_name,
         "tenant_id": user.tenant_id,
-        "tenant_name": user.tenant.name,
+        "tenant_name": tenant_name,
     }
 
 
@@ -193,7 +201,7 @@ async def update_profile(
 
 @router.get("/tenants", response_model=list[TenantOptionOut])
 async def list_my_tenants(
-    user: CurrentUser,
+    user: ExecutionUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> list[dict]:
     result = await db.execute(
@@ -217,9 +225,12 @@ async def list_my_tenants(
 @router.put("/active-tenant", response_model=ProfileOut)
 async def switch_active_tenant(
     req: ActiveTenantUpdate,
-    user: CurrentUser,
+    user: ExecutionUser,
     db: Annotated[AsyncSession, Depends(get_db)],
+    expected_tenant_id: Annotated[UUID | None, Header(alias="X-Expected-Tenant-ID")] = None,
 ) -> dict:
+    await db.refresh(user, with_for_update={"of": User})
+    require_expected_tenant(user, expected_tenant_id)
     tenant = await db.scalar(
         select(Tenant)
         .join(TenantMembership, TenantMembership.tenant_id == Tenant.id)
@@ -394,10 +405,11 @@ async def update_password(
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict:
+    await db.refresh(user, with_for_update={"of": User})
     if not await async_verify_password(req.current_password, user.password_hash):
         raise HTTPException(status_code=400, detail="当前密码不正确")
 
-    user.password_hash = await async_hash_password(req.new_password)
+    await replace_password(db, user, req.new_password)
     await db.flush()
     return {"message": "密码已更新"}
 

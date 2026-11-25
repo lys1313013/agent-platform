@@ -47,7 +47,7 @@ async def test_ttl_refresh_rebuilds_schema_and_routes_before_execution():
     assert [s["function"]["name"] for s in schema] == ["docs_search", "docs_added"]
     assert "keyword" in schema[0]["function"]["parameters"]["properties"]
     assert not manager.is_mcp_tool("docs_removed")
-    assert manager._tool_to_server["docs_added"] == sid
+    assert manager.server_for_tool("docs_added", None) == sid
     await manager.ensure_tools_fresh()
     assert conn.session.list_tools.await_count == 1
 

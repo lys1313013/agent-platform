@@ -186,10 +186,10 @@ def test_shared_mcp_selection_preserves_entry_capabilities(all_tools):
         for name in ("docs_selected", "docs_new", "docs_unbound")
     }
     manager = SimpleNamespace(
-        list_all_tools=lambda: list(infos.items()),
-        _tool_to_server={
-            "docs_selected": server_id, "docs_new": server_id, "docs_unbound": unbound_id,
-        },
+        iter_tools=lambda tenant: [
+            (unbound_id if name == "docs_unbound" else server_id, name, info)
+            for name, info in infos.items()
+        ],
     )
     executor = SimpleNamespace(registry=registry, mcp_manager=manager)
     snapshot = {
@@ -215,8 +215,7 @@ def test_published_empty_mcp_binding_does_not_mean_all_servers():
     executor = SimpleNamespace(
         registry=ToolRegistry(),
         mcp_manager=SimpleNamespace(
-            list_all_tools=lambda: [("docs_read", MCPToolInfo(name="read", description="read"))],
-            _tool_to_server={"docs_read": server_id},
+            iter_tools=lambda tenant: [(server_id, "docs_read", MCPToolInfo(name="read", description="read"))],
         ),
     )
     assert agent_api._filter_tools_for_agent(executor, {}) == ([], [])

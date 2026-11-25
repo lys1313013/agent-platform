@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -66,6 +66,10 @@ class Scheduler:
         self._session_factory = session_factory
         self._executor = executor
 
+    def scheduled_count(self, job_ids: Sequence[UUID]) -> int:
+        """Count active tenant jobs installed on this scheduler."""
+        return sum(self._scheduler.get_job(str(job_id)) is not None for job_id in job_ids)
+
     def set_executor(self, executor: JobExecutor) -> None:
         self._executor = executor
 
@@ -77,8 +81,28 @@ class Scheduler:
         for job in jobs:
             self._schedule_job(job)
 
+        self._scheduler.add_job(
+            self._reconcile, "interval", seconds=10, id="system:reconcile-schedules",
+            replace_existing=True, max_instances=1,
+        )
         self._scheduler.start()
         logger.info("scheduler_started", job_count=len(jobs))
+
+    async def _reconcile(self) -> None:
+        """Recover schedule changes committed by any replica, including missed local updates."""
+        async with self._session_factory() as db:
+            jobs = await CronJobService.get_active_jobs(db)
+        active = {str(job.id): job for job in jobs}
+        for scheduled in self._scheduler.get_jobs():
+            if scheduled.id.startswith("system:"):
+                continue
+            job = active.pop(scheduled.id, None)
+            if job is None:
+                self.remove_job(UUID(scheduled.id))
+            elif scheduled.args[1] != job.schedule_version:
+                self._schedule_job(job)
+        for job in active.values():
+            self._schedule_job(job)
 
     async def shutdown(self) -> None:
         tasks = self._occurrence_executor.pending_tasks()
@@ -155,7 +179,7 @@ class Scheduler:
         self._scheduler.add_job(
             self._execute,
             trigger=trigger,
-            args=[job.id],
+            args=[job.id, job.schedule_version],
             id=str(job.id),
             name=job.name,
             replace_existing=True,
@@ -182,15 +206,15 @@ class Scheduler:
             return DateTrigger(run_date=job.run_at, timezone=CRON_TIMEZONE)
         return None
 
-    async def _execute(self, job_id: UUID) -> None:
+    async def _execute(self, job_id: UUID, schedule_version: UUID) -> None:
         """Execute a cron job — called by APScheduler when triggered."""
         async with self._session_factory() as db:
-            job = await self._load_job(db, job_id)
+            job = await self._load_job(db, job_id, lock=True)
             if job is None:
                 logger.warning("cron_job_not_found", job_id=str(job_id))
                 return
 
-            if not job.is_active:
+            if not job.is_active or job.schedule_version != schedule_version:
                 return
 
             if not await self._claims.claim(str(job_id), scheduled_run_time.get()):
@@ -219,8 +243,11 @@ class Scheduler:
             await self._execute_job(db, job)
 
     @staticmethod
-    async def _load_job(db: AsyncSession, job_id: UUID) -> CronJob | None:
-        result = await db.execute(select(CronJob).where(CronJob.id == job_id))
+    async def _load_job(db: AsyncSession, job_id: UUID, *, lock: bool = False) -> CronJob | None:
+        query = select(CronJob).where(CronJob.id == job_id)
+        if lock:
+            query = query.with_for_update()
+        result = await db.execute(query)
         return result.scalar_one_or_none()
 
     async def _execute_job(self, db: AsyncSession, job: CronJob) -> None:

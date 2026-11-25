@@ -12,13 +12,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_platform.auth.dependencies import SuperAdminUser
+from agent_platform.core.credentials import encrypt_secret
 from agent_platform.db.connection import get_db
 from agent_platform.db.models import SystemConfig
-from agent_platform.tools.web.config import DB_KEY_PREFIX, DB_KEYS, web_config
+from agent_platform.tools.web.config import DB_KEY_PREFIX, DB_KEYS, SECRET_FIELDS, web_config
 
 router = APIRouter(tags=["web-tools"])
 
-_SECRET_FIELDS = {"brave_api_key", "tavily_api_key", "firecrawl_api_key"}
 _BOOL_FIELDS = {"enabled", "summary_enabled"}
 _INT_FIELDS = {"cache_ttl_seconds", "fetch_max_chars"}
 
@@ -98,6 +98,8 @@ async def update_web_tool_config(
             if row:
                 await db.delete(row)
             continue
+        if field in SECRET_FIELDS:
+            stored = encrypt_secret(stored)
         if row:
             row.value = stored
         else:

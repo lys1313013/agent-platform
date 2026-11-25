@@ -40,22 +40,18 @@ async def handle_graph_retrieval(
         if not tenant_id:
             return "Error: user tenant not found"
 
-        kb_result = await db.execute(
-            select(GraphKnowledgeBase.id, GraphKnowledgeBase.name)
-            .join(
-                AgentGraphKnowledgeBase,
-                AgentGraphKnowledgeBase.knowledge_base_id == GraphKnowledgeBase.id,
-            )
-            .where(
-                AgentGraphKnowledgeBase.agent_id == UUID(agent_id),
-                GraphKnowledgeBase.is_active,
-                GraphKnowledgeBase.tenant_id == tenant_id,
-                or_(
-                    GraphKnowledgeBase.visibility == "tenant",
-                    GraphKnowledgeBase.created_by == UUID(user_id),
-                ),
-            )
+        query_kbs = select(GraphKnowledgeBase.id, GraphKnowledgeBase.name).where(
+            GraphKnowledgeBase.is_active, GraphKnowledgeBase.tenant_id == tenant_id,
+            or_(GraphKnowledgeBase.visibility == "tenant", GraphKnowledgeBase.created_by == UUID(user_id)),
         )
+        delegation = kwargs.get("delegation")
+        bindings = delegation.published_bindings if delegation else None
+        if bindings is None or bindings.graph_knowledge_base_ids is None:
+            query_kbs = query_kbs.join(AgentGraphKnowledgeBase, AgentGraphKnowledgeBase.knowledge_base_id == GraphKnowledgeBase.id).where(
+                AgentGraphKnowledgeBase.agent_id == UUID(agent_id))
+        else:
+            query_kbs = query_kbs.where(GraphKnowledgeBase.id.in_(bindings.graph_knowledge_base_ids))
+        kb_result = await db.execute(query_kbs)
         kb_rows = kb_result.all()
 
         if not kb_rows:

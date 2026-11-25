@@ -83,6 +83,20 @@ async def claim_message_batch(
     return previous
 
 
+async def release_message_batch(key: str, current: int, previous: int) -> None:
+    """Retry a failed summary without undoing a later worker's claim."""
+    if _local_counts.get(key) == current:
+        _local_counts[key] = previous
+    try:
+        await _redis().eval(
+            "if redis.call('get', KEYS[1]) == ARGV[1] then "
+            "return redis.call('set', KEYS[1], ARGV[2], 'KEEPTTL') end",
+            1, key, str(current), str(previous),
+        )
+    except Exception:
+        logger.debug("throttle_release_not_persisted", key=key)
+
+
 async def exceeded(key: str, limit: int, window_seconds: int) -> bool:
     """Count one attempt in a fixed window; True once the limit is exceeded."""
     now = time.monotonic()

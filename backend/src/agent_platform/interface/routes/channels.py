@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import secrets
 from typing import Annotated
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -26,6 +26,8 @@ from agent_platform.db.models import (
     ChannelBindCode,
     ChannelBinding,
     ChannelConfig,
+    ChannelInboxEvent,
+    ChannelInboxLease,
     ChannelSessionMapping,
 )
 
@@ -311,13 +313,14 @@ async def update_channel(
     req: ChannelUpdate,
     user: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
+    request: Request,
 ) -> dict:
     """Update channel configuration. Requires re-enable after mode/credential changes."""
     result = await db.execute(
         select(ChannelConfig).where(
             ChannelConfig.id == channel_id,
             ChannelConfig.tenant_id == user.tenant_id,
-        )
+        ).with_for_update()
     )
     channel = result.scalar_one_or_none()
     if channel is None:
@@ -363,10 +366,15 @@ async def update_channel(
 
     # If credentials or mode actually changed while enabled, force re-enable.
     # Merely resubmitting the existing mode must not stop a working channel.
-    if sensitive_changed and channel.status == "enabled":
-        channel.status = "disabled"
+    if sensitive_changed:
+        channel.transport_version = uuid4()
+        if channel.status == "enabled":
+            channel.status = "disabled"
 
     await db.commit()
+    manager = getattr(request.app.state, "channel_connection_manager", None)
+    if sensitive_changed and manager is not None:
+        await manager.stop_channel(channel_id)
     await db.refresh(channel)
     return _channel_to_dict(channel)
 
@@ -383,7 +391,7 @@ async def enable_channel(
         select(ChannelConfig).where(
             ChannelConfig.id == channel_id,
             ChannelConfig.tenant_id == user.tenant_id,
-        )
+        ).with_for_update()
     )
     channel = result.scalar_one_or_none()
     if channel is None:
@@ -411,9 +419,8 @@ async def enable_channel(
 
         channel.status = "enabled"
         channel.last_error = None
-        await db.commit()
-
         await conn_mgr.start_channel(channel)
+        await db.commit()
         await db.refresh(channel)
 
         return _channel_to_dict(channel)
@@ -438,7 +445,7 @@ async def disable_channel(
         select(ChannelConfig).where(
             ChannelConfig.id == channel_id,
             ChannelConfig.tenant_id == user.tenant_id,
-        )
+        ).with_for_update()
     )
     channel = result.scalar_one_or_none()
     if channel is None:
@@ -466,7 +473,7 @@ async def delete_channel(
         select(ChannelConfig).where(
             ChannelConfig.id == channel_id,
             ChannelConfig.tenant_id == user.tenant_id,
-        )
+        ).with_for_update()
     )
     channel = result.scalar_one_or_none()
     if channel is None:
@@ -476,6 +483,8 @@ async def delete_channel(
     if conn_mgr:
         await conn_mgr.stop_channel(channel_id)
 
+    await db.execute(delete(ChannelInboxEvent).where(ChannelInboxEvent.channel_id == channel_id))
+    await db.execute(delete(ChannelInboxLease).where(ChannelInboxLease.channel_id == channel_id))
     await db.execute(delete(ChannelBinding).where(ChannelBinding.channel_id == channel_id))
     await db.execute(delete(ChannelSessionMapping).where(ChannelSessionMapping.channel_id == channel_id))
     await db.execute(delete(ChannelBindCode).where(ChannelBindCode.channel_id == channel_id))

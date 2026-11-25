@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { apiFetch, chatApi, graphKnowledgeApi, petsApi, skillsApi, workspacesApi } from '../api';
-import { tokenStorage } from '../auth';
+import { rememberTenant, tokenStorage } from '../auth';
 
 let tokenExpiry: number;
 const access = (name: string) => `x.${btoa(JSON.stringify({ sub: 'same-user', name, exp: tokenExpiry }))}.x`;
@@ -17,6 +17,52 @@ beforeEach(() => {
 afterEach(() => { vi.unstubAllGlobals(); tokenStorage.clear(); });
 
 describe('shared authenticated transport', () => {
+  it('sends the tenant and account associated with the visible page on writes', async () => {
+    rememberTenant('tenant-A');
+    vi.mocked(fetch).mockResolvedValue(json({}));
+    await apiFetch('/agents', { method: 'POST', body: '{}' });
+    const headers = new Headers(vi.mocked(fetch).mock.calls[0][1]?.headers);
+    expect(headers.get('X-Expected-Tenant-ID')).toBe('tenant-A');
+    expect(headers.get('X-Expected-User-ID')).toBe('same-user');
+  });
+
+  it('rejects a request immediately when a sibling tab changes the tenant before its storage event arrives', async () => {
+    localStorage.setItem('aio_browser_context', 'another-tab-changed-context');
+    await expect(apiFetch('/agents', { method: 'POST' })).rejects.toMatchObject({ name: 'AbortError' });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it.each([new TypeError('offline'), 502])('retains valid credentials when refresh temporarily fails', async failure => {
+    tokenExpiry = 0;
+    tokenStorage.set(access('expired'), 'refresh-old');
+    if (typeof failure === 'number') vi.mocked(fetch).mockResolvedValue(json({}, failure));
+    else vi.mocked(fetch).mockRejectedValue(failure);
+    await expect(apiFetch('/sessions')).rejects.toThrow();
+    expect(tokenStorage.getRefresh()).toBe('refresh-old');
+  });
+
+  it('reuses the new credential if a sibling tab rotates it while waiting for the lock', async () => {
+    tokenExpiry = 0;
+    tokenStorage.set(access('expired'), 'refresh-old');
+    const previous = Object.getOwnPropertyDescriptor(navigator, 'locks');
+    Object.defineProperty(navigator, 'locks', { configurable: true, value: {
+      request: async (_name: string, _opts: unknown, run: () => Promise<boolean>) => {
+        tokenExpiry = Math.floor(Date.now() / 1000) + 3600;
+        tokenStorage.set(access('rotated'), 'refresh-new');
+        return run();
+      },
+    } });
+    try {
+      vi.mocked(fetch).mockResolvedValue(json({}));
+      await apiFetch('/sessions');
+      expect(vi.mocked(fetch).mock.calls.map(([url]) => url)).toEqual(['/api/sessions']);
+      expect(new Headers(vi.mocked(fetch).mock.calls[0][1]?.headers).get('Authorization')).toBe(`Bearer ${access('rotated')}`);
+    } finally {
+      if (previous) Object.defineProperty(navigator, 'locks', previous);
+      else Reflect.deleteProperty(navigator, 'locks');
+    }
+  });
+
   it('preserves one retry for a JSON mutation rejected by authentication', async () => {
     const requests: Array<{ url: string; auth: string | null; body: BodyInit | null | undefined }> = [];
     vi.mocked(fetch).mockImplementation(async (url, options) => {
@@ -54,6 +100,13 @@ describe('shared authenticated transport', () => {
     expect(new Headers(options?.headers).has('Content-Type')).toBe(false);
     expect(options?.body).toBeInstanceOf(FormData);
     expect((options?.body as FormData).get('file')).toBe(file);
+  });
+
+  it('returns pending sandbox sync to the caller after a durable upload', async () => {
+    const stored = { path: 'a.txt', size: 1, sandbox_sync_status: 'pending' };
+    vi.mocked(fetch).mockResolvedValue(json(stored, 201));
+    await expect(workspacesApi.uploadFile('workspace', 'a.txt', new File(['a'], 'a.txt'))).resolves.toEqual(stored);
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 
   it('refreshes credentials but never automatically replays a multipart upload', async () => {

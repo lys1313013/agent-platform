@@ -5,10 +5,9 @@ from __future__ import annotations
 from sqlalchemy import func, select
 
 from agent_platform.channels.connection_manager import get_global_channel_manager
-from agent_platform.core.chat import filter_tools_by_agent, refresh_mcp_tools_for_agent
+from agent_platform.core.chat import filter_tools_by_agent, load_agent, refresh_mcp_tools_for_agent
 from agent_platform.cron_jobs.scheduler import get_global_scheduler
-from agent_platform.cron_jobs.service import CronJobService
-from agent_platform.db.models import Agent, LLMModel, MCPServer, Skill
+from agent_platform.db.models import CronJob, LLMModel, MCPServer, Skill
 from agent_platform.interface.routes.mcp_servers import _build_config
 from agent_platform.skills.sh_client import clear_repo_cache
 
@@ -22,33 +21,36 @@ async def cmd_tools(ctx: CommandContext) -> CommandResult:
         return CommandResult(content="工具执行器不可用。")
 
     agent = None
+    mcp_schema = []
     if ctx.session is not None and ctx.session.agent_id:
-        agent = await ctx.db.get(Agent, ctx.session.agent_id)
+        agent = await load_agent(ctx.db, ctx.session.agent_id, user=ctx.user, tenant_id=ctx.tenant_id)
+        if agent is None:
+            return CommandResult(content="当前会话绑定的智能体不可用。")
 
     if agent is not None:
         await refresh_mcp_tools_for_agent(ctx.tool_executor, agent)
-        tools_list, _tools_schema = filter_tools_by_agent(ctx.tool_executor, agent)
+        tools_list, schema = filter_tools_by_agent(ctx.tool_executor, agent)
+        registered = {tool.name for tool in tools_list}
+        mcp_schema = [entry["function"] for entry in schema if entry["function"]["name"] not in registered]
     else:
-        tools_list = ctx.tool_executor.registry.list_tools()
+        tools_list = ctx.tool_executor.visible_tools(ctx.tenant_id)
 
-    if not tools_list:
+    if not tools_list and not mcp_schema:
         return CommandResult(content="暂无可用工具。")
 
-    lines = [f"**可用工具（{len(tools_list)}）：**", ""]
+    lines = [f"**可用工具（{len(tools_list) + len(mcp_schema)}）：**", ""]
     for t in tools_list:
-        kind = ""
-        if ctx.tool_executor.mcp_manager is not None and ctx.tool_executor.mcp_manager.is_mcp_tool(t.name):
-            kind = " [MCP]"
-        elif getattr(t, "direct", False):
-            kind = " [direct]"
+        kind = " [direct]" if getattr(t, "direct", False) else ""
         level = getattr(t, "permission_level", None) or "read"
         lines.append(f"- `{t.name}` — {t.description or '无描述'}（{level}）{kind}")
+    for tool in mcp_schema:
+        lines.append(f"- `{tool['name']}` — {tool['description'] or '无描述'}（dangerous） [MCP]")
     if agent is not None:
         lines.append("")
         lines.append(f"范围：智能体「{agent.name}」生效工具。")
     else:
         lines.append("")
-        lines.append("当前会话未绑定智能体，展示全部注册工具。")
+        lines.append("当前会话未绑定智能体，展示当前租户可用的注册工具。")
     return CommandResult(content="\n".join(lines))
 
 
@@ -57,7 +59,7 @@ async def cmd_mcp(ctx: CommandContext) -> CommandResult:
     mcp = ctx.tool_executor.mcp_manager if ctx.tool_executor else None
     if mcp is None:
         return CommandResult(content="MCP 管理器未初始化。")
-    status = mcp.get_status()
+    status = mcp.get_status(ctx.tenant_id)
     if not status:
         return CommandResult(content="未配置 MCP 服务器。")
     lines = ["**MCP 服务器状态：**", ""]
@@ -75,7 +77,7 @@ async def cmd_reload_mcp(ctx: CommandContext) -> CommandResult:
     if ctx.tool_executor is None or ctx.tool_executor.mcp_manager is None:
         return CommandResult(content="MCP 管理器未初始化。")
     servers = (
-        await ctx.db.execute(select(MCPServer).where(MCPServer.is_active))
+        await ctx.db.execute(select(MCPServer).where(MCPServer.is_active, MCPServer.tenant_id == ctx.tenant_id))
     ).scalars().all()
     if not servers:
         return CommandResult(content="没有已启用的 MCP 服务器。")
@@ -118,29 +120,24 @@ async def cmd_status(ctx: CommandContext) -> CommandResult:
         lines.append(f"  - …等共 {len(models)} 个")
 
     mcp = ctx.tool_executor.mcp_manager if ctx.tool_executor else None
-    mcp_status = mcp.get_status() if mcp else {}
+    mcp_status = mcp.get_status(ctx.tenant_id) if mcp else {}
     connected = sum(1 for i in mcp_status.values() if i.get("connected"))
     lines.append(f"- **MCP**：{connected}/{len(mcp_status)} 已连接")
 
+    active_job_ids = (await ctx.db.scalars(
+        select(CronJob.id).where(CronJob.tenant_id == ctx.tenant_id, CronJob.is_active)
+    )).all()
     scheduler = get_global_scheduler()
-    if scheduler is not None:
-        try:
-            job_count = len(scheduler._scheduler.get_jobs())
-        except Exception:
-            job_count = 0
-    else:
-        job_count = 0
-    lines.append(f"- **调度器**：{job_count} 个定时任务")
-
-    active_jobs = await CronJobService.get_active_jobs(ctx.db)
-    lines.append(f"  - 活动中 cron：{len(active_jobs)}")
+    scheduled = scheduler.scheduled_count(active_job_ids) if scheduler else 0
+    lines.append(f"- **调度器**：{scheduled} 个定时任务")
+    lines.append(f"  - 活动中 cron：{len(active_job_ids)}")
 
     sandbox = ctx.tool_executor.sandbox_mgr if ctx.tool_executor else None
-    sandbox_active = len(getattr(sandbox, "_active", {}) or {})
-    lines.append(f"- **沙箱**：{sandbox_active} 个活跃")
+    active = sandbox is not None and sandbox.get_active_for_user(ctx.user_id) is not None
+    lines.append(f"- **我的沙箱**：{'活跃' if active else '未运行'}")
 
     channel_mgr = get_global_channel_manager()
-    channels = channel_mgr.get_status() if channel_mgr else []
+    channels = channel_mgr.get_status(ctx.tenant_id) if channel_mgr else []
     lines.append(f"- **渠道连接**：{len(channels)} 个")
     for ch in channels:
         lines.append(

@@ -1,3 +1,4 @@
+import { errorMessage } from '@/lib/errors';
 import { useUnsavedChanges, confirmDiscardChanges } from '@/hooks/useUnsavedChanges';
 import { useState, useEffect, useCallback } from 'react';
 import {
@@ -48,11 +49,11 @@ export default function PortraitPage() {
         setContent(val);
         setSavedContent(val);
       })
-      .catch((err) => message.error(`加载个人画像失败：${err.message}`))
+      .catch((err) => message.error(`加载个人画像失败：${errorMessage(err)}`))
       .finally(() => setInitLoading(false));
 
     loadVersions();
-  }, []);
+  }, [message]);
 
   const loadVersions = () => {
     setVersionsLoading(true);
@@ -76,12 +77,12 @@ export default function PortraitPage() {
       setSelectedVersion(null);
       loadVersions(); // refresh version list
       message.success('个人画像已保存');
-    } catch (err: any) {
-      message.error(err.message || '保存失败');
+    } catch (err) {
+      message.error(errorMessage(err, '保存失败'));
     } finally {
       setSaving(false);
     }
-  }, [content]);
+  }, [content, message]);
 
   const handleCancel = useCallback(() => {
     if (!confirmDiscardChanges(content !== savedContent)) return;
@@ -103,12 +104,12 @@ export default function PortraitPage() {
       setSelectedVersion(null);
       loadVersions();
       message.success('已恢复至所选版本');
-    } catch (err: any) {
-      message.error(err.message || '恢复失败');
+    } catch (err) {
+      message.error(errorMessage(err, '恢复失败'));
     } finally {
       setRestoring(false);
     }
-  }, []);
+  }, [message]);
 
   const handleDelete = useCallback(async (version: PortraitVersion) => {
     try {
@@ -116,10 +117,10 @@ export default function PortraitPage() {
       if (selectedVersion?.id === version.id) setSelectedVersion(null);
       loadVersions();
       message.success('版本已删除');
-    } catch (err: any) {
-      message.error(err.message || '删除失败');
+    } catch (err) {
+      message.error(errorMessage(err, '删除失败'));
     }
-  }, [selectedVersion]);
+  }, [selectedVersion, message]);
 
   const displayedContent = selectedVersion
     ? (selectedVersion.content || '')

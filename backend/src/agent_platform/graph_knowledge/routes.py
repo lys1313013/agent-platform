@@ -252,9 +252,10 @@ async def list_chunks(
     admin: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> list[dict]:
-    if not await service.get_kb(db, kb_id, admin):
-        raise HTTPException(status_code=404, detail="图谱知识库不存在")
-    return await service.list_chunks(db, doc_id, admin)
+    chunks = await service.list_chunks(db, kb_id, doc_id, admin)
+    if chunks is None:
+        raise HTTPException(status_code=404, detail="文档不存在")
+    return chunks
 
 
 @router.delete("/api/admin/graph-knowledge-bases/{kb_id}/documents/{doc_id}")
@@ -324,7 +325,7 @@ async def retry_job(
     job = result.scalar_one_or_none()
     if not job:
         raise HTTPException(status_code=404, detail="抽取任务不存在")
-    new_job, started = await service.create_extraction_job(db, kb, admin)
+    new_job, started = await service.create_extraction_job(db, kb, admin, retry_job_id=job_id)
     if not started:
         raise HTTPException(status_code=409, detail="已有抽取任务运行中，请等待完成后再试")
     return {"job_id": new_job.id, "status": new_job.status}

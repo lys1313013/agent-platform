@@ -174,7 +174,7 @@ async def _sandbox_command(hook: HookDef, payload: dict, sandbox_mgr, ctx: dict)
     full = f"echo '{b64}' | base64 -d > /tmp/hook_payload.json && {cmd}"
 
     sandbox = await sandbox_mgr.get_or_create(user_id, session_id, workspace_id, workspace_slug)
-    result = await sandbox_mgr.execute(sandbox, full, timeout=(hook.timeout_ms or 5000) // 1000)
+    result = await sandbox_mgr.execute(sandbox, full, timeout=(hook.timeout_ms or 5000) / 1000)
     if result.exit_code == 0:
         return ActionResult(
             status="success",

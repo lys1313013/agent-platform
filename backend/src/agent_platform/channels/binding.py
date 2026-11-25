@@ -20,7 +20,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_platform.db.models import (
@@ -56,7 +56,7 @@ async def resolve_external_user(
             ChannelBinding.tenant_id == tenant_id,
             ChannelBinding.channel_id == channel_id,
             ChannelBinding.external_id == external_id,
-        )
+        ).with_for_update(read=True)
     )
     binding = result.scalar_one_or_none()
     if binding is None:
@@ -197,12 +197,20 @@ async def unbind_external(
             ChannelBinding.tenant_id == tenant_id,
             ChannelBinding.channel_id == channel_id,
             ChannelBinding.external_id == external_id,
-        )
+        ).with_for_update()
     )
     binding = result.scalar_one_or_none()
     if binding is None:
         return
 
+    from agent_platform.db.models import ChannelSessionMapping
+    await db.execute(
+        update(ChannelSessionMapping).where(
+            ChannelSessionMapping.channel_id == channel_id,
+            ChannelSessionMapping.external_id == external_id,
+            ChannelSessionMapping.is_active.is_(True),
+        ).values(is_active=False)
+    )
     from sqlalchemy import delete as sql_delete
     await db.execute(sql_delete(ChannelBinding).where(ChannelBinding.id == binding.id))
     await db.flush()

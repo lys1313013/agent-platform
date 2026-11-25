@@ -38,7 +38,7 @@ from agent_platform.core.execution_scope import (
     require_execution_user,
 )
 from agent_platform.core.prompt import build_system_prompt
-from agent_platform.core.runtime_config import AgentRuntimeConfig
+from agent_platform.core.runtime_config import AgentRuntimeConfig, PublishedBindings
 from agent_platform.db import Message, Session
 from agent_platform.db.connection import get_session_factory
 from agent_platform.db.models import (
@@ -292,6 +292,7 @@ def filter_tools_by_agent(
     return filtered, build_tools_schema(
         tool_executor,
         filtered,
+        tenant_id=getattr(agent, "tenant_id", None),
         mcp_server_ids=allowed_server_ids,
         enabled_tools=enabled_set,
         mcp_all_tools_server_ids=all_tools_server_ids,
@@ -303,6 +304,7 @@ def build_tools_schema(
     tool_executor: ToolExecutor,
     tools: list[Tool],
     *,
+    tenant_id: UUID | None,
     mcp_server_ids: Collection[str] | None,
     enabled_tools: Collection[str] | None,
     mcp_all_tools_server_ids: Collection[str] = (),
@@ -327,9 +329,9 @@ def build_tools_schema(
     ]
     manager = tool_executor.mcp_manager
     if manager:
-        for full_name, tool_info in manager.list_all_tools():
+        for server_id, full_name, tool_info in manager.iter_tools(tenant_id):
             if full_name in blacklist or not is_mcp_tool_allowed(
-                server_id=manager._tool_to_server.get(full_name),
+                server_id=server_id,
                 full_name=full_name,
                 allowed_server_ids=mcp_server_ids,
                 enabled_tools=enabled_tools,
@@ -372,13 +374,28 @@ async def build_system_prompt_with_memories(
         db, user_id, user_message, top_k=memory_top_k, agent_id=agent.id if agent else None
     )
 
-    matched_skills = await SkillService.get_skills_for_prompt(
-        db, user_id, user_message, top_k=3, bound_skills=agent.skills if agent else None
-    )
-
     tenant_id = tenant_id or execution_tenant_id(user_id) or (agent.tenant_id if agent else None)
     if tenant_id is None:
         raise ValueError("System prompt requires an explicit execution tenant")
+
+    if prompt_config is None:
+        matched_skills = await SkillService.get_skills_for_prompt(
+            db, user_id, user_message, top_k=3, bound_skills=agent.skills if agent else None,
+        )
+        children = agent.children if agent else []
+    else:
+        bindings = PublishedBindings.from_snapshot(prompt_config)
+        matched_skills = await SkillService.get_skills_for_prompt(
+            db, user_id, user_message, top_k=3, bound_skill_ids=bindings.skill_ids,
+        )
+        children = []
+        if bindings.child_ids:
+            rows = await db.scalars(select(Agent).where(
+                Agent.id.in_(bindings.child_ids), Agent.tenant_id == tenant_id, Agent.is_active,
+                or_(Agent.visibility == "tenant", Agent.created_by == user_id),
+            ))
+            by_id = {child.id: child for child in rows}
+            children = [by_id[child_id] for child_id in bindings.child_ids if child_id in by_id]
 
     result = await db.execute(
         select(UserProfile).where(
@@ -396,7 +413,7 @@ async def build_system_prompt_with_memories(
         daily_memories=memory_data["daily_memories"],
         relevant_skills=matched_skills if matched_skills else None,
         agent_prompt=(prompt_config or {}).get("system_prompt", agent.system_prompt if agent else None),
-        child_agents=agent.children if agent and agent.children else None,
+        child_agents=children or None,
         workspace_files=workspace_files,
         user_portrait=user_portrait,
     )
@@ -818,7 +835,7 @@ async def update_context_summary(
     if len(all_messages) < 10:
         return
 
-    from agent_platform.core.throttle import claim_message_batch
+    from agent_platform.core.throttle import claim_message_batch, release_message_batch
     from agent_platform.db.connection import set_db_user
 
     try:
@@ -840,9 +857,8 @@ async def update_context_summary(
 
         # The loaded history is capped by the soft limit, so throttle on the
         # session's absolute message count instead of len(history).
-        previous = await claim_message_batch(
-            f"aio:context_summary_at:{session_id}", total_messages, min_delta=4,
-        )
+        batch_key = f"aio:context_summary_at:{session_id}"
+        previous = await claim_message_batch(batch_key, total_messages, min_delta=4)
         if previous is None:
             return
         new_count = max(total_messages - previous, 2)
@@ -853,17 +869,24 @@ async def update_context_summary(
         summary = await generate_summary(
             new_messages[-20:], utility or provider, existing_summary=existing,
         )
-        if not summary:
+        if not summary or summary == existing:
+            # Failed incremental generation returns the old summary. Keep its
+            # database revision and retry the unincorporated messages later.
+            await release_message_batch(batch_key, total_messages, previous)
             return
         async with factory() as db:
             if user_id is not None:
                 await set_db_user(db, user_id)
-            await db.execute(
+            updated = await db.scalar(
                 sql_update(Session)
-                .where(Session.id == session_id)
+                .where(Session.id == session_id, Session.context_summary.is_not_distinct_from(existing))
                 .values(context_summary=summary)
+                .returning(Session.id)
             )
             await db.commit()
+            if updated is None:
+                await release_message_batch(batch_key, total_messages, previous)
+                return
             logger.info(f"Context summary updated for session {session_id}: {len(summary)} chars")
     except Exception:
         logger.exception(f"Failed to update context summary for session {session_id}")

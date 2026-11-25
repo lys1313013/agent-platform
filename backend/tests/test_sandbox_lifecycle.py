@@ -52,10 +52,25 @@ class Container:
 class Daemon:
     def __init__(self):
         self.containers = self
-        self.api = SimpleNamespace(timeout=60)
+        self.api = self
+        self.timeout = 60
+        self.execs = {}
         self.items = {}
         self.created = []
         self.close = Mock()
+
+    def exec_create(self, container_id, command, **kwargs):
+        exec_id = str(len(self.execs) + 1)
+        self.execs[exec_id] = (self.items[container_id], command)
+        return {"Id": exec_id}
+
+    def exec_start(self, exec_id, *, stream, demux):
+        assert stream and demux
+        container, command = self.execs[exec_id]
+        yield container.exec_run(command).output
+
+    def exec_inspect(self, exec_id):
+        return {"Running": False, "ExitCode": 0}
 
     def create(self, image, command, **kwargs):
         if any(c.name == kwargs["name"] for c in self.items.values()):

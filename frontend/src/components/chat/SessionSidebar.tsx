@@ -1,3 +1,5 @@
+import SessionHistoryMore from '@/components/chat/SessionHistoryMore';
+import { useSessionHistory } from '@/hooks/useSessionHistory';
 import { useState, useMemo, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useChatStore } from '@/stores/chatStore';
@@ -34,7 +36,14 @@ const SESSION_SOURCE_LABELS: Record<string, string> = {
   wecom_bot: '企微机器人',
 };
 
-export default function SessionSidebar({ agentId, portal, embedded = false, onSelect }: { agentId?: string | null; portal?: boolean; embedded?: boolean; onSelect?: () => void }) {
+interface SessionSidebarProps {
+  agentId?: string | null;
+  portal?: boolean;
+  embeddedOpen?: boolean;
+  onSelect?: () => void;
+}
+
+export default function SessionSidebar({ agentId, portal, embeddedOpen, onSelect }: SessionSidebarProps) {
   const navigate = useNavigate();
   const { modal } = App.useApp();
   const {
@@ -48,6 +57,7 @@ export default function SessionSidebar({ agentId, portal, embedded = false, onSe
     archiveSession,
     refreshSessions,
     isSessionsLoading,
+    sessionListError,
     workspaces,
     selectedWorkspaceId,
     isWorkspacesLoading,
@@ -58,7 +68,9 @@ export default function SessionSidebar({ agentId, portal, embedded = false, onSe
   const [searchQuery, setSearchQuery] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState('');
-  const [panelOpen, setPanelOpen] = useState(embedded);
+  const embedded = embeddedOpen !== undefined;
+  const [desktopOpen, setPanelOpen] = useState(false);
+  const panelOpen = embeddedOpen ?? desktopOpen;
   const [creatingSession, setCreatingSession] = useState(false);
   const sidebarRef = useRef<HTMLDivElement>(null);
 
@@ -147,18 +159,9 @@ export default function SessionSidebar({ agentId, portal, embedded = false, onSe
     }
   };
 
-  // 门户只展示界面会话（隐藏宠物/接口/定时任务/IM 渠道等来源）
-  const visibleSessions = portal
-    ? sessions.filter((s) => !s.source || s.source === 'chat')
-    : sessions;
+  const filteredSessions = useSessionHistory(panelOpen, searchQuery, agentId, portal ? 'chat' : undefined);
 
-  const filteredSessions = visibleSessions.filter(
-    (s) =>
-      searchQuery === '' ||
-      (s.title || '').toLowerCase().includes(searchQuery.toLowerCase()),
-  );
-
-  const pinnedSessions = filteredSessions.filter((s) => s.is_pinned);
+  const pinnedSessions = filteredSessions.filter((s) => s.is_pinned && !s.is_archived);
   const regularSessions = filteredSessions.filter((s) => !s.is_pinned && !s.is_archived);
   const archivedSessions = filteredSessions.filter((s) => s.is_archived);
 
@@ -204,7 +207,6 @@ export default function SessionSidebar({ agentId, portal, embedded = false, onSe
             aria-expanded={panelOpen}
             onClick={() => {
               setPanelOpen((prev) => !prev);
-              if (!panelOpen) refreshSessions(agentId || undefined);
             }}
             className={cn(
               'flex items-center justify-center w-9 h-9 rounded-lg transition-colors',
@@ -313,11 +315,11 @@ export default function SessionSidebar({ agentId, portal, embedded = false, onSe
 
           {/* Session list */}
           <div className="flex-1 overflow-y-auto px-2 pb-4">
-            {isSessionsLoading && sessions.length === 0 ? (
+            {isSessionsLoading && filteredSessions.length === 0 ? (
               <div className="px-3 py-8 text-center">
                 <Spin size="small" />
               </div>
-            ) : filteredSessions.length === 0 ? (
+            ) : !sessionListError && filteredSessions.length === 0 ? (
               <div className="flex flex-col items-center gap-2 px-3 py-10 text-center">
                 <MessageOutlined className="text-3xl text-muted-foreground/20" />
                 <span className="text-xs text-muted-foreground">
@@ -429,6 +431,7 @@ export default function SessionSidebar({ agentId, portal, embedded = false, onSe
                 )}
               </div>
             )}
+            <SessionHistoryMore />
           </div>
         </div>
       )}

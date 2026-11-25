@@ -1,3 +1,4 @@
+import { errorMessage, isFormValidationError } from '@/lib/errors';
 import { useState, useEffect, useCallback } from 'react';
 import {
   DisconnectOutlined,
@@ -82,8 +83,8 @@ function McpManagementPageContent() {
     try {
       const data = await mcpApi.list();
       setServers(data);
-    } catch (err: any) {
-      message.error(`加载 MCP Server 失败：${err.message}`);
+    } catch (err) {
+      message.error(`加载 MCP Server 失败：${errorMessage(err)}`);
     } finally {
       setLoading(false);
     }
@@ -155,9 +156,9 @@ function McpManagementPageContent() {
       }
       setModalOpen(false);
       fetchData();
-    } catch (err: any) {
-      if (err?.errorFields) return; // form validation error
-      message.error(err.message || '操作失败');
+    } catch (err) {
+      if (isFormValidationError(err)) return; // form validation error
+      message.error(errorMessage(err, '操作失败'));
     } finally {
       setSaving(false);
     }
@@ -170,8 +171,8 @@ function McpManagementPageContent() {
       await mcpApi.delete(id);
       message.success('MCP Server 已删除');
       fetchData();
-    } catch (err: any) {
-      message.error(`删除失败：${err.message}`);
+    } catch (err) {
+      message.error(`删除失败：${errorMessage(err)}`);
     } finally {
       setDeletingId(null);
     }
@@ -187,8 +188,8 @@ function McpManagementPageContent() {
       }
       message.success('MCP Server 已刷新');
       fetchData();
-    } catch (err: any) {
-      message.error(`刷新失败：${err.message}`);
+    } catch (err) {
+      message.error(`刷新失败：${errorMessage(err)}`);
     } finally {
       setRefreshingId(null);
     }

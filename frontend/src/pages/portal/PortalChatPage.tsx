@@ -37,7 +37,7 @@ export default function PortalChatPage() {
   // onDone 需要 flushNext，但 useChatStream 初始化早于 useMessageQueue —— 用 ref 打破循环依赖
   const flushNextRef = useRef<() => void>(() => {});
 
-  const { run, stopping, resume, streaming, error, setError, abortRef, beginTurn, interrupt, handleEvent } =
+  const { run, stopping, resume, streaming, error, setError, abortRef, beginTurn, interrupt } =
     useChatStream({
       onDone: (_sid, { flush }) => {
         refreshSessions(agentId);
@@ -48,7 +48,7 @@ export default function PortalChatPage() {
 
   // Codex-style message queue: while streaming, sent messages are queued and
   // flushed one by one as each turn completes.
-  const handleSendRef = useRef<(content: string, attachments?: ChatAttachment[]) => Promise<void> | void>();
+  const handleSendRef = useRef<(content: string, attachments?: ChatAttachment[]) => Promise<void | boolean> | void>();
   const { queue, enqueue, remove: removeQueued, clear: clearQueue, flushNext, sendNow: sendQueuedNow } =
     useMessageQueue(
       (content, attachments) => { void handleSendRef.current?.(content, attachments); },
@@ -80,20 +80,21 @@ export default function PortalChatPage() {
   useEffect(() => {
     if (!agentId) return;
     if (urlSessionId) {
-      refreshSessions(agentId);
+      refreshSessions(agentId, { source: 'chat' });
     } else {
-      loadSessions(agentId);
+      loadSessions(agentId, { source: 'chat' });
     }
   }, [agentId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleSend = useCallback(
-    async (content: string, attachments: ChatAttachment[] = [], _files?: unknown, browser?: BrowserAuthorization) => {
+    async (content: string, attachments: ChatAttachment[] = [], _files?: unknown, browser?: BrowserAuthorization, onSessionCreated?: (id: string) => void) => {
       let sessionId = browser?.sessionId || activeSessionId;
 
       if (!sessionId) {
         const title = content.slice(0, 100) || (attachments.length > 0 ? '文件消息' : '新对话');
         sessionId = await createSession(title, agentId);
         if (sessionId) {
+          onSessionCreated?.(sessionId);
           navigate(`/portal/agents/${agentId}/chat/${sessionId}`, { replace: true });
         }
       } else if (content.trim()) {
@@ -108,13 +109,6 @@ export default function PortalChatPage() {
         return;
       }
 
-      addMessage(sessionId, {
-        id: `msg-user-${Date.now()}`,
-        role: 'user',
-        content,
-        attachments: attachments.length > 0 ? attachments : null,
-        created_at: new Date().toISOString(),
-      });
 
       const consume = beginTurn(sessionId);
 
@@ -129,8 +123,17 @@ export default function PortalChatPage() {
       );
 
       abortRef.current = controller;
+      if (!await controller.accepted) return false;
+      addMessage(sessionId, {
+        id: `msg-user-${Date.now()}`,
+        role: 'user',
+        content,
+        attachments: attachments.length > 0 ? attachments : null,
+        created_at: new Date().toISOString(),
+      });
+      return true;
     },
-    [activeSessionId, sessions, agentId, navigate, createSession, renameSession, addMessage, message, beginTurn, handleEvent, abortRef],
+    [activeSessionId, sessions, agentId, navigate, createSession, renameSession, addMessage, message, beginTurn, abortRef],
   );
 
   handleSendRef.current = handleSend;
@@ -153,13 +156,13 @@ export default function PortalChatPage() {
     }
   };
 
-  const handleEditResend = (content: string) => {
+  const handleEditResend = useCallback((content: string) => {
     if (streaming.isStreaming) {
       enqueue(content, []);
       return;
     }
     handleSend(content);
-  };
+  }, [streaming.isStreaming, enqueue, handleSend]);
 
   const handleStarterPrompt = (prompt: string) => {
     if (streaming.isStreaming) {
@@ -169,8 +172,7 @@ export default function PortalChatPage() {
     handleSend(prompt);
   };
 
-  const currentMessages = (activeSessionId ? messages[activeSessionId] || [] : [])
-    .filter((item) => !(streaming.isStreaming && run && item.id === run.assistant_message_id));
+  const currentMessages = activeSessionId ? messages[activeSessionId] || [] : [];
 
   return (
     <div ref={chatRef} className="portal-chat flex min-h-0 flex-1 flex-col overflow-hidden">
@@ -187,7 +189,7 @@ export default function PortalChatPage() {
           <Button type="text" icon={<ArrowLeftOutlined />} onClick={() => navigate('/portal')}>智能体列表</Button>
           {navigation}
         </div>
-        {agentId && <SessionSidebar agentId={agentId} portal embedded onSelect={() => setMenuOpen(false)} />}
+        {agentId && <SessionSidebar agentId={agentId} portal embeddedOpen={isMobile && menuOpen} onSelect={() => setMenuOpen(false)} />}
       </Drawer>
       {/* Agent header */}
       {agentLoading && (
@@ -202,10 +204,8 @@ export default function PortalChatPage() {
             size="small"
             icon={isMobile ? <MenuOutlined /> : <ArrowLeftOutlined />}
             onClick={() => {
-              if (isMobile) {
-                setMenuOpen(true);
-                void refreshSessions(agentId);
-              } else navigate('/portal');
+              if (isMobile) setMenuOpen(true);
+              else navigate('/portal');
             }}
             className="portal-menu-button !px-1.5 text-muted-foreground"
             aria-label={isMobile ? '打开导航与对话历史' : '返回智能体列表'}
@@ -240,7 +240,7 @@ export default function PortalChatPage() {
 
         <ChatWindow
           loading={messagesLoading || agentLoading}
-          messages={{ messages: currentMessages, streaming, conversationId: activeSessionId, agent, onEditResend: handleEditResend }}
+          messages={{ messages: currentMessages, streaming, streamingMessageId: streaming.isStreaming ? run?.assistant_message_id : undefined, conversationId: activeSessionId, agent, onEditResend: handleEditResend }}
           status={<>
             <ChatRunNotice run={run} stopping={stopping} onResume={resume} />
             {error && (

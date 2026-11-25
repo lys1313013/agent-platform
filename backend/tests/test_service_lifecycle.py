@@ -11,7 +11,6 @@ from fastapi import FastAPI
 
 from agent_platform.channels import connection_manager
 from agent_platform.channels.adapter import InboundEvent
-from agent_platform.channels.pipeline import ChannelInboundPipeline
 from agent_platform.core.task_events import TaskEventBroker
 from agent_platform.cron_jobs import scheduler as scheduler_module
 from agent_platform.hooks.manager import HookManager
@@ -68,6 +67,7 @@ def services(monkeypatch):
     monkeypatch.setattr(lifecycle, "ChannelConnectionManager", lambda *args: channels)
     monkeypatch.setattr(lifecycle, "shutdown_chat_runs", asynchronous("chat.close"))
     monkeypatch.setattr(lifecycle, "shutdown_rooms", asynchronous("rooms.close"))
+    monkeypatch.setattr(lifecycle, "start_graph_workers", lambda factory: asynchronous("graph.close"))
     monkeypatch.setattr(lifecycle, "shutdown_background_tasks", asynchronous("background.close"))
     monkeypatch.setattr(lifecycle, "broker", SimpleNamespace(shutdown=asynchronous("broker.close")))
     monkeypatch.setattr(scheduler_module, "_global_scheduler", None)
@@ -86,7 +86,7 @@ async def test_normal_shutdown_follows_dependencies_and_clears_globals(services)
         assert services.app.state.tool_executor is not None
     assert closed(services) == [
         "channels.close", "scheduler.close", "broker.close", "chat.close",
-        "rooms.close", "background.close", "hooks.close", "remote_tools.close",
+        "rooms.close", "background.close", "graph.close", "hooks.close", "remote_tools.close",
         "mcp.close", "sandbox.close", "recorder.close", "langfuse.close", "database.close",
     ]
     assert scheduler_module.get_global_scheduler() is None
@@ -173,7 +173,7 @@ async def test_running_application_cancellation_still_closes_every_resource(serv
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert len(closed(services)) == 13
+    assert len(closed(services)) == 14
     assert closed(services)[-1] == "database.close"
 
 
@@ -196,14 +196,14 @@ async def test_cancellation_during_shutdown_does_not_skip_remaining_resources(se
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert len(closed(services)) == 13
+    assert len(closed(services)) == 14
     assert scheduler_module.get_global_scheduler() is None
     assert connection_manager.get_global_channel_manager() is None
 
 
 async def test_mcp_start_does_not_swallow_application_cancellation():
     entered = asyncio.Event()
-    server = SimpleNamespace(id=uuid4(), name="test", transport_type="sse", url="http://invalid", headers=None, tool_prefix="", timeout=1)
+    server = SimpleNamespace(id=uuid4(), name="test", tenant_id=uuid4(), transport_type="sse", url="http://invalid", headers=None, tool_prefix="", timeout=1)
     db = SimpleNamespace(execute=AsyncMock(return_value=SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [server]))))
 
     @asynccontextmanager
@@ -236,10 +236,10 @@ async def test_scheduler_always_closes_claims_after_partial_start(running):
     scheduler._claims.close.assert_awaited_once()
 
 
-async def test_pipeline_shutdown_waits_for_interrupted_turn_and_rejects_new_work(monkeypatch):
+async def test_pipeline_shutdown_waits_for_interrupted_turn_and_rejects_new_work(inbox_pipeline):
     entered = asyncio.Event()
     finished = asyncio.Event()
-    pipeline = ChannelInboundPipeline(SimpleNamespace(id=uuid4()), None, None)
+    pipeline = inbox_pipeline
     starts = []
 
     async def handle(event):
@@ -253,23 +253,25 @@ async def test_pipeline_shutdown_waits_for_interrupted_turn_and_rejects_new_work
 
     pipeline._safe_handle = handle
     event = InboundEvent(channel_id=pipeline.channel.id, event_id=str(uuid4()), chat_id="chat", external_id="user", text="hello")
-    pipeline.submit(event)
+    await pipeline.receive(event)
     await entered.wait()
-    pipeline.submit(InboundEvent(channel_id=pipeline.channel.id, event_id=str(uuid4()), chat_id="chat", external_id="user", text="queued"))
+    await pipeline.receive(InboundEvent(channel_id=pipeline.channel.id, event_id=str(uuid4()), chat_id="chat", external_id="user", text="queued"))
     await pipeline.shutdown()
     assert finished.is_set()
     assert starts == [event.event_id]
-    assert not pipeline._running and not pipeline._chat_consumers
-    pipeline.submit(InboundEvent(channel_id=pipeline.channel.id, event_id=str(uuid4()), chat_id="chat", external_id="user", text="late"))
-    assert not pipeline._chat_consumers
+    assert not pipeline._running and not pipeline.inbox.tasks
+    from agent_platform.channels.inbox import ChannelUnavailable
+    with pytest.raises(ChannelUnavailable):
+        await pipeline.receive(InboundEvent(channel_id=pipeline.channel.id, event_id=str(uuid4()), chat_id="chat", external_id="user", text="late"))
+    assert not pipeline.inbox.tasks
 
 
-async def test_pipeline_shutdown_does_not_cancel_existing_rescue_twice():
+async def test_pipeline_shutdown_does_not_cancel_existing_rescue_twice(inbox_pipeline):
     entered = asyncio.Event()
     rescuing = asyncio.Event()
     release = asyncio.Event()
     finished = asyncio.Event()
-    pipeline = ChannelInboundPipeline(SimpleNamespace(id=uuid4()), None, None)
+    pipeline = inbox_pipeline
 
     async def handle(event):
         entered.set()
@@ -282,7 +284,7 @@ async def test_pipeline_shutdown_does_not_cancel_existing_rescue_twice():
 
     pipeline._safe_handle = handle
     event = InboundEvent(channel_id=pipeline.channel.id, event_id=str(uuid4()), chat_id="chat", external_id="user", text="hello")
-    pipeline.submit(event)
+    await pipeline.receive(event)
     await entered.wait()
     pipeline._running[pipeline._chat_key(event)].task.cancel()
     await rescuing.wait()

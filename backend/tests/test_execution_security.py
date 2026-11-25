@@ -110,9 +110,9 @@ async def test_run_replay_rechecks_object_access_and_finalizes_after_revocation(
 
 
 async def test_mcp_dispatch_rechecks_tenant_even_with_forged_allowlist(env):
-    manager = NS(_tool_to_server={"a_read": env.server}, is_mcp_tool=lambda n: n == "a_read",
+    manager = NS(server_for_tool=lambda name, tenant: env.server, is_mcp_tool=lambda n: n == "a_read",
                  call_tool=AsyncMock(return_value="ok"),
-                 list_all_tools=lambda: [("a_read", MCPToolInfo(name="read", description="A"))])
+                 iter_tools=lambda tenant: [(env.server, "a_read", MCPToolInfo(name="read", description="A"))])
     executor = ToolExecutor(ToolRegistry(), None, mcp_manager=manager)
     assert not chat.filter_tools_by_agent(executor, None)[1]
     for tenant, allowed in [(env.b, False), (env.a, True)]:
@@ -140,8 +140,7 @@ async def test_user_trust_setting_is_used(env):
 async def test_tool_catalog_does_not_disclose_another_tenants_mcp_schema(env):
     from agent_platform.interface.routes.tools import list_tools
 
-    manager = NS(_tool_to_server={"a_read": env.server},
-                 list_all_tools=lambda: [("a_read", MCPToolInfo(name="read", description="private schema"))])
+    manager = NS(iter_tools=lambda tenant: [(env.server, "a_read", MCPToolInfo(name="read", description="private schema"))])
     request = NS(app=NS(state=NS(tool_executor=ToolExecutor(ToolRegistry(), None), mcp_manager=manager)))
     async with env.factory() as db:
         assert await list_tools(request, env.user, db) == []
@@ -291,3 +290,53 @@ async def test_remote_tool_is_denied_outside_its_owning_tenant():
     with bind_execution_scope(user_id, uuid4()):
         with pytest.raises(SecurityError, match="not available in the execution tenant"):
             await executor._authorize_remote_tool("crm_lookup", str(user_id))
+
+
+async def test_same_mcp_name_in_two_tenants_selects_each_server(env, monkeypatch):
+    from agent_platform.interface.routes.mcp_servers import _build_config, _get_live_tools
+    from agent_platform.interface.routes.tools import list_tools
+    from agent_platform.tools.mcp.adapter import MCPServerConnection
+    from agent_platform.tools.mcp.manager import MCPManager
+
+    async def connect(conn):
+        conn._connected = True
+        conn.session = Mock()
+        conn.tools = [MCPToolInfo("lookup", conn.config["name"])]
+        conn.call_tool = AsyncMock(return_value=conn.config["name"])
+
+    monkeypatch.setattr(MCPServerConnection, "connect", connect)
+    manager = MCPManager()
+    executor = ToolExecutor(ToolRegistry(), None, mcp_manager=manager)
+    request = NS(app=NS(state=NS(tool_executor=executor, mcp_manager=manager)))
+    async with env.factory() as db:
+        server_a = await db.get(MCPServer, env.server)
+        server_b = MCPServer(id=uuid4(), tenant_id=env.b, name="B", transport_type="sse",
+                             url="https://unused.invalid")
+        db.add(server_b)
+        await db.commit()
+        await asyncio.gather(*(manager.add_server(server.id, _build_config(server))
+                               for server in (server_a, server_b)))
+
+        async def run_for(server):
+            tenant = server.tenant_id
+            _, tools = _get_live_tools(manager, server)
+            assert [(t["name"], t["description"]) for t in tools] == [("lookup", server.name)]
+            async with env.factory() as catalog_db:
+                listed = await list_tools(request, NS(tenant_id=tenant), catalog_db)
+            assert [(t["name"], t["description"]) for t in listed] == [("lookup", server.name)]
+            agent = NS(id=uuid4(), tenant_id=tenant, enabled_tools=["lookup"],
+                       mcp_server_ids=[str(server.id)], knowledge_bases=[], graph_knowledge_bases=[],
+                       children=[])
+            _, schema = chat.filter_tools_by_agent(executor, agent)
+            assert [(t["function"]["name"], t["function"]["description"]) for t in schema] == [
+                ("lookup", server.name)
+            ]
+            with bind_execution_scope(env.uid, tenant):
+                result = await executor._execute_impl("lookup", {}, "call", str(env.uid), str(env.sid),
+                                                      allowed_tools={"lookup"}, trust_level="auto_all")
+                assert result.success and result.output == server.name
+
+        await asyncio.gather(run_for(server_a), run_for(server_b))
+        await manager.remove_server(server_a.id)
+        await run_for(server_b)
+        assert manager.server_for_tool("lookup", env.a) is None

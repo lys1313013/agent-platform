@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import aclosing, suppress
 from dataclasses import dataclass, field
 from datetime import UTC
@@ -26,12 +26,16 @@ from agent_platform.core.agent_events import (
 from agent_platform.core.confirmation import confirmation_manager
 from agent_platform.core.context import (
     ContextBudget,
+    compact_model_retry,
     compress_early_tool_results,
-    current_agent_id,
+    estimate_message_tokens,
     estimate_messages_tokens,
+    is_context_overflow_error,
 )
 from agent_platform.core.execution_scope import bind_execution_scope, execution_tenant_id
 from agent_platform.core.prompt import build_current_time_context
+from agent_platform.core.run_confirmations import wait_for_reply
+from agent_platform.core.runtime_config import PublishedBindings
 from agent_platform.core.task_scope import call_key, completed_calls, track_task
 from agent_platform.core.ui_action import (
     REF_FAILURE_BREAKER_THRESHOLD,
@@ -50,8 +54,10 @@ from agent_platform.llm import (
 from agent_platform.observation import get_current_observation, get_langfuse_client
 from agent_platform.observation.recorder import (
     ObsContext,
+    bind_obs_context,
     get_obs_context,
     get_recorder,
+    get_tool_span_id,
     set_obs_context,
 )
 from agent_platform.tools.executor import ToolExecutor, ToolResult
@@ -93,6 +99,7 @@ class DelegationContext:
     workspace_id: UUID | None = None
     workspace_slug: str | None = None
     tenant_id: UUID | None = None
+    published_bindings: PublishedBindings | None = None
 
 
 @dataclass
@@ -277,6 +284,7 @@ class AgentLoop:
         session_id: UUID,
         conversation_history: list[LLMMessage],
         tools: list[dict],
+        request_context: str | None = None,
     ) -> AsyncGenerator[AgentStep | str]:
         # Consumers may advance/close the iterator from different tasks (e.g.
         # wait_for on Python 3.11). One worker owns the complete generator
@@ -284,7 +292,7 @@ class AgentLoop:
         requests: asyncio.Queue[asyncio.Future] = asyncio.Queue()
 
         async def produce():
-            events = self._run_scoped(user_input, user_id, session_id, conversation_history, tools)
+            events = self._run_scoped(user_input, user_id, session_id, conversation_history, tools, request_context)
             try:
                 while True:
                     response = await requests.get()
@@ -324,8 +332,9 @@ class AgentLoop:
         session_id: UUID,
         conversation_history: list[LLMMessage],
         tools: list[dict],
-    ) -> AsyncIterator[AgentStep | AgentEvent]:
-        tenant_id = self.execution_tenant_id or execution_tenant_id(user_id)
+        request_context: str | None = None,
+    ) -> AsyncGenerator[AgentStep | AgentEvent]:
+        tenant_id = self.execution_tenant_id or await _resolve_tenant_id(user_id)
         if tenant_id is None:
             raise ValueError("AgentLoop requires an explicit execution tenant")
         agent_id = self.execution_agent_id or await _resolve_agent_id(session_id)
@@ -333,14 +342,39 @@ class AgentLoop:
             if self.delegation.tenant_id not in (None, tenant_id):
                 raise ValueError("Delegation tenant does not match execution tenant")
             self.delegation.tenant_id = tenant_id
-        # ContextVar isolation also covers parallel tool tasks and cancellation.
-        with bind_execution_scope(user_id, tenant_id, agent_id=agent_id):
-            events = self._run(user_input, user_id, session_id, conversation_history, tools)
+        parent = get_obs_context()
+        parent_tool_span_id = get_tool_span_id()
+        observation = ObsContext(
+            trace_id=uuid4(),
+            session_id=session_id,
+            user_id=user_id,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+        )
+        if (
+            parent is not None and parent_tool_span_id is not None
+            and parent.user_id == user_id and parent.tenant_id == tenant_id
+            and parent.session_id == session_id
+        ):
+            observation.root_trace_id = parent.root_trace_id or parent.trace_id
+            observation.parent_tool_span_id = parent_tool_span_id
+
+        # The worker owns both contexts until nested iterators are closed.
+        with (
+            bind_execution_scope(user_id, tenant_id, agent_id=agent_id),
+            bind_obs_context(observation),
+        ):
+            events = self._run(user_input, user_id, session_id, conversation_history, tools, request_context)
             try:
-                async for event in events:
-                    yield event
-            finally:
-                await events.aclose()
+                async with aclosing(events):
+                    async for event in events:
+                        yield event
+            except (asyncio.CancelledError, GeneratorExit):
+                self.finalize_trace_error(status="interrupted")
+                raise
+            except Exception as error:
+                self.finalize_trace_error(status="timeout" if isinstance(error, TimeoutError) else "error")
+                raise
 
     async def _run(
         self,
@@ -349,7 +383,8 @@ class AgentLoop:
         session_id: UUID,
         conversation_history: list[LLMMessage],
         tools: list[dict],
-    ) -> AsyncIterator[AgentStep | AgentEvent]:
+        request_context: str | None = None,
+    ) -> AsyncGenerator[AgentStep | AgentEvent]:
         """
         Run the agent loop.
 
@@ -366,30 +401,25 @@ class AgentLoop:
             workspace_slug=self.workspace_slug,
         )
 
-        # ---- Observation: open a trace for this execution ----
-        trace_id = uuid4()
-        tenant_id = self.execution_tenant_id or await _resolve_tenant_id(user_id)
-        bound_agent_id = current_agent_id.get()
-        agent_id = UUID(bound_agent_id) if bound_agent_id else None
-        set_obs_context(
-            ObsContext(
-                trace_id=trace_id,
-                session_id=session_id,
-                user_id=user_id,
-                tenant_id=tenant_id,
-                agent_id=agent_id,
-            )
-        )
-        t_start = time.monotonic()
-        total_tokens = 0
-        tool_call_count = 0
+        observation = get_obs_context()
+        assert observation is not None
+        trace_id = observation.trace_id
+        tenant_id = observation.tenant_id
+        agent_id = observation.agent_id
+        t_start = observation.started_at
+
+        transient_context = (LLMMessage(role="user", content=request_context, transient=True, omit_from_trace=True)
+                             if request_context else None)
+        extra_tokens = estimate_message_tokens(transient_context) if transient_context else 0
 
         # Build message list
         messages: list[LLMMessage] = []
         if self.system_prompt:
             messages.append(LLMMessage(role="system", content=self.system_prompt))
         messages.extend(conversation_history)
+        turn_start = len(messages)
         messages.append(LLMMessage(role="user", content=user_input))
+        overflow_retried = False
 
         # ---- Hook: session started ----
         get_hook_manager().fire_nowait(
@@ -412,6 +442,7 @@ class AgentLoop:
 
         for step_num in range(1, self.max_iterations + 1):
             step = AgentStep(step=step_num)
+            observation.iteration = step_num
             logger.debug(
                 "agent_loop_iteration_start",
                 session_id=str(session_id),
@@ -424,7 +455,7 @@ class AgentLoop:
             # prompt-cache prefix, so it must buy real headroom.
             if step_num > 3:
                 budget = ContextBudget.from_settings()
-                tokens_before = estimate_messages_tokens(messages)
+                tokens_before = estimate_messages_tokens(messages) + extra_tokens
                 tokens_after = tokens_before
                 if tokens_before > budget.trigger_at:
                     get_hook_manager().fire_nowait(
@@ -438,7 +469,7 @@ class AgentLoop:
                         data={"tokens_before": tokens_before},
                     )
                     messages = compress_early_tool_results(messages, step_num)
-                    tokens_after = estimate_messages_tokens(messages)
+                    tokens_after = estimate_messages_tokens(messages) + extra_tokens
                     get_hook_manager().fire_nowait(
                         "PostCompact",
                         trace_id=str(trace_id),
@@ -479,14 +510,26 @@ class AgentLoop:
                     )
 
             step_usage: dict = {}
-            async with aclosing(self._stream_model_step(
-                step, messages, tools, user_id, session_id, step_usage,
-            )) as stream:
-                async for event in stream:
-                    yield event
-            total_tokens += step_usage.get("total_tokens", 0) or 0
+            while True:
+                emitted = False
+                try:
+                    async with aclosing(self._stream_model_step(
+                        step, messages, tools, user_id, session_id, step_usage, transient_context,
+                    )) as stream:
+                        async for event in stream:
+                            emitted = True
+                            yield event
+                    break
+                except Exception as error:
+                    if emitted or overflow_retried or not is_context_overflow_error(error):
+                        raise
+                    # Retry this provider request with the completed tools in
+                    # its transcript. Restarting the loop would replay them.
+                    messages = compact_model_retry(messages, turn_start)
+                    overflow_retried = True
+            observation.total_tokens += step_usage.get("total_tokens", 0) or 0
 
-            tool_call_count += len(step.tool_calls)
+            observation.tool_call_count += len(step.tool_calls)
 
             # No tool calls -> final answer text, we're done
             if not step.tool_calls:
@@ -501,8 +544,8 @@ class AgentLoop:
                     trace_id, t_start, session_id, user_id, tenant_id,
                     status="completed",
                     iteration_count=step_num,
-                    tool_call_count=tool_call_count,
-                    total_tokens=total_tokens,
+                    tool_call_count=observation.tool_call_count,
+                    total_tokens=observation.total_tokens,
                     agent_id=agent_id,
                 )
                 step.done = True
@@ -631,8 +674,8 @@ class AgentLoop:
             trace_id, t_start, session_id, user_id, tenant_id,
             status="timeout",
             iteration_count=self.max_iterations,
-            tool_call_count=tool_call_count,
-            total_tokens=total_tokens,
+            tool_call_count=observation.tool_call_count,
+            total_tokens=observation.total_tokens,
             hit_max_iterations=True,
             agent_id=agent_id,
         )
@@ -660,7 +703,7 @@ class AgentLoop:
 
     async def _stream_model_step(
         self, step: AgentStep, messages: list[LLMMessage], tools: list[dict],
-        user_id: UUID, session_id: UUID, usage: dict,
+        user_id: UUID, session_id: UUID, usage: dict, transient_context: LLMMessage | None = None,
     ) -> AsyncGenerator[AgentEvent]:
         """Stream one model step, validate its whole tool batch, and retain usage.
 
@@ -693,14 +736,12 @@ class AgentLoop:
                 # Refresh after tools, user confirmations, and retries without
                 # accumulating stale clocks in history. The clock rides after
                 # the conversation so it never breaks the cached prefix.
-                request_messages = [
-                    *messages,
-                    LLMMessage(
-                        role="user",
-                        content=build_current_time_context(),
-                        transient=True,
-                    ),
-                ]
+                request_messages = list(messages)
+                if transient_context is not None:
+                    request_messages.append(transient_context)
+                request_messages.append(LLMMessage(
+                    role="user", content=build_current_time_context(), transient=True,
+                ))
                 async with aclosing(self.provider.stream(request_messages, tools=tools)) as model_stream:
                     async for chunk in model_stream:
                         if chunk.type == "text_delta" and chunk.content:
@@ -898,6 +939,7 @@ class AgentLoop:
                     )
 
         # --- Execute regular tools sequentially ---
+        regular_completed = False
         try:
             for tc in regular_calls:
                 # ============================================================
@@ -1051,30 +1093,36 @@ class AgentLoop:
                 # event_queue drain can run between tool executions.
                 await asyncio.sleep(0)
 
+            regular_completed = True
         finally:
-            for pending in parallel_tasks.values():
+            unfinished = list(parallel_tasks.values())
+            if not regular_completed:
+                unfinished.extend(delegation_futures.values())
+            for pending in unfinished:
                 pending.cancel()
-            if parallel_tasks:
-                await asyncio.gather(*parallel_tasks.values(), return_exceptions=True)
-                parallel_tasks.clear()
+            if unfinished:
+                await asyncio.gather(*unfinished, return_exceptions=True)
         # --- Collect delegation results ---
         # Delegation tasks were started early and have been running in
         # the background.  Wait for them and yield results.
         if delegation_futures:
             # Wait for all delegation tasks with heartbeat so the SSE
             # generator can drain event_queue (child agent events).
-            gather_task = asyncio.ensure_future(
-                asyncio.gather(
-                    *delegation_futures.values(),
-                    return_exceptions=True,
-                )
+            gather_task = asyncio.gather(
+                *delegation_futures.values(),
+                return_exceptions=True,
             )
-            while not gather_task.done():
-                await asyncio.sleep(0.3)
+            try:
+                while not gather_task.done():
+                    await asyncio.sleep(0.3)
+                    if not gather_task.done():
+                        yield ControlEvent("delegation_heartbeat", status="drain")
+                results_list = gather_task.result()
+            finally:
                 if not gather_task.done():
-                    yield ControlEvent("delegation_heartbeat", status="drain")
-
-            results_list = gather_task.result()
+                    gather_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await gather_task
 
             for i, tc in enumerate(delegation_calls):
                 result = results_list[i]
@@ -1126,9 +1174,12 @@ class AgentLoop:
     ) -> None:
         """Write the trace summary row (fire-and-forget) and clear obs context."""
         duration_ms = int((time.monotonic() - t_start) * 1000)
+        ctx = get_obs_context()
         try:
             get_recorder().record_trace(
                 trace_id=trace_id,
+                root_trace_id=ctx.root_trace_id if ctx else None,
+                parent_tool_span_id=ctx.parent_tool_span_id if ctx else None,
                 session_id=session_id,
                 user_id=user_id,
                 tenant_id=tenant_id,
@@ -1164,32 +1215,19 @@ class AgentLoop:
             },
         )
 
-    def finalize_trace_error(self) -> None:
-        """Called by callers on abnormal termination to record an errored trace."""
+    def finalize_trace_error(self, *, status: str = "error") -> None:
+        """Record abnormal termination inside the execution worker."""
         ctx = get_obs_context()
-        if ctx is None:
+        if ctx is None or ctx.session_id is None or ctx.user_id is None:
             return
-        get_recorder().record_trace(
-            trace_id=ctx.trace_id,
-            session_id=ctx.session_id,
-            user_id=ctx.user_id,
-            tenant_id=ctx.tenant_id,
-            status="error",
+        self._finalize_trace(
+            ctx.trace_id, ctx.started_at, ctx.session_id, ctx.user_id, ctx.tenant_id,
+            status=status,
             agent_id=ctx.agent_id,
-            duration_ms=0,
+            iteration_count=ctx.iteration or 0,
+            tool_call_count=ctx.tool_call_count,
+            total_tokens=ctx.total_tokens,
         )
-        # ---- Hook: session ended (error path) ----
-        get_hook_manager().fire_nowait(
-            "SessionEnd",
-            trace_id=str(ctx.trace_id),
-            session_id=ctx.session_id,
-            user_id=ctx.user_id,
-            tenant_id=ctx.tenant_id,
-            agent_id=ctx.agent_id,
-            model=self.provider.model,
-            data={"status": "error", "duration_ms": 0},
-        )
-        set_obs_context(None)
 
     # ------------------------------------------------------------------
     # Tool execution with tracing
@@ -1248,8 +1286,9 @@ class AgentLoop:
             except (TypeError, ValueError):
                 pass
         tool_timeout = max(5.0, min(tool_timeout, 3600.0))
+        timeout = asyncio.timeout(tool_timeout)
         try:
-            async with asyncio.timeout(tool_timeout):
+            async with timeout:
                 result = await self.tool_executor.execute(
                     tool_name=tc.name,
                     arguments=tc.arguments,
@@ -1263,6 +1302,7 @@ class AgentLoop:
                     allowed_tools=self.allowed_tools,
                     trust_level=ctx.trust_level,
                     approved=id(tc) in self._approved_tool_calls,
+                    outer_timeout=timeout,
                 )
         except TimeoutError:
             return ToolResult(
@@ -1411,8 +1451,7 @@ class AgentLoop:
             yield ControlEvent("confirmation_flow", tc.id, "waiting")
 
             # Bounded waits keep streaming transports responsive to cancellation.
-            async with asyncio.timeout(confirmation.timeout_seconds):
-                confirmation = await confirmation_manager.wait_for_response(confirmation.id)
+            confirmation = await wait_for_reply(confirmation)
         except TimeoutError:
             confirmation.response = {"status": "timeout"}
         finally:
@@ -1556,19 +1595,18 @@ class AgentLoop:
                     },
                     "created_at": confirmation.created_at.isoformat(),
                 })
-                yield ControlEvent("confirmation_flow", tc.id, "waiting")
-
+                confirmation_id = confirmation.id
                 try:
-                    async with asyncio.timeout(confirmation.timeout_seconds):
-                        confirmation = await confirmation_manager.wait_for_response(
-                            confirmation.id
-                        )
+                    yield ControlEvent("confirmation_flow", tc.id, "waiting")
+                    confirmation = await wait_for_reply(confirmation)
                 except TimeoutError:
                     self._last_ui_action_output = (
                         "Error(timeout): the user did not answer the page "
                         "operation confirmation in time. Do not retry it."
                     )
                     return
+                finally:
+                    confirmation_manager.discard(confirmation_id)
                 if not confirmation:
                     self._last_ui_action_output = "Error: confirmation not found"
                     return
@@ -1583,6 +1621,7 @@ class AgentLoop:
 
         # ---- Step 2: 创建 pending 动作 ----
         pending = ui_action_manager.create_action(
+            execution_tenant_id=self.execution_tenant_id or execution_tenant_id(ctx.user_id),
             session_id=session_key,
             user_id=str(ctx.user_id),
             tool_call_id=tc.id,

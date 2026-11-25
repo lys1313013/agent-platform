@@ -1,3 +1,4 @@
+import { errorMessage, isFormValidationError } from '@/lib/errors';
 import { useState, useEffect, useCallback } from 'react';
 import {
   ApiOutlined,
@@ -103,8 +104,8 @@ export default function ChannelsPage() {
       // 主列表数据先行加载，渠道列表不依赖下拉选项数据
       const channelList = await channelsApi.list();
       setChannels(channelList);
-    } catch (err: any) {
-      message.error(`加载渠道失败：${err.message}`);
+    } catch (err) {
+      message.error(`加载渠道失败：${errorMessage(err)}`);
     } finally {
       setLoading(false);
     }
@@ -225,9 +226,9 @@ export default function ChannelsPage() {
       }
       setModalOpen(false);
       fetchData();
-    } catch (err: any) {
-      if (err?.errorFields) return;
-      message.error(err.message || '操作失败');
+    } catch (err) {
+      if (isFormValidationError(err)) return;
+      message.error(errorMessage(err, '操作失败'));
     } finally {
       setSaving(false);
     }
@@ -243,8 +244,8 @@ export default function ChannelsPage() {
         setWebhookChannelType(channel.channel_type);
       }
       fetchData();
-    } catch (err: any) {
-      message.error(err.message || '启用失败');
+    } catch (err) {
+      message.error(errorMessage(err, '启用失败'));
       fetchData();
     } finally {
       setActingChannelId(null);
@@ -257,8 +258,8 @@ export default function ChannelsPage() {
       await channelsApi.disable(channel.id);
       message.success(`渠道「${channel.name}」已停用`);
       fetchData();
-    } catch (err: any) {
-      message.error(err.message || '停用失败');
+    } catch (err) {
+      message.error(errorMessage(err, '停用失败'));
     } finally {
       setActingChannelId(null);
     }
@@ -270,8 +271,8 @@ export default function ChannelsPage() {
       await channelsApi.delete(channel.id);
       message.success('渠道已删除');
       fetchData();
-    } catch (err: any) {
-      message.error(`删除失败：${err.message}`);
+    } catch (err) {
+      message.error(`删除失败：${errorMessage(err)}`);
     } finally {
       setDeletingChannelId(null);
     }
@@ -284,8 +285,8 @@ export default function ChannelsPage() {
     setBindingsLoading(true);
     try {
       setBindings(await channelsApi.bindings(channel.id));
-    } catch (err: any) {
-      message.error(`加载绑定列表失败：${err.message}`);
+    } catch (err) {
+      message.error(`加载绑定列表失败：${errorMessage(err)}`);
     } finally {
       setBindingsLoading(false);
     }
@@ -298,8 +299,8 @@ export default function ChannelsPage() {
       const result = await channelBindingsApi.bind(bindingsChannel.id, code.trim());
       message.success(result.message);
       await openBindings(bindingsChannel);
-    } catch (err: any) {
-      message.error(err.message || '绑定失败');
+    } catch (err) {
+      message.error(errorMessage(err, '绑定失败'));
     } finally {
       setBindingSaving(false);
     }
@@ -310,8 +311,8 @@ export default function ChannelsPage() {
       await channelBindingsApi.unbind(binding.id);
       message.success('已解绑');
       if (bindingsChannel) await openBindings(bindingsChannel);
-    } catch (err: any) {
-      message.error(err.message || '解绑失败');
+    } catch (err) {
+      message.error(errorMessage(err, '解绑失败'));
     }
   };
 

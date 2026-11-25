@@ -5,7 +5,7 @@ from typing import Annotated
 from fastapi import APIRouter, Header, HTTPException, Query
 from fastapi.responses import Response
 
-from agent_platform.auth.jwt_handler import TokenError, decode_token
+from agent_platform.auth.dependencies import DbSession, authenticate_access_token
 from agent_platform.storage.client import ObjectStorage
 
 router = APIRouter(prefix="/api/public", tags=["public"])
@@ -22,6 +22,7 @@ def _extract_owner_id(key: str) -> str | None:
 @router.get("/images/{key:path}")
 async def get_public_image(
     key: str,
+    db: DbSession,
     token: str | None = Query(default=None),
     signed: str | None = Query(default=None, alias="t"),
     authorization: Annotated[str | None, Header()] = None,
@@ -44,14 +45,9 @@ async def get_public_image(
     if not authorized:
         if not authorization or not authorization.startswith("Bearer "):
             raise HTTPException(status_code=401, detail="缺少访问凭证")
-        try:
-            payload = decode_token(authorization[len("Bearer "):])
-        except TokenError:
-            raise HTTPException(status_code=401, detail="凭证无效或已过期")
-        if payload.type != "access":
-            raise HTTPException(status_code=401, detail="无效的凭证类型")
+        user = await authenticate_access_token(authorization[len("Bearer "):], db)
         owner_id = _extract_owner_id(key)
-        if not owner_id or payload.sub != owner_id:
+        if not owner_id or str(user.id) != owner_id:
             raise HTTPException(status_code=403, detail="无权访问该附件")
 
     try:

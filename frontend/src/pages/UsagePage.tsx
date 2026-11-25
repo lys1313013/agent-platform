@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Bar, Column, Line, Pie } from '@ant-design/plots';
+import { Bar, Column, Line, Pie } from '@/components/charts/Plots';
 import {
   Alert,
   Button,

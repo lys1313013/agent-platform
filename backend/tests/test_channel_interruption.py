@@ -23,7 +23,6 @@ from agent_platform.channels.feishu.events import normalize_recall_event
 from agent_platform.channels.pipeline import (
     ChannelInboundPipeline,
     _BufferedEventLogger,
-    _recalled_messages,
     _ResolvedContext,
     _StreamingReply,
 )
@@ -74,7 +73,7 @@ def _msg_event(
     )
 
 
-async def _wait_for(cond, timeout: float = 2.0) -> None:
+async def _wait_for(cond, timeout: float = 5.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if cond():
@@ -83,24 +82,10 @@ async def _wait_for(cond, timeout: float = 2.0) -> None:
     raise AssertionError("condition not met within timeout")
 
 
-@pytest.fixture(autouse=True)
-def _clear_recalled():
-    _recalled_messages.clear()
-    yield
-    _recalled_messages.clear()
-
-
 @pytest.fixture
-async def pipeline():
-    pipe = _make_pipeline()
-    yield pipe
-    for task in pipe._chat_consumers.values():
-        task.cancel()
-    for task in list(pipe._processing_tasks):
-        task.cancel()
-    await asyncio.gather(
-        *pipe._chat_consumers.values(), *pipe._processing_tasks, return_exceptions=True
-    )
+async def pipeline(inbox_pipeline):
+    inbox_pipeline.adapter = _StubAdapter()
+    return inbox_pipeline
 
 
 # ---------------------------------------------------------------------------
@@ -156,8 +141,8 @@ async def test_chat_messages_run_serially(pipeline: ChannelInboundPipeline) -> N
 
     pipeline._safe_handle = fake_handle  # type: ignore[method-assign]
 
-    pipeline.submit(_msg_event(pipeline, "first", message_id="om_1"))
-    pipeline.submit(_msg_event(pipeline, "second", message_id="om_2"))
+    await pipeline.receive(_msg_event(pipeline, "first", message_id="om_1"))
+    await pipeline.receive(_msg_event(pipeline, "second", message_id="om_2"))
 
     await _wait_for(lambda: started == ["first"])
     # 第一条未结束，第二条不得开始
@@ -177,8 +162,8 @@ async def test_submit_dedups_by_event_id(pipeline: ChannelInboundPipeline) -> No
     pipeline._safe_handle = fake_handle  # type: ignore[method-assign]
 
     event = _msg_event(pipeline, "hello", event_id="evt_dup", message_id="om_1")
-    pipeline.submit(event)
-    pipeline.submit(event)  # 重投同 event_id
+    await pipeline.receive(event)
+    await pipeline.receive(event)  # 重投同 event_id
     await _wait_for(lambda: handled == ["hello"])
     await asyncio.sleep(0.05)
     assert handled == ["hello"]
@@ -205,11 +190,11 @@ async def test_stop_cancels_running_task(pipeline: ChannelInboundPipeline) -> No
     pipeline._safe_handle = _blocking_handle(cancelled)  # type: ignore[method-assign]
     adapter: _StubAdapter = pipeline.adapter  # type: ignore[assignment]
 
-    pipeline.submit(_msg_event(pipeline, "run", message_id="om_1"))
+    await pipeline.receive(_msg_event(pipeline, "run", message_id="om_1"))
     chat_key = pipeline._chat_key(_msg_event(pipeline, "x"))
     await _wait_for(lambda: chat_key in pipeline._running)
 
-    pipeline.submit(_msg_event(pipeline, "/stop"))
+    await pipeline.receive(_msg_event(pipeline, "/stop"))
     await _wait_for(lambda: cancelled == ["run"])
     await _wait_for(lambda: any("已中断" in t for t in adapter.sent))
     await _wait_for(lambda: chat_key not in pipeline._running)
@@ -219,7 +204,7 @@ async def test_stop_without_running_task_replies_no_task(
     pipeline: ChannelInboundPipeline,
 ) -> None:
     adapter: _StubAdapter = pipeline.adapter  # type: ignore[assignment]
-    pipeline.submit(_msg_event(pipeline, "/stop"))
+    await pipeline.receive(_msg_event(pipeline, "/stop"))
     await _wait_for(lambda: "当前没有进行中的回复。" in adapter.sent)
 
 
@@ -238,11 +223,11 @@ async def test_stop_clears_queued_messages(pipeline: ChannelInboundPipeline) -> 
     pipeline._safe_handle = fake_handle  # type: ignore[method-assign]
     adapter: _StubAdapter = pipeline.adapter  # type: ignore[assignment]
 
-    pipeline.submit(_msg_event(pipeline, "run", message_id="om_1"))
-    pipeline.submit(_msg_event(pipeline, "queued", message_id="om_2"))
+    await pipeline.receive(_msg_event(pipeline, "run", message_id="om_1"))
+    await pipeline.receive(_msg_event(pipeline, "queued", message_id="om_2"))
     await _wait_for(lambda: started == ["run"])
 
-    pipeline.submit(_msg_event(pipeline, "/stop"))
+    await pipeline.receive(_msg_event(pipeline, "/stop"))
     await _wait_for(lambda: cancelled == ["run"])
     await _wait_for(lambda: any("丢弃 1 条排队消息" in t for t in adapter.sent))
     # 排队消息不会被执行
@@ -273,11 +258,11 @@ async def test_recall_cancels_triggered_task(pipeline: ChannelInboundPipeline) -
     cancelled: list[str] = []
     pipeline._safe_handle = _blocking_handle(cancelled)  # type: ignore[method-assign]
 
-    pipeline.submit(_msg_event(pipeline, "run", message_id="om_1"))
+    await pipeline.receive(_msg_event(pipeline, "run", message_id="om_1"))
     chat_key = pipeline._chat_key(_msg_event(pipeline, "x"))
     await _wait_for(lambda: chat_key in pipeline._running)
 
-    pipeline.submit(_recall_event(pipeline, "om_1"))
+    await pipeline.receive(_recall_event(pipeline, "om_1"))
     await _wait_for(lambda: cancelled == ["run"])
     await _wait_for(lambda: chat_key not in pipeline._running)
 
@@ -286,12 +271,12 @@ async def test_recall_unknown_message_ignored(pipeline: ChannelInboundPipeline) 
     cancelled: list[str] = []
     pipeline._safe_handle = _blocking_handle(cancelled)  # type: ignore[method-assign]
 
-    pipeline.submit(_msg_event(pipeline, "run", message_id="om_1"))
+    await pipeline.receive(_msg_event(pipeline, "run", message_id="om_1"))
     chat_key = pipeline._chat_key(_msg_event(pipeline, "x"))
     await _wait_for(lambda: chat_key in pipeline._running)
 
     # 撤回的不是触发消息 → 在跑任务不受影响
-    pipeline.submit(_recall_event(pipeline, "om_other"))
+    await pipeline.receive(_recall_event(pipeline, "om_other"))
     await asyncio.sleep(0.1)
     assert cancelled == []
     assert chat_key in pipeline._running
@@ -309,12 +294,12 @@ async def test_recalled_queued_message_skipped(pipeline: ChannelInboundPipeline)
 
     pipeline._safe_handle = fake_handle  # type: ignore[method-assign]
 
-    pipeline.submit(_msg_event(pipeline, "first", message_id="om_1"))
-    pipeline.submit(_msg_event(pipeline, "second", message_id="om_2"))
+    await pipeline.receive(_msg_event(pipeline, "first", message_id="om_1"))
+    await pipeline.receive(_msg_event(pipeline, "second", message_id="om_2"))
     await _wait_for(lambda: started == ["first"])
 
     # 第二条还在排队，用户撤回了它
-    pipeline.submit(_recall_event(pipeline, "om_2"))
+    await pipeline.receive(_recall_event(pipeline, "om_2"))
     release_first.set()
 
     chat_key = pipeline._chat_key(_msg_event(pipeline, "x"))

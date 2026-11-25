@@ -1,3 +1,4 @@
+import { createElement } from 'react';
 import { type LucideIcon, Bot, CodeXml, Brain, Rocket, Star, BookOpen, Pen, Globe, Shield, Zap } from 'lucide-react';
 
 const iconComponents: Record<string, LucideIcon> = {
@@ -30,7 +31,7 @@ export const DEFAULT_ICON = 'robot';
 
 export function getAgentIcon(key: string, className?: string, size?: number) {
   const Icon = iconComponents[key] || iconComponents[DEFAULT_ICON];
-  return <Icon className={className} size={size} />;
+  return createElement(Icon, { className, size });
 }
 
 export const AGENT_ICON_OPTIONS = Object.entries(iconComponents).map(([value, Icon]) => ({

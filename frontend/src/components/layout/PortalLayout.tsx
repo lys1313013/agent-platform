@@ -1,3 +1,4 @@
+import { tenantSwitched } from '@/lib/auth';
 import { confirmDiscardChanges, clearUnsavedChanges } from '@/hooks/useUnsavedChanges';
 import { useEffect, useState, type ReactNode } from 'react';
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
@@ -78,7 +79,7 @@ export default function PortalLayout() {
             .map((tenant) => ({ value: tenant.id, label: tenant.name }))}
           onChange={async (tenantId) => {
             if (!confirmDiscardChanges()) return;
-            try { await settingsApi.switchTenant(tenantId); clearUnsavedChanges(); window.location.reload(); }
+            try { await settingsApi.switchTenant(tenantId); tenantSwitched(); clearUnsavedChanges(); window.location.reload(); }
             catch (error) { message.error(error instanceof Error ? error.message : '切换租户失败，请重试'); }
           }}
         />

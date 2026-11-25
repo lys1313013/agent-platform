@@ -45,6 +45,7 @@ class PendingUiAction:
     action: str  # ui_navigate / ui_click / ui_input / ...
     args: dict[str, Any]
     risk: str = "write"  # read | write | dangerous
+    execution_tenant_id: uuid.UUID | None = None
     confirmed: bool = False  # backend confirmation flow passed (frontend re-check credential)
     event: asyncio.Event = field(default_factory=asyncio.Event)
     result: dict[str, Any] | None = None
@@ -81,6 +82,7 @@ class UiActionManager:
         risk: str = "write",
         confirmed: bool = False,
         timeout_seconds: int = 60,
+        execution_tenant_id: uuid.UUID | None = None,
     ) -> PendingUiAction | None:
         """Create a pending action. Returns None if the session already has one
         (one pending action per session — prevents concurrent driving)."""
@@ -104,6 +106,7 @@ class UiActionManager:
             risk=risk,
             confirmed=confirmed,
             timeout_seconds=timeout_seconds,
+            execution_tenant_id=execution_tenant_id,
         )
         self._pending[pending.id] = pending
         logger.info(
@@ -149,7 +152,7 @@ class UiActionManager:
         (the only uplink channel available mid-run).
         """
         pending = self._pending.get(action_id)
-        if not pending:
+        if not pending or pending.event.is_set():
             logger.warning(
                 "ui_action_not_found_or_resolved", action_id=action_id
             )

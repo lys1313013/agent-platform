@@ -118,7 +118,7 @@ def test_normalize_skips_event_and_unsupported() -> None:
 
 
 def _transport() -> WeComBotTransport:
-    pipeline = MagicMock()
+    pipeline = MagicMock(receive=AsyncMock())
     pipeline.channel.id = uuid4()
     return WeComBotTransport(pipeline=pipeline, bot_id=_BOT_ID, secret=_SECRET)
 
@@ -126,8 +126,8 @@ def _transport() -> WeComBotTransport:
 async def test_transport_handle_callback_submits() -> None:
     transport = _transport()
     await transport._handle_frame(json.dumps(_frame("text", {"msgid": "t1", "text": {"content": "hi"}})))
-    transport.pipeline.submit.assert_called_once()
-    ev = transport.pipeline.submit.call_args[0][0]
+    transport.pipeline.receive.assert_called_once()
+    ev = transport.pipeline.receive.call_args[0][0]
     assert isinstance(ev, InboundEvent)
     assert ev.text == "hi"
 
@@ -174,7 +174,7 @@ async def test_transport_kicked_event_logs_and_skips() -> None:
         "body": {"msgtype": "event", "event": {"eventtype": "disconnected_event", "reason": "dup"}},
     })
     await transport._handle_frame(frame)
-    transport.pipeline.submit.assert_not_called()
+    transport.pipeline.receive.assert_not_called()
 
 
 async def test_verify_bot_credentials(monkeypatch) -> None:
@@ -270,6 +270,28 @@ async def test_adapter_stream_lifecycle() -> None:
     assert bodies[0]["content"] == "<think></think>"  # 空文本用可见占位
     assert bodies[1]["content"] == "第一段"
     assert bodies[2]["finish"] is True
+
+
+async def test_interleaved_streams_keep_callback_and_expired_fallback_recipient() -> None:
+    ws = AsyncMock(spec=WeComBotTransport)
+    adapter = _adapter(ws)
+    first = await adapter.start_stream(_event(raw={"req_id": "req-A", "chatid": "chat-A"}), "")
+    second = await adapter.start_stream(_event(raw={"req_id": "req-B", "chatid": "chat-B"}), "")
+    assert first and second and first != second
+    assert await adapter.update_stream(first, "first delta", 1)
+    assert ws.reply.await_args.args[0] == "req-A"
+
+    ws.reply.side_effect = StreamExpiredError("expired")
+    assert await adapter.finish_stream(first, "first final", 2)
+    assert ws.reply.await_args.args[0] == "req-A"
+    ws.send_message.assert_awaited_once_with("chat-A", {
+        "msgtype": "markdown", "markdown": {"content": "first final"},
+    })
+    ws.reply.side_effect = None
+    assert await adapter.finish_stream(second, "second final", 2)
+    assert ws.reply.await_args.args[0] == "req-B"
+    assert not await adapter.update_stream(first, "late", 3)
+    assert not await adapter.finish_stream(second, "duplicate", 3)
 
 
 async def test_adapter_send_to_user_markdown() -> None:

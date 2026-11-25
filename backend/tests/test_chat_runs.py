@@ -51,6 +51,34 @@ async def reserve(factory, *, session=None, user=None, resumed_from=None):
     return run
 
 
+async def test_latest_only_locks_when_it_must_expire_a_stale_running_job(factory):
+    from sqlalchemy import event
+
+    run = await reserve(factory)
+    async with factory() as db:
+        engine = db.bind.sync_engine
+        locked_reads = []
+
+        def capture(_connection, statement, *_args):
+            if getattr(statement, "_for_update_arg", None) is not None:
+                locked_reads.append(statement)
+
+        event.listen(engine, "before_execute", capture)
+        try:
+            active = await runtime.latest(db, run.user_id, run.session_id)
+            assert active.status == "running"
+            assert not locked_reads
+            active.heartbeat_at = runtime.now() - timedelta(seconds=runtime.LEASE_SECONDS + 1)
+            await db.commit()
+            finished = await runtime.latest(db, run.user_id, run.session_id)
+            assert finished.status == "interrupted"
+            assert len(locked_reads) == 1
+            await runtime.latest(db, run.user_id, run.session_id)
+            assert len(locked_reads) == 1
+        finally:
+            event.remove(engine, "before_execute", capture)
+
+
 async def current(factory, run):
     async with factory() as db:
         return await runtime.owned(db, run.user_id, run.id)
@@ -301,6 +329,8 @@ async def test_real_chat_route_disconnect_then_reconnect(factory, monkeypatch, l
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(tool_executor=Mock())))
     async with factory() as db:
         response = await chat.chat_stream(chat.ChatRequest(session_id=sid, message="write report"), request, user, db)
+        assert not db.in_transaction()
+        chat.generate_session_title.assert_called_once_with("write report", user.tenant_id)
     await asyncio.wait_for(ready.wait(), 2)
     # Closing the actual response iterator must not propagate cancellation to AgentLoop.
     assert json.loads((await anext(response.body_iterator))[6:])["type"] == "run"
@@ -437,3 +467,234 @@ async def test_session_history_recovers_legacy_action_order_without_rewriting_me
     async with factory() as db:
         message = await db.get(Message, run.assistant_message_id)
         assert message.reasoning == old
+
+
+async def test_pruned_run_stream_reaches_terminal_status(factory):
+    first = await reserve(factory)
+    await runtime.append(first.id, first.user_id, [{"type": "text_delta", "content": "ok"}])
+    await runtime.finish(first.id, first.user_id, "completed")
+    for _ in range(2):
+        later = await reserve(factory, session=first.session_id, user=first.user_id)
+        await runtime.finish(later.id, later.user_id, "completed")
+    replay = events(await asyncio.wait_for(collect(runtime.subscribe(first.id, first.user_id)), 2))
+    assert [event["type"] for event in replay] == ["run", "run_status"]
+    assert replay[-1]["status"] == "completed"
+
+
+async def test_delegated_tokens_batch_into_one_event(factory):
+    run = await reserve(factory)
+    async def source():
+        for _ in range(8):
+            yield runtime.sse({"type": "delegation_text_delta", "delegation_id": "child", "content": "x"})
+        yield runtime.sse({"type": "done", "content": "ok"})
+    await runtime.produce(run, source())
+    result = events(await collect(runtime.subscribe(run.id, run.user_id)))
+    assert [e["content"] for e in result if e["type"] == "delegation_text_delta"] == ["xxxxxxxx"]
+
+
+async def test_confirmation_reply_routes_across_workers_once(factory, monkeypatch):
+    from types import SimpleNamespace
+
+    from agent_platform.core import run_confirmations
+    from agent_platform.core.confirmation import ConfirmationManager
+    from agent_platform.interface.routes.confirmations import get_pending_confirmations
+
+    owner = ConfirmationManager()
+    run = await reserve(factory)
+    card = owner.create_confirmation(str(run.session_id), str(run.user_id), "which?", "free_input")
+    await runtime.append(run.id, run.user_id, [{
+        "type": "confirmation_required", "confirmation_id": card.id, "question": card.question,
+        "mode": card.mode, "created_at": card.created_at.isoformat(), "context": {"timeout_seconds": 300},
+    }])
+    monkeypatch.setattr(run_confirmations, "confirmation_manager", ConfirmationManager())
+    reply = {"status": "approved", "user_input": "yes"}
+    async with factory() as db:
+        assert [item.id for item in await get_pending_confirmations(
+            run.session_id, SimpleNamespace(id=run.user_id), db,
+        )] == [card.id]
+        assert not await run_confirmations.submit(db, uuid4(), card.id, reply)
+        assert await run_confirmations.submit(db, run.user_id, card.id, reply)
+        with pytest.raises(HTTPException, match="409"):
+            await run_confirmations.submit(db, run.user_id, card.id, reply)
+    assert card.response is None
+    monkeypatch.setattr(run_confirmations, "confirmation_manager", owner)
+    current_run = await current(factory, run)
+    assert not run_confirmations.pending(current_run)
+    run_confirmations.deliver(current_run)
+    assert (await owner.wait_for_response(card.id)).response == reply
+
+
+async def test_history_paging_uses_stable_order_and_refreshes_images(factory, monkeypatch):
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from urllib.parse import parse_qs, urlsplit
+
+    from fastapi import HTTPException
+
+    from agent_platform.core import session_access
+    from agent_platform.core.signed_urls import verify_resource_token
+    from agent_platform.interface.routes import sessions
+
+    monkeypatch.setattr(session_access, "authorize_session", AsyncMock())
+    owner, sid = uuid4(), uuid4()
+    key = f"chat-attachments/{owner}/{sid}/image.png"
+    metadata = {"key": key, "url": "expired", "mime": "image/png", "size": 5, "filename": "image.png"}
+    async with factory() as db:
+        db.add(Session(id=sid, user_id=owner))
+        for role in ("assistant", "assistant", "user", "user", "user"):
+            db.add(Message(session_id=sid, user_id=owner, role=role, content=role, attachments=[metadata],
+                           created_at=datetime(2020, 1, 1, tzinfo=UTC)))
+        await db.commit()
+    user = SimpleNamespace(id=owner)
+    async with factory() as db:
+        all_rows = (await sessions.get_session(sid, user, db)).messages
+        last = await sessions.get_session(sid, user, db, 2)
+        previous = await sessions.get_session(sid, user, db, 2, last.messages[0].id)
+        first = await sessions.get_session(sid, user, db, 2, previous.messages[0].id)
+        assert last.has_more_messages and previous.has_more_messages and not first.has_more_messages
+        assert [m.id for m in first.messages + previous.messages + last.messages] == [m.id for m in all_rows]
+        url = last.messages[0].attachments[0].url
+        assert verify_resource_token(parse_qs(urlsplit(url).query)["t"][0], key)
+        assert (await db.get(Message, last.messages[0].id)).attachments[0]["url"] == "expired"
+        with pytest.raises(HTTPException, match="422"):
+            await sessions.get_session(sid, user, db, 1, uuid4())
+    for flag in (True, False):
+        async with factory() as db:
+            await sessions.update_session(sid, sessions.SessionUpdate(is_pinned=flag, is_archived=flag), user, db)
+            await db.commit()
+        async with factory() as db:
+            history = await sessions.get_session(sid, user, db, 1)
+            assert history.is_pinned is flag and history.is_archived is flag
+
+
+@pytest.mark.parametrize("action", ["clear", "delete", "command"])
+async def test_history_removal_protects_active_run_and_clears_replay(factory, monkeypatch, action):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from fastapi import HTTPException
+
+    from agent_platform.core import session_access
+    from agent_platform.db.models import ChannelSessionMapping
+    from agent_platform.interface.commands.handlers.session import cmd_delete
+    from agent_platform.interface.routes import agent_api, sessions
+
+    monkeypatch.setattr(session_access, "authorize_session", AsyncMock())
+    async with factory.kw["bind"].begin() as connection:
+        await connection.run_sync(ChannelSessionMapping.__table__.create)
+    run = await reserve(factory)
+    user = SimpleNamespace(id=run.user_id, tenant_id=uuid4())
+
+    async def remove(db):
+        if action == "clear":
+            return await agent_api.clear_session(run.session_id, user, db)
+        if action == "delete":
+            return await sessions.delete_session(run.session_id, user, db)
+        return await cmd_delete(SimpleNamespace(db=db, user_id=str(user.id), tenant_id=user.tenant_id,
+                                                args={"id": str(run.session_id)}))
+
+    async with factory() as db:
+        if action == "command":
+            assert "停止后台任务" in (await remove(db)).content
+        else:
+            with pytest.raises(HTTPException, match="409"):
+                await remove(db)
+    async with factory() as db:
+        (await db.get(ChatRun, run.id)).status = "completed"
+        db.add(ChatRunEvent(run_id=run.id, sequence=1, user_id=user.id, payload={"type": "text", "content": "old"}))
+        await db.commit()
+    async with factory() as db:
+        await remove(db)
+        await db.commit()
+    async with factory() as db:
+        assert (await db.get(Session, run.session_id) is not None) == (action == "clear")
+        assert await db.get(ChatRun, run.id) is None
+        assert await db.get(Message, run.assistant_message_id) is None
+        assert not (await db.scalars(select(ChatRunEvent))).all()
+        if action == "clear":
+            await remove(db)
+        elif action == "command":
+            assert not (await remove(db)).data
+        else:
+            with pytest.raises(HTTPException, match="404"):
+                await remove(db)
+
+
+async def test_committed_confirmation_survives_deadline_before_next_heartbeat(factory, monkeypatch):
+    from agent_platform.core import run_confirmations
+    from agent_platform.core.confirmation import ConfirmationManager
+
+    monkeypatch.setattr(run_confirmations, "get_session_factory", lambda: factory)
+    owner = ConfirmationManager()
+    run = await reserve(factory)
+    card = owner.create_confirmation(str(run.session_id), str(run.user_id), "Approve?", "approve")
+    await runtime.append(run.id, run.user_id, [{
+        "type": "confirmation_required", "confirmation_id": card.id, "question": card.question,
+        "mode": card.mode, "created_at": card.created_at.isoformat(), "context": {"timeout_seconds": 5},
+    }])
+    monkeypatch.setattr(run_confirmations, "confirmation_manager", ConfirmationManager())
+    async with factory() as db:
+        assert await run_confirmations.submit(db, run.user_id, card.id, {"status": "approved"})
+    # The reply is committed, but the producer has not polled since submission.
+    card.created_at -= timedelta(seconds=card.timeout_seconds + 1)
+    token = run_confirmations.current_web_run.set(run.id)
+    monkeypatch.setattr(run_confirmations, "confirmation_manager", owner)
+    try:
+        assert (await run_confirmations.wait_for_reply(card)).response == {"status": "approved"}
+    finally:
+        run_confirmations.current_web_run.reset(token)
+
+
+async def test_delete_command_does_not_recreate_messages_in_current_session(factory, monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from agent_platform.core import session_access
+    from agent_platform.db.models import ChannelSessionMapping
+    from agent_platform.interface.routes import chat
+
+    uid, sid = uuid4(), uuid4()
+    monkeypatch.setattr(session_access, "authorize_session", AsyncMock())
+    monkeypatch.setattr(chat, "require_execution_user", AsyncMock())
+    user = SimpleNamespace(id=uid, tenant_id=uuid4(), role="user")
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    async with factory.kw["bind"].begin() as connection:
+        await connection.run_sync(ChannelSessionMapping.__table__.create)
+    async with factory(autoflush=False) as db:
+        db.add(Session(id=sid, user_id=uid))
+        await db.commit()
+        stream = await chat._handle_command_stream(chat.ChatRequest(session_id=sid, message=f"/delete {sid}"),
+                                                   request, user, db)
+        result = [json.loads(frame[6:]) async for frame in stream.body_iterator]
+        assert result[0]["data"]["deleted_session_id"] == str(sid)
+    async with factory() as db:
+        assert await db.get(Session, sid) is None
+        assert not (await db.scalars(select(Message).where(Message.session_id == sid))).all()
+
+
+@pytest.mark.postgres
+async def test_concurrent_confirmation_submissions_admit_one_reply(db_session, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from agent_platform.core import run_confirmations
+
+    factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    monkeypatch.setattr(runtime, "get_session_factory", lambda: factory)
+    monkeypatch.setattr(runtime, "authorize_session", AsyncMock(return_value=uuid4()))
+    monkeypatch.setattr(runtime.notifier, "publish", AsyncMock())
+    run = await reserve(factory)
+    key = str(uuid4())
+    await runtime.append(run.id, run.user_id, [{
+        "type": "confirmation_required", "confirmation_id": key, "question": "Approve?",
+        "mode": "approve", "created_at": runtime.now().isoformat(), "context": {"timeout_seconds": 60},
+    }])
+    async def submit(answer):
+        async with factory() as db:
+            return await run_confirmations.submit(db, run.user_id, key, {"status": answer})
+    try:
+        outcomes = await asyncio.gather(submit("approved"), submit("rejected"), return_exceptions=True)
+        assert sum(result is True for result in outcomes) == 1
+        assert sum(isinstance(result, HTTPException) and result.status_code == 409 for result in outcomes) == 1
+    finally:
+        await runtime.finish(run.id, run.user_id, "stopped")

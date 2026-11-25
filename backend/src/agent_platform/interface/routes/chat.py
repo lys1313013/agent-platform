@@ -6,7 +6,7 @@ import asyncio
 import json
 from functools import partial
 from typing import Annotated
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import structlog
 from fastapi import (
@@ -28,8 +28,7 @@ from sqlalchemy import func, select
 from sqlalchemy import update as sql_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from agent_platform.auth.dependencies import CurrentUser, ExecutionUser
-from agent_platform.auth.jwt_handler import TokenExpiredError, decode_token
+from agent_platform.auth.dependencies import CurrentUser, ExecutionUser, authenticate_access_token
 from agent_platform.core import chat_runs
 from agent_platform.core.agent import AgentStep, DelegationContext
 from agent_platform.core.agent_events import ControlEvent, decode_agent_event
@@ -49,7 +48,6 @@ from agent_platform.core.chat import (
 from agent_platform.core.chat_history import ChatTurnRecorder
 from agent_platform.core.config import settings
 from agent_platform.core.context import (
-    emergency_compress,
     is_context_overflow_error,
     prepare_context,
     prepared_history,
@@ -64,7 +62,6 @@ from agent_platform.core.execution_scope import (
 from agent_platform.core.turn_metadata import InteractiveTurnMetadata
 from agent_platform.db import Message, Session
 from agent_platform.db.connection import (
-    current_user_id,
     get_db,
     get_session_factory,
     set_db_user,
@@ -656,31 +653,13 @@ async def chat(
     file_changes_list = turn.file_changes
     reasoning_chunks = turn.reasoning
 
-    try:
-        await turn.consume(agent_loop.run(
-            user_input=user_content,
-            user_id=user.id,
-            session_id=session.id,
-            conversation_history=processed_history,
-            tools=tools_schema,
-        ), db)
-    except Exception as e:
-        if is_context_overflow_error(e):
-            logger.warning(f"Context overflow in REST chat, emergency compress: {e}")
-            emergency_history = emergency_compress(prepared_messages, level=1)
-            emergency_hist = prepared_history(
-                emergency_history, system_prompt=system_prompt,
-                user_input=user_content if isinstance(user_content, str) else user_message_for_llm,
-            )
-            await turn.consume(agent_loop.run(
-                user_input=user_content,
-                user_id=user.id,
-                session_id=session.id,
-                conversation_history=emergency_hist,
-                tools=tools_schema,
-            ), db)
-        else:
-            raise
+    await turn.consume(agent_loop.run(
+        user_input=user_content,
+        user_id=user.id,
+        session_id=session.id,
+        conversation_history=processed_history,
+        tools=tools_schema,
+    ), db)
 
     final_output = turn.content
     msg_id = await turn.save(db, commit=False, force=True)
@@ -787,6 +766,7 @@ async def _handle_command_stream(
         file_attachments=_file_attachments_data,
     )
     db.add(user_msg)
+    await db.flush()
 
     ctx = CommandContext(
         user=user,
@@ -802,15 +782,11 @@ async def _handle_command_stream(
         result = await dispatch(ctx)
 
     target_session_id = result.session_id or str(session_id)
-    sys_msg = Message(
-        session_id=UUID(target_session_id),
-        user_id=user.id,
-        role="system",
-        content=result.content,
-    )
-    db.add(sys_msg)
+    message_id = uuid4()
+    if result.data.get("deleted_session_id") != target_session_id:
+        db.add(Message(id=message_id, session_id=UUID(target_session_id), user_id=user.id,
+                       role="system", content=result.content))
     await db.commit()
-    await db.refresh(sys_msg)
 
     logger.info(
         "command_result",
@@ -825,7 +801,7 @@ async def _handle_command_stream(
             yield _sse_event(
                 {
                     "type": "command_result",
-                    "message_id": str(sys_msg.id),
+                    "message_id": str(message_id),
                     "session_id": target_session_id,
                     "content": result.content,
                     "data": result.data,
@@ -957,19 +933,18 @@ async def chat_stream(
         attachments=_attachments_data,
         file_attachments=_file_attachments_data,
     )
+    # reserve() holds the session lock. Determine first-turn status before
+    # adding either message and release this transaction before opening SSE.
+    first_turn = await db.scalar(select(Message.id).where(
+        Message.session_id == session_id,
+    ).limit(1)) is None
     db.add(user_msg)
     db.add(Message(id=run.assistant_message_id, session_id=session_id,
                    user_id=user.id, role="assistant", content=""))
     await db.commit()
 
-    # First message in the session → auto-generate title concurrently (if enabled on the agent)
     title_task: asyncio.Task[str] | None = None
-    prior_msg_count = await db.scalar(
-        select(func.count(Message.id)).where(
-            Message.session_id == session_id, Message.id != user_msg.id
-        )
-    )
-    if not private_browser and not prior_msg_count and (agent.enable_auto_title if agent else True):
+    if first_turn and not private_browser and (agent.enable_auto_title if agent else True):
         title_task = asyncio.create_task(generate_session_title(req.message, execution_tenant))
 
     async def event_generator():
@@ -1360,7 +1335,7 @@ async def chat_stream(
                 try:
                     yield _sse_event({
                         "type": "warning",
-                        "message": "对话上下文过长，正在压缩后重试...",
+                        "message": "压缩后仍超过模型上下文限制，请缩短输入后重试。",
                     })
                 except Exception:
                     pass
@@ -1472,36 +1447,30 @@ async def resume_chat_run(
 async def chat_websocket(
     websocket: WebSocket,
     session_id: UUID,
-    token: str = Query(default=""),
 ) -> None:
-    """Streaming chat via WebSocket."""
-    # Authenticate via query parameter
+    """Authenticate the first WebSocket frame before accepting chat messages."""
+    await websocket.accept()
     try:
-        payload = decode_token(token)
-        if payload.type != "access":
-            await websocket.close(code=4001, reason="Invalid token type")
-            return
-        user_id = UUID(payload.sub)
-    except (TokenExpiredError, Exception):
-        await websocket.close(code=4001, reason="Authentication failed")
+        async with asyncio.timeout(5):
+            frame = await websocket.receive_json()
+        if not isinstance(frame, dict) or frame.get("type") != "authenticate" or not isinstance(frame.get("token"), str):
+            raise ValueError("Invalid authentication frame")
+        token = frame["token"]
+    except WebSocketDisconnect:
+        return
+    except (TimeoutError, ValueError, KeyError):
+        await websocket.close(code=4001, reason="Authentication required")
         return
 
-    await websocket.accept()
-
-    # Set RLS context
-    current_user_id.set(str(user_id))
-
-    # Get tool executor from app state
     tool_executor: ToolExecutor = websocket.app.state.tool_executor
-
-    # Get DB session
     factory = get_session_factory()
     async with factory() as db:
-        user_result = await db.execute(select(User).where(User.id == user_id))
-        websocket_user = user_result.scalar_one_or_none()
-        if not websocket_user:
-            await websocket.close(code=4001, reason="User not found")
+        try:
+            websocket_user = await authenticate_access_token(token, db)
+        except HTTPException:
+            await websocket.close(code=4001, reason="Authentication failed")
             return
+        user_id = websocket_user.id
         # Verify session belongs to user
         result = await db.execute(
             select(Session).where(Session.id == session_id, Session.user_id == user_id, Session.source != "room")
@@ -1525,6 +1494,7 @@ async def chat_websocket(
             await websocket.close(code=4004)
             return
 
+        await db.commit()
         try:
             while True:
                 # Receive message from client
@@ -1536,7 +1506,11 @@ async def chat_websocket(
                 if not user_message.strip():
                     continue
 
-                logger.info(f"收到消息: {user_message[:100]}")
+                try:
+                    await authenticate_access_token(token, db)
+                except HTTPException:
+                    await websocket.close(code=4001, reason="Authentication expired or revoked")
+                    return
 
                 await require_execution_user(db, user_id, execution_tenant)
                 if agent is not None:

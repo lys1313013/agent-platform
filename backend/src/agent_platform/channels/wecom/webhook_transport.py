@@ -93,6 +93,7 @@ class WeComWebhookTransport(Transport):
         except Exception:
             logger.warning("wecom_url_verify_decrypt_failed", exc_info=True)
             raise HTTPException(status_code=400, detail="decrypt failed")
+        await self.pipeline.inbox.check_available()
         # 返回解密明文消息体本身（纯文本，非加密响应）。
         return Response(content=plain, media_type="text/plain")
 
@@ -112,5 +113,5 @@ class WeComWebhookTransport(Transport):
         inbound = normalize_event(channel_id, xml_text)
         if inbound is None:
             return Response(content="success", media_type="text/plain")
-        self.pipeline.submit(inbound)
+        await self.pipeline.receive(inbound)
         return Response(content="success", media_type="text/plain")

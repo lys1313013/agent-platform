@@ -27,3 +27,12 @@ async def test_incremental_summary_passes_existing_text_and_new_messages():
     assert "old context" in provider.prompt
     assert "new question" in provider.prompt
     assert provider.prompt.index("old context") < provider.prompt.index("new question")
+
+
+async def test_summary_model_failure_preserves_previous_decisions():
+    from unittest.mock import AsyncMock
+
+    provider = SimpleNamespace(complete=AsyncMock(side_effect=OSError("unavailable")))
+    assert await generate_summary(
+        [LLMMessage(role="user", content="latest")], provider, existing_summary="old decision",
+    ) == "old decision"

@@ -1,4 +1,4 @@
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useAuthStore } from '@/stores/authStore';
 import { Form, Input, Button, Alert, Typography } from 'antd';
 import BrandLogo from '@/components/BrandLogo';
@@ -12,6 +12,7 @@ interface LoginForm {
 
 export default function LoginPage() {
   const navigate = useNavigate();
+  const passwordChanged = useLocation().state?.passwordChanged === true;
   const { login, isLoading, error, clearError } = useAuthStore();
   const [form] = Form.useForm<LoginForm>();
 
@@ -40,6 +41,7 @@ export default function LoginPage() {
           scrollToFirstError={{ focus: true }}
           className="space-y-2"
         >
+          {passwordChanged && <Alert type="success" showIcon title="密码已更新，请使用新密码登录" />}
           {error && (
             <Alert
               message={error}

@@ -28,4 +28,32 @@ describe('trace waterfall', () => {
     expect(tree.duration).toBe(1);
     expect(tree.root.children).toBeUndefined();
   });
+
+  it('uses recorded rounds and attaches each delegated agent to its exact tool call', () => {
+    const { root, inferred } = buildTraceTree({
+      trace: { trace_id: 'root' },
+      child_traces: [
+        { trace_id: 'one', agent_name: 'First', parent_tool_span_id: 'first-tool' },
+        { trace_id: 'two', agent_name: 'Second', parent_tool_span_id: 'second-tool' },
+      ],
+      llm_calls: [
+        { trace_id: 'root', model: 'failed attempt', iteration: 1, final_status: 'failed' },
+        { trace_id: 'root', model: 'successful retry', iteration: 1 },
+        { trace_id: 'root', model: 'next round', iteration: 2 },
+        { trace_id: 'one', model: 'child model', iteration: 1 },
+      ],
+      tool_calls: [
+        { trace_id: 'root', tool_name: 'delegate_task', span_id: 'second-tool', iteration: 1 },
+        { trace_id: 'root', tool_name: 'delegate_task', span_id: 'first-tool', iteration: 1 },
+      ],
+    });
+    expect(inferred).toBe(false);
+    expect(root.children?.map(node => node.name)).toEqual(['第 1 轮', '第 2 轮']);
+    const calls = root.children?.[0].children ?? [];
+    expect(calls.filter(node => node.kind === 'llm')).toHaveLength(2);
+    const first = calls.find(node => node.key === 'first-tool')?.children?.[0];
+    expect(first?.name).toBe('First');
+    expect(first?.children?.[0].children?.[0].name).toBe('child model');
+    expect(calls.find(node => node.key === 'second-tool')?.children?.[0].name).toBe('Second');
+  });
 });

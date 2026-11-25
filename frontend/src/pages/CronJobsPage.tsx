@@ -1,3 +1,4 @@
+import { errorMessage, isFormValidationError } from '@/lib/errors';
 import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   ClockCircleOutlined,
@@ -103,8 +104,8 @@ function CronJobsPageContent() {
       setAgents(agentList);
       setChannels(channelList);
       setModels(modelList);
-    } catch (err: any) {
-      message.error(err.message || '加载数据失败');
+    } catch (err) {
+      message.error(errorMessage(err, '加载数据失败'));
     } finally {
       setLoading(false);
     }
@@ -190,9 +191,9 @@ function CronJobsPageContent() {
       }
       setModalOpen(false);
       fetchData();
-    } catch (err: any) {
-      if (err?.errorFields) return;
-      message.error(err.message || '操作失败');
+    } catch (err) {
+      if (isFormValidationError(err)) return;
+      message.error(errorMessage(err, '操作失败'));
     } finally {
       saveInFlight.current = false;
       setSaving(false);
@@ -205,8 +206,8 @@ function CronJobsPageContent() {
       await cronJobsApi.delete(id);
       message.success('任务已删除');
       fetchData();
-    } catch (err: any) {
-      message.error(err.message || '删除失败');
+    } catch (err) {
+      message.error(errorMessage(err, '删除失败'));
     } finally {
       setDeletingId(null);
     }
@@ -218,8 +219,8 @@ function CronJobsPageContent() {
       await cronJobsApi.update(job.id, { is_active: !job.is_active });
       message.success(job.is_active ? '任务已暂停' : '任务已启用');
       fetchData();
-    } catch (err: any) {
-      message.error(err.message || '操作失败');
+    } catch (err) {
+      message.error(errorMessage(err, '操作失败'));
     } finally {
       setTogglingId(null);
     }
@@ -232,8 +233,8 @@ function CronJobsPageContent() {
       await cronJobsApi.runNow(job.id);
       message.success('任务已触发执行');
       fetchData();
-    } catch (err: any) {
-      message.error(err.message || '手动执行失败');
+    } catch (err) {
+      message.error(errorMessage(err, '手动执行失败'));
     } finally {
       setRunningId(null);
     }
@@ -248,8 +249,8 @@ function CronJobsPageContent() {
       });
       setRuns(result.items);
       setRunsTotal(result.total);
-    } catch (err: any) {
-      message.error(err.message || '加载运行记录失败');
+    } catch (err) {
+      message.error(errorMessage(err, '加载运行记录失败'));
     } finally {
       setRunsLoading(false);
     }

@@ -142,3 +142,28 @@ def pytest_collection_modifyitems(config, items):
     items[:] = selected
     if deferred:
         config.hook.pytest_deselected(items=deferred)
+
+@pytest_asyncio.fixture
+async def inbox_pipeline(engine, db_session, monkeypatch):
+    from unittest.mock import AsyncMock
+    from uuid import uuid4
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from agent_platform.channels.pipeline import ChannelInboundPipeline
+    from agent_platform.db.models import ChannelConfig
+
+    channel = ChannelConfig(name="im", agent_id=uuid4(), app_id="app", status="enabled",
+                            app_secret_encrypted="unused", mode="webhook", channel_key=uuid4().hex,
+                            created_by=uuid4(), tenant_id=uuid4())
+    db_session.add(channel)
+    await db_session.commit()
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr("agent_platform.channels.inbox.get_session_factory", lambda: factory)
+    monkeypatch.setattr("agent_platform.channels.pipeline.get_session_factory", lambda: factory)
+    pipeline = ChannelInboundPipeline(channel, AsyncMock(), None)
+    pipeline.inbox.start()
+    try:
+        yield pipeline
+    finally:
+        await pipeline.shutdown()

@@ -673,30 +673,6 @@ function DefaultToolCard({ toolCall, fileChange }: Props) {
   );
 }
 
-interface WebpageResult {
-  page_id: string;
-  title: string;
-  url: string;
-}
-
-/** Parse the JSON payload returned by the create_webpage tool handler. */
-export function parseWebpageResult(preview?: string): WebpageResult | null {
-  if (!preview) return null;
-  try {
-    const data = JSON.parse(preview);
-    if (data && typeof data.page_id === 'string' && typeof data.url === 'string') {
-      return {
-        page_id: data.page_id,
-        title: typeof data.title === 'string' ? data.title : '未命名网页',
-        url: data.url,
-      };
-    }
-  } catch {
-    /* not a webpage result */
-  }
-  return null;
-}
-
 interface SkillMutationResult {
   success: boolean;
   status?: string;

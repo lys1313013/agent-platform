@@ -1,7 +1,7 @@
 """Subgraph retrieval for graph knowledge bases.
 
-Flow: entity linking (pg_trgm on normalized entity names) -> recursive-CTE
-BFS expansion up to ``max_depth`` hops -> serialize as entities + relationships.
+Flow: entity linking (pg_trgm on normalized entity names) -> bounded breadth-first
+expansion up to ``max_depth`` hops -> serialize as entities + relationships.
 
 Only ``approved`` entities/relationships are served, so unverified LLM
 extractions never reach agents.
@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from uuid import UUID
 
-import sqlalchemy as sa
 import structlog
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -61,74 +60,28 @@ async def expand_subgraph(
     seed_entity_ids: list[UUID],
     max_depth: int = DEFAULT_MAX_DEPTH,
 ) -> tuple[dict[UUID, GraphEntity], list[dict]]:
-    """Expand from seed entities via recursive CTE, return (entities, edges)."""
+    """Expand each source at its shallowest depth, within one shared edge budget."""
     if not seed_entity_ids:
         return {}, []
 
-    rel = GraphRelationship.__table__
-    depth_col = sa.literal(1).label("depth")
-
-    base = (
-        sa.select(
-            rel.c.id,
-            rel.c.source_entity_id,
-            rel.c.target_entity_id,
-            rel.c.relation_type,
-            rel.c.description,
-            rel.c.confidence,
-            depth_col,
-        )
-        .where(
-            rel.c.knowledge_base_id == kb_id,
-            rel.c.status == "approved",
-            rel.c.source_entity_id.in_(seed_entity_ids),
-        )
-    )
-
-    cte = base.cte(name="subgraph", recursive=True)
-    recursive_part = (
-        sa.select(
-            rel.c.id,
-            rel.c.source_entity_id,
-            rel.c.target_entity_id,
-            rel.c.relation_type,
-            rel.c.description,
-            rel.c.confidence,
-            (cte.c.depth + 1).label("depth"),
-        )
-        .join(cte, rel.c.source_entity_id == cte.c.target_entity_id)
-        .where(
-            rel.c.knowledge_base_id == kb_id,
-            rel.c.status == "approved",
-            cte.c.depth < max_depth,
-        )
-    )
-    expanded = cte.union_all(recursive_part)
-
-    result = await db.execute(sa.select(expanded).order_by(expanded.c.depth))
-    rows = result.all()
-
-    # Dedup edges (keep shallowest), cap total.
-    seen: set[UUID] = set()
+    frontier = set(seed_entity_ids)
+    visited = set(frontier)
+    rel = GraphRelationship.__table__.c
     edges: list[dict] = []
-    for row in rows:
-        if len(edges) >= MAX_EDGES:
+    for depth in range(1, min(max_depth, 5) + 1):
+        if not frontier or len(edges) >= MAX_EDGES:
             break
-        edge_id = row.id
-        if edge_id in seen:
-            continue
-        seen.add(edge_id)
-        edges.append(
-            {
-                "id": row.id,
-                "source_entity_id": row.source_entity_id,
-                "target_entity_id": row.target_entity_id,
-                "relation_type": row.relation_type,
-                "description": row.description,
-                "confidence": row.confidence,
-                "depth": row.depth,
-            }
-        )
+        rows = (await db.execute(
+            select(rel.id, rel.source_entity_id, rel.target_entity_id, rel.relation_type,
+                   rel.description, rel.confidence)
+            .where(rel.knowledge_base_id == kb_id, rel.status == "approved",
+                   rel.source_entity_id.in_(frontier))
+            .order_by(rel.source_entity_id, rel.id)
+            .limit(MAX_EDGES - len(edges))
+        )).mappings().all()
+        edges.extend({**row, "depth": depth} for row in rows)
+        frontier = {row["target_entity_id"] for row in rows} - visited
+        visited.update(frontier)
 
     # Load entity details for all touched nodes.
     node_ids = set(seed_entity_ids)

@@ -111,6 +111,7 @@ class FeishuWebhookTransport(Transport):
 
         # Feishu's URL challenge does not require the event signature headers.
         if payload.get("type") == "url_verification":
+            await self.pipeline.inbox.check_available()
             challenge = payload.get("challenge")
             if not isinstance(challenge, str) or not challenge:
                 raise HTTPException(status_code=400, detail="missing challenge")
@@ -150,7 +151,7 @@ class FeishuWebhookTransport(Transport):
         if inbound is None:
             return Response(status_code=200)
 
-        self.pipeline.submit(inbound)
+        await self.pipeline.receive(inbound)
         return Response(status_code=200)
 
 

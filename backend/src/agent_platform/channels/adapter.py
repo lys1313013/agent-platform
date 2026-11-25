@@ -55,6 +55,9 @@ class InboundEvent:
     mentions_bot: bool = False        # 群聊中是否 @ 了本机器人
     attachment: AttachmentInfo | None = None  # 文件/图片消息的附件信息
     raw: dict[str, Any] = field(default_factory=dict)  # 原始 payload，需要时可用
+    # Durable deliveries bind the IM identity at acceptance, before a possible rebind.
+    binding_captured: bool = False
+    binding_id: str | None = None
 
 
 @dataclass

@@ -101,8 +101,8 @@ async def list_tools(
         allowed_servers = set((await db.scalars(select(MCPServer.id).where(
             MCPServer.tenant_id == _user.tenant_id, MCPServer.is_active,
         ))).all())
-        for full_name, tool_info in mcp_manager.list_all_tools():
-            if mcp_manager._tool_to_server.get(full_name) not in allowed_servers:
+        for server_id, full_name, tool_info in mcp_manager.iter_tools(_user.tenant_id):
+            if server_id not in allowed_servers:
                 continue
             # Determine server name from prefix
             prefix = full_name[:len(full_name) - len(tool_info.name)] if len(full_name) > len(tool_info.name) else ""

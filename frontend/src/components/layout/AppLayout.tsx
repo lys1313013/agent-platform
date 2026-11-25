@@ -1,3 +1,4 @@
+import { tenantSwitched } from '@/lib/auth';
 import { useMediaQuery } from '@/hooks/useMediaQuery';
 import { confirmDiscardChanges, clearUnsavedChanges } from '@/hooks/useUnsavedChanges';
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
@@ -141,7 +142,10 @@ export default function AppLayout() {
         { path: '/dashboard', icon: <DashboardOutlined />, label: '仪表盘' },
         { path: '/usage', icon: <BarChartOutlined />, label: '用量统计' },
         ...(isAdmin
-          ? [{ path: '/observability', icon: <LineChartOutlined />, label: '可观测性' }]
+          ? [
+              { path: '/observability', icon: <LineChartOutlined />, label: '可观测性' },
+              { path: '/execution-traces', icon: <ApartmentOutlined />, label: '执行追踪' },
+            ]
           : []),
       ],
     },
@@ -523,7 +527,7 @@ export default function AppLayout() {
                 .map((tenant) => ({ value: tenant.id, label: tenant.name }))}
               onChange={async (tenantId) => {
                 if (!confirmDiscardChanges()) return;
-                try { await settingsApi.switchTenant(tenantId); clearUnsavedChanges(); window.location.reload(); }
+                try { await settingsApi.switchTenant(tenantId); tenantSwitched(); clearUnsavedChanges(); window.location.reload(); }
                 catch (error) { message.error(error instanceof Error ? error.message : '切换租户失败，请重试'); }
               }}
             />

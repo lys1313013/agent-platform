@@ -1,5 +1,6 @@
-import { useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
+import { Button } from 'antd';
 import { PlusOutlined } from '@ant-design/icons';
 import type { Message, StreamingState } from '@/lib/types';
 import BrandLogo from '@/components/BrandLogo';
@@ -10,6 +11,7 @@ import { useChatStore } from '@/stores/chatStore';
 export interface MessageListProps<T extends Message = Message> {
   messages: T[];
   streaming?: StreamingState;
+  streamingMessageId?: string;
   conversationId?: string | null;
   workspaceId?: string | null;
   renderMessage?: (message: T) => ReactNode;
@@ -30,16 +32,19 @@ export interface MessageListProps<T extends Message = Message> {
   compact?: boolean;
 }
 
-export default function MessageList<T extends Message>({ messages, streaming, agent, onNewChat, onEditResend, emptyTitle, emptySubtitle, emptyIcon, scrollToBottomOnMount = true, compact, conversationId, workspaceId: explicitWorkspaceId, renderMessage, beforeMessages, afterMessages }: MessageListProps<T>) {
+export default function MessageList<T extends Message>({ messages: savedMessages, streaming, streamingMessageId, agent, onNewChat, onEditResend, emptyTitle, emptySubtitle, emptyIcon, scrollToBottomOnMount = true, compact, conversationId, workspaceId: explicitWorkspaceId, renderMessage, beforeMessages, afterMessages }: MessageListProps<T>) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const followBottom = useRef(scrollToBottomOnMount);
+  const messages = useMemo(() => streamingMessageId
+    ? savedMessages.filter(message => message.id !== streamingMessageId)
+    : savedMessages, [savedMessages, streamingMessageId]);
   const firstMessageId = messages[0]?.id;
   const scrollKey = conversationId ?? firstMessageId;
-  const lastUserMessageId = [...messages].reverse().find((message) => message.role === 'user')?.id;
+  const lastUserMessageId = useMemo(() => [...messages].reverse().find(message => message.role === 'user')?.id, [messages]);
   // A turn is anchored to its user message, which survives the streaming -> saved handoff.
   const [reasoningChoices, setReasoningChoices] = useState<Record<string, Record<string, boolean>>>({});
-  const reasoningVisibility = (turnId: string | undefined) => {
+  const reasoningVisibility = useCallback((turnId: string | undefined) => {
     const key = JSON.stringify([conversationId, turnId]);
     return {
       values: reasoningChoices[key] ?? {},
@@ -47,12 +52,7 @@ export default function MessageList<T extends Message>({ messages, streaming, ag
         ...previous, [key]: { ...previous[key], [id]: open },
       })),
     };
-  };
-  let turnId: string | undefined;
-  const messageTurns = new Map(messages.map(message => {
-    if (message.role === 'user') turnId = message.id;
-    return [message.id, turnId ?? message.id];
-  }));
+  }, [conversationId, reasoningChoices]);
   const hasContent = messages.length > 0 || streaming?.isStreaming;
   const activeWorkspaceId = useChatStore((state) => (
     state.sessions.find((session) => session.id === state.activeSessionId)?.workspace_id
@@ -60,6 +60,18 @@ export default function MessageList<T extends Message>({ messages, streaming, ag
   ));
 
   const workspaceId = explicitWorkspaceId !== undefined ? explicitWorkspaceId : activeWorkspaceId;
+  const history = useMemo(() => {
+    let turnId: string | undefined;
+    return messages.map(msg => {
+      if (renderMessage) return <div key={msg.id}>{renderMessage(msg)}</div>;
+      if (msg.role === 'user') turnId = msg.id;
+      return <ChatMessage key={msg.id} message={msg} workspaceId={workspaceId}
+        onEditResend={onEditResend} compact={compact} reasoningVisibility={reasoningVisibility(turnId ?? msg.id)} />;
+    });
+  }, [messages, renderMessage, workspaceId, onEditResend, compact, reasoningVisibility]);
+  const hasOlder = useChatStore(state => conversationId && !renderMessage && state.hasMoreMessages[conversationId]);
+  const loadingOlder = useChatStore(state => !!conversationId && state.loadingOlderMessages[conversationId]);
+  const loadOlder = useChatStore(state => state.loadOlderMessages);
   const previousLayout = useRef({ firstId: firstMessageId, height: 0, conversationId });
 
   // Reset when opening a conversation; sending also resumes following.
@@ -151,16 +163,9 @@ export default function MessageList<T extends Message>({ messages, streaming, ag
     >
       <div ref={contentRef} className={`chat-message-list ${compact ? 'px-3 py-4 space-y-4' : 'max-w-4xl mx-auto px-4 py-6 space-y-6'}`}>
         {beforeMessages}
-        {messages.map((msg) => renderMessage ? <div key={msg.id}>{renderMessage(msg)}</div> : (
-          <ChatMessage
-            key={msg.id}
-            message={msg}
-            workspaceId={workspaceId}
-            onEditResend={onEditResend}
-            compact={compact}
-            reasoningVisibility={reasoningVisibility(messageTurns.get(msg.id))}
-          />
-        ))}
+        {hasOlder && conversationId && <Button type="text" size="small" block loading={loadingOlder}
+          onClick={() => void loadOlder(conversationId)}>加载更早消息</Button>}
+        {history}
         {afterMessages}
         {streaming?.isStreaming && (
           <StreamingMessage streaming={streaming} workspaceId={workspaceId} compact={compact}

@@ -5,12 +5,13 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Callable
+from contextlib import aclosing
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import structlog
-from sqlalchemy import func, select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_platform.core.agent import AgentLoop, AgentStep, DelegationContext
@@ -21,7 +22,7 @@ from agent_platform.core.context import current_agent_id
 from agent_platform.core.execution_scope import execution_tenant_id, require_execution_user
 from agent_platform.core.prompt import build_system_prompt
 from agent_platform.core.runtime_config import AgentRuntimeConfig
-from agent_platform.db.connection import current_user_id, get_session_factory
+from agent_platform.db.connection import get_session_factory, set_db_user
 from agent_platform.db.models import (
     Agent,
     AgentRelationship,
@@ -69,11 +70,6 @@ def _build_dynamic_agent(child_id: UUID, name: str, role_description: str, tenan
         tenant_id=tenant_id,
         description=role_description or None,
     )
-
-
-async def _set_rls_context(db: AsyncSession, user_id: str) -> None:
-    """Set PostgreSQL RLS context."""
-    await db.execute(select(func.set_config("app.current_user_id", user_id, True)))
 
 
 async def handle_delegate_task(
@@ -130,8 +126,7 @@ async def handle_delegate_task(
     factory = get_session_factory()
 
     async with factory() as db:
-        current_user_id.set(user_id)
-        await _set_rls_context(db, user_id)
+        await set_db_user(db, user_id)
 
         tenant_id = execution_tenant_id(UUID(user_id)) or delegation.tenant_id
         if tenant_id is None:
@@ -145,7 +140,11 @@ async def handle_delegate_task(
                 child_uuid = UUID(child_agent_id)
             except ValueError:
                 return f"Error: invalid child_agent_id format: {child_agent_id}"
-            child_agent = await _load_child_agent(db, child_uuid, parent_agent_id, UUID(user_id), tenant_id)
+            bindings = delegation.published_bindings
+            child_agent = await _load_child_agent(
+                db, child_uuid, parent_agent_id, UUID(user_id), tenant_id,
+                published_child_ids=bindings.child_ids if bindings else None,
+            )
             if not child_agent:
                 return f"Error: child agent {child_agent_id} not found or not related to parent"
             if not child_agent.is_active:
@@ -168,33 +167,36 @@ async def handle_delegate_task(
             status="running",
         )
         db.add(delegation_record)
-        await db.flush()
+        await db.commit()
 
         delegation_id = delegation_record.id
         event_queue = delegation.event_queue
 
-        # Notify frontend: delegation started
-        if event_queue:
-            await event_queue.put({
-                "type": "delegation_start",
-                "delegation_id": str(delegation_id),
-                "child_agent_id": str(child_uuid),
-                "child_agent_name": child_agent.name,
-                "child_agent_icon": child_agent.icon,
-                "is_dynamic": is_dynamic,
-                "task": task,
-                "depth": new_depth,
-                "tool_call_id": tool_call_id or "",
-            })
-            # Push an immediate thinking placeholder so the DelegationCard
-            # shows activity right away instead of just a spinner.
-            await event_queue.put({
-                "type": "delegation_thinking",
-                "delegation_id": str(delegation_id),
-                "content": "正在分析任务...\n",
-            })
-
+        status = "completed"
+        error = None
+        final_output = ""
         try:
+            # Notify frontend: delegation started
+            if event_queue:
+                await event_queue.put({
+                    "type": "delegation_start",
+                    "delegation_id": str(delegation_id),
+                    "child_agent_id": str(child_uuid),
+                    "child_agent_name": child_agent.name,
+                    "child_agent_icon": child_agent.icon,
+                    "is_dynamic": is_dynamic,
+                    "task": task,
+                    "depth": new_depth,
+                    "tool_call_id": tool_call_id or "",
+                })
+                # Push an immediate thinking placeholder so the DelegationCard
+                # shows activity right away instead of just a spinner.
+                await event_queue.put({
+                    "type": "delegation_thinking",
+                    "delegation_id": str(delegation_id),
+                    "content": "正在分析任务...\n",
+                })
+
             # 3. Build child agent configuration (with inheritance)
             child_tools_list, child_tools_schema = _build_child_tools(
                 tool_executor, child_agent, new_depth, max_depth, parent_allowed_tools=allowed_tools
@@ -263,6 +265,8 @@ async def handle_delegate_task(
             )
 
             child_loop.execution_agent_id = child_uuid
+            # Return the connection to the pool while the model and tools run.
+            await db.commit()
 
             # 5. Execute child agent
             user_input = task
@@ -273,18 +277,19 @@ async def handle_delegate_task(
             # (e.g. knowledge_retrieval) resolve the child's config, not the parent's.
             parent_agent_id_token = current_agent_id.set(str(child_uuid))
 
-            final_output = ""
-            child_event_count = 0
+            finished = False
             try:
-                async with asyncio.timeout(settings.agent.delegation_timeout):
-                    async for event in child_loop.run(
+                async with (
+                    asyncio.timeout(settings.agent.delegation_timeout),
+                    aclosing(child_loop.run(
                         user_input=user_input,
                         user_id=UUID(user_id),
                         session_id=UUID(session_id),  # Share parent's sandbox
                         conversation_history=[],  # Child has no history
                         tools=child_tools_schema,
-                    ):
-                        child_event_count += 1
+                    )) as events,
+                ):
+                    async for event in events:
                         if isinstance(event, str):
                             # Proxy child events to parent's SSE stream
                             if event_queue:
@@ -292,77 +297,58 @@ async def handle_delegate_task(
                         elif isinstance(event, AgentStep):
                             if event.done:
                                 final_output = event.final_output
-            except TimeoutError:
-                final_output = (
-                    f"Error: delegation timed out after "
-                    f"{settings.agent.delegation_timeout}s"
-                )
+                                finished = True
             finally:
-                # Restore parent's agent ID so subsequent parent tool calls are unaffected.
                 current_agent_id.reset(parent_agent_id_token)
 
-            logger.info(
-                "delegation_completed",
-                delegation_id=str(delegation_id),
-                child_event_count=child_event_count,
-                output_length=len(final_output),
-            )
-
-            # 6. Update delegation record
-            duration = int((time.monotonic() - t_start) * 1000)
-            delegation_record.status = "completed"
-            delegation_record.result = final_output
-            delegation_record.duration_ms = duration
-            delegation_record.completed_at = datetime.now(UTC)
-            await db.commit()
-
-            # Notify frontend: delegation completed
-            if event_queue:
-                await event_queue.put({
-                    "type": "delegation_end",
-                    "delegation_id": str(delegation_id),
-                    "status": "completed",
-                    "result_preview": final_output[:500] if final_output else "",
-                    "duration_ms": duration,
-                })
-
+            if not finished or child_loop.stop_reason == "max_iterations":
+                raise RuntimeError("子智能体未完成任务或达到迭代上限")
             return final_output
-
-        except Exception as e:
-            logger.error("Delegation failed", error=str(e), delegation_id=str(delegation_id))
-
+        except TimeoutError as exc:
+            status = "timeout"
+            error = f"Error: delegation timed out after {settings.agent.delegation_timeout}s"
+            raise TimeoutError(error) from exc
+        except asyncio.CancelledError:
+            status, error = "failed", "委派执行已取消"
+            raise
+        except Exception as exc:
+            status, error = "failed", str(exc)
+            logger.exception("delegation_failed", delegation_id=str(delegation_id))
+            raise
+        finally:
+            # Preparation failures can leave a rolled-back transaction pending.
+            await db.rollback()
             duration = int((time.monotonic() - t_start) * 1000)
-            delegation_record.status = "failed"
-            delegation_record.error = str(e)
-            delegation_record.duration_ms = duration
-            delegation_record.completed_at = datetime.now(UTC)
+            await db.execute(
+                update(Delegation)
+                .where(Delegation.id == delegation_id, Delegation.user_id == UUID(user_id))
+                .values(status=status, result=final_output if status == "completed" else None,
+                        error=error, duration_ms=duration, completed_at=datetime.now(UTC))
+            )
             await db.commit()
-
             if event_queue:
                 await event_queue.put({
-                    "type": "delegation_end",
-                    "delegation_id": str(delegation_id),
-                    "status": "failed",
-                    "error": str(e),
-                    "duration_ms": duration,
+                    "type": "delegation_end", "delegation_id": str(delegation_id), "status": status,
+                    "result_preview": final_output[:500], "error": error, "duration_ms": duration,
                 })
-
-            return f"Error: delegation failed - {e}"
 
 
 async def _load_child_agent(
-    db: AsyncSession, child_id: UUID, parent_id: UUID, user_id: UUID, tenant_id: UUID | None = None
+    db: AsyncSession, child_id: UUID, parent_id: UUID, user_id: UUID, tenant_id: UUID | None = None,
+    *, published_child_ids: tuple[UUID, ...] | None = None,
 ) -> Agent | None:
-    """Load child agent and validate the parent-child relationship."""
-    # Check relationship exists
-    rel_result = await db.execute(
-        select(AgentRelationship).where(
-            AgentRelationship.parent_id == parent_id,
-            AgentRelationship.child_id == child_id,
+    """Resolve the binding from the running version, then apply live visibility."""
+    if published_child_ids is not None:
+        if child_id not in published_child_ids:
+            return None
+    else:
+        rel_result = await db.execute(
+            select(AgentRelationship).where(
+                AgentRelationship.parent_id == parent_id, AgentRelationship.child_id == child_id,
+            )
         )
-    )
-    if not rel_result.scalar_one_or_none():
-        return None
+        if not rel_result.scalar_one_or_none():
+            return None
 
     from agent_platform.core.chat import load_agent
 

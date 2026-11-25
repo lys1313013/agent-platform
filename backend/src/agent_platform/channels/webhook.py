@@ -14,6 +14,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Request, Response
 
 from agent_platform.channels.adapter import Transport
+from agent_platform.channels.inbox import ChannelUnavailable
 
 # channel_key -> Transport instance. Populated by webhook transports on start().
 _webhook_registry: dict[str, Transport] = {}
@@ -31,7 +32,10 @@ async def _dispatch(channel_key: str, request: Request) -> Response:
     transport = _webhook_registry.get(channel_key)
     if transport is None:
         raise HTTPException(status_code=404, detail="channel not found")
-    return await transport.handle_webhook(request)
+    try:
+        return await transport.handle_webhook(request)
+    except ChannelUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 def build_webhook_router() -> APIRouter:

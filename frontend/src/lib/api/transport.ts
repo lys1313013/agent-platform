@@ -1,5 +1,6 @@
-import { tokenStorage } from '../auth';
+import { assertBrowserContext, expectedTenant, expectedUser, tokenStorage } from '../auth';
 import { assertAuthGeneration, getAuthGeneration, getAuthSignal, onAuthSessionChange } from '../authSession';
+import { withRefreshLock } from './refreshLock';
 import type { TokenPair } from '../types';
 
 export const API_BASE = '/api';
@@ -15,7 +16,9 @@ export class ApiError extends Error {
 async function fetchWithAuthScope(input: RequestInfo | URL, options: RequestInit): Promise<Response> {
   const generation = getAuthGeneration();
   const signal = options.signal ? AbortSignal.any([options.signal, getAuthSignal()]) : getAuthSignal();
+  assertBrowserContext();
   const response = await fetch(input, { ...options, signal });
+  assertBrowserContext();
   assertAuthGeneration(generation);
   signal.throwIfAborted();
   const bodyMethods = new Set(['json', 'text', 'blob', 'arrayBuffer', 'formData']);
@@ -26,6 +29,7 @@ async function fetchWithAuthScope(input: RequestInfo | URL, options: RequestInit
       if (!bodyMethods.has(String(property))) return value.bind(target);
       return async (...args: unknown[]) => {
         const result: unknown = await value.apply(target, args);
+        assertBrowserContext();
         assertAuthGeneration(generation);
         signal.throwIfAborted();
         return result;
@@ -53,27 +57,29 @@ async function refreshAccessToken(): Promise<boolean> {
   const refreshToken = tokenStorage.getRefresh();
   if (!refreshToken) return false;
   const generation = getAuthGeneration();
-  const pending = (async () => {
-    try {
-      const response = await fetchWithAuthScope(`${API_BASE}/auth/refresh`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ refresh_token: refreshToken }),
-      });
-      if (!response.ok) return false;
-      const data: TokenPair = await response.json();
-      assertAuthGeneration(generation);
-      if (tokenStorage.getRefresh() !== refreshToken) {
-        throw new DOMException('登录凭据已变更', 'AbortError');
-      }
-      tokenStorage.set(data.access_token, data.refresh_token);
-      return true;
-    } catch (error) {
-      assertAuthGeneration(generation);
-      if (error instanceof DOMException && error.name === 'AbortError') throw error;
-      return false;
+  const rotate = async () => {
+    assertAuthGeneration(generation);
+    assertBrowserContext();
+    // A sibling tab may have rotated this credential while the lock was held.
+    if (tokenStorage.getRefresh() !== refreshToken) return !!tokenStorage.getAccess();
+    const response = await fetchWithAuthScope(`${API_BASE}/auth/refresh`, {
+      signal: AbortSignal.timeout(15_000),
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refresh_token: refreshToken }),
+    });
+    if (!response.ok) {
+      if (tokenStorage.getRefresh() !== refreshToken) return !!tokenStorage.getAccess();
+      if ([401, 403].includes(response.status)) return false;
+      throw await responseError(response, generation);
     }
-  })();
+    const data: TokenPair = await response.json();
+    assertBrowserContext();
+    assertAuthGeneration(generation);
+    if (tokenStorage.getRefresh() === refreshToken) tokenStorage.set(data.access_token, data.refresh_token);
+    return true;
+  };
+  const pending = withRefreshLock(getAuthSignal(), rotate);
   refreshPromise = pending;
   try {
     return await pending;
@@ -121,6 +127,7 @@ export async function apiFetch(
   options: RequestInit = {},
   policy: RequestPolicy = {},
 ): Promise<Response> {
+  assertBrowserContext();
   const generation = getAuthGeneration();
   const signal = options.signal ? AbortSignal.any([options.signal, getAuthSignal()]) : getAuthSignal();
   const isAuthPath = AUTH_PATHS.some((authPath) => path === authPath || path.startsWith(`${authPath}?`));
@@ -138,12 +145,18 @@ export async function apiFetch(
   if (typeof options.body === 'string' && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json');
   }
+  if (!isAuthPath) {
+    const tenant = expectedTenant();
+    const subject = expectedUser();
+    if (tenant) headers.set('X-Expected-Tenant-ID', tenant);
+    if (subject) headers.set('X-Expected-User-ID', subject);
+  }
   const token = tokenStorage.getAccess();
   if (token) headers.set('Authorization', `Bearer ${token}`);
   let response = await fetchWithAuthScope(`${API_BASE}${path}`, { ...options, headers, signal });
 
   if (response.status === 401 && !isAuthPath) {
-    const refreshed = await refreshAccessToken();
+    const refreshed = tokenStorage.getAccess() !== token || await refreshAccessToken();
     assertAuthGeneration(generation);
     signal.throwIfAborted();
     if (!refreshed) forceLogout();

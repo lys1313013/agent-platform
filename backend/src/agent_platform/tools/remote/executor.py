@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import zlib
 from typing import Any
 
 import httpx
@@ -20,26 +21,63 @@ class RemoteToolError(Exception):
     """Raised when a remote tool call fails."""
 
 
+MAX_REMOTE_RESPONSE_BYTES = 8 * 1024 * 1024
+
+
+class _RemoteCallTransport(httpx.AsyncBaseTransport):
+    """One call owns its cookies and borrows the executor's connection pool."""
+
+    def __init__(self, pool: httpx.AsyncBaseTransport, origin: httpx.URL, authenticated: bool):
+        self._pool = pool
+        self._origin = (origin.scheme, origin.host, origin.port)
+        self._authenticated = authenticated
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        origin = (request.url.scheme, request.url.host, request.url.port)
+        if self._authenticated and origin != self._origin:
+            raise RemoteToolError("Authenticated remote tool redirected to another origin")
+        # Negotiate only encodings for which the decompressor accepts a byte budget.
+        request.headers["Accept-Encoding"] = "gzip, identity"
+        response = await self._pool.handle_async_request(request)
+        try:
+            encoding = response.headers.get("content-encoding", "identity").strip().lower()
+            if encoding not in {"", "identity", "gzip"}:
+                raise RemoteToolError("Unsupported remote response encoding")
+            decoder = zlib.decompressobj(16 + zlib.MAX_WBITS) if encoding == "gzip" else None
+            content = bytearray()
+            wire_bytes = 0
+            async for part in response.aiter_raw():
+                wire_bytes += len(part)
+                if wire_bytes > MAX_REMOTE_RESPONSE_BYTES:
+                    raise RemoteToolError("Remote response exceeds the size limit")
+                if decoder is not None:
+                    part = decoder.decompress(part, MAX_REMOTE_RESPONSE_BYTES - len(content) + 1)
+                if len(content) + len(part) > MAX_REMOTE_RESPONSE_BYTES:
+                    raise RemoteToolError("Remote response exceeds the size limit")
+                content.extend(part)
+            if decoder is not None and wire_bytes and (not decoder.eof or decoder.unused_data):
+                raise RemoteToolError("Invalid remote gzip response")
+            headers = response.headers.copy()
+            for key in ("Content-Encoding", "Content-Length", "Transfer-Encoding"):
+                headers.pop(key, None)
+            return httpx.Response(
+                response.status_code, headers=headers, content=bytes(content), extensions=response.extensions,
+            )
+        except zlib.error as exc:
+            raise RemoteToolError("Invalid remote gzip response") from exc
+        finally:
+            await response.aclose()
+
+
 class RemoteToolExecutor:
-    """Executes remote tool calls by building HTTP requests from config + arguments."""
+    """Execute remote calls with a shared transport and request-local HTTP state."""
 
     def __init__(self, manager: RemoteToolManager) -> None:
         self._manager = manager
-        # One pooled client for all remote tools; the per-tool timeout is
-        # applied per request instead of rebuilding the connection pool.
-        self._client: httpx.AsyncClient | None = None
-
-    def _http_client(self) -> httpx.AsyncClient:
-        if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(
-                timeout=None, max_redirects=3, transport=MetadataGuardTransport(),
-            )
-        return self._client
+        self._pool = MetadataGuardTransport()
 
     async def aclose(self) -> None:
-        client, self._client = self._client, None
-        if client is not None:
-            await client.aclose()
+        await self._pool.aclose()
 
     async def call(self, tool_name: str, arguments: dict) -> str:
         """Execute a remote tool call and return the response as a string.
@@ -55,9 +93,14 @@ class RemoteToolExecutor:
         8. Return as string
         """
         config = self._manager.get_config(tool_name)
-        if config is None:
+        if config is None or not config.is_active:
             raise RemoteToolError(f"Remote tool not found: {tool_name}")
 
+        return await self.call_config(config, arguments)
+
+    async def call_config(self, config: RemoteToolConfig, arguments: dict) -> str:
+        """Run the supplied authorized configuration, including an explicit admin test."""
+        tool_name = config.name
         # 1. URL template rendering
         url, remaining_args = render_url(config.url_template, arguments)
 
@@ -75,19 +118,18 @@ class RemoteToolExecutor:
             "remote_tool_call",
             tool=tool_name,
             method=config.method,
-            url=url,
         )
 
         try:
-            response = await self._http_client().request(
-                method=config.method,
-                url=url,
-                params=query_params or None,
-                headers=headers,
-                json=body if body is not None else None,
-                follow_redirects=True,
-                timeout=config.timeout,
+            transport = _RemoteCallTransport(
+                self._pool, httpx.URL(url), bool(config.headers or config.auth_type != "none"),
             )
+            async with httpx.AsyncClient(transport=transport, max_redirects=3) as client:
+                response = await client.request(
+                    method=config.method, url=url, params=query_params or None,
+                    headers=headers, json=body if body is not None else None,
+                    follow_redirects=True, timeout=config.timeout,
+                )
         except httpx.TimeoutException:
             raise RemoteToolError(
                 f"Remote tool '{tool_name}' timed out after {config.timeout}s"

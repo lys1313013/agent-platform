@@ -1,3 +1,4 @@
+import { errorMessage } from '@/lib/errors';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useState, useEffect, useCallback } from 'react';
 import { ArrowLeftOutlined } from '@ant-design/icons';
@@ -22,8 +23,8 @@ export default function AgentApiPage() {
     try {
       const a = await agentsApi.get(agentId);
       setAgent(a);
-    } catch (err: any) {
-      message.error(`加载智能体失败: ${err.message}`);
+    } catch (err) {
+      message.error(`加载智能体失败: ${errorMessage(err)}`);
     } finally {
       setLoading(false);
     }

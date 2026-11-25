@@ -9,30 +9,64 @@ Handles:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
-import io
 import json
 import posixpath
 import shlex
-import tarfile
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import structlog
+from minio.error import S3Error
 
 if TYPE_CHECKING:
     from agent_platform.sandbox.models import Sandbox, SandboxManager
 
-from agent_platform.storage.client import ObjectStorage
+from agent_platform.storage.client import ObjectInfo, ObjectStorage
 
 logger = structlog.get_logger()
 
-# Max base64 payload per exec_run chunk (avoids shell arg limit).
-# Docker exec_run can handle ~128KB commands; we use 64KB to be safe.
-_CHUNK_SIZE = 64 * 1024
+_DELETED = b"AIO workspace file deletion marker v1\n"
+_DELETED_TYPE = "application/vnd.aio.workspace-deleted"
+# Reads return base64 on stdout. 3 MiB expands to 4 MiB under the 8 MiB
+# capture cap. Writes carry base64 in one argv string; 72 KiB expands to
+# 96 KiB, leaving room under Linux's 128 KiB per-argument limit.
+_READ_CHUNK_BYTES = 3 * 1024 * 1024
+_WRITE_CHUNK_BYTES = 72 * 1024
+_SANDBOX_IO = Path(__file__).with_name("sandbox_workspace_io.py").read_text()
+
+
+def _command(*args: str) -> str:
+    return shlex.join(["python3", "-c", _SANDBOX_IO, *args])
+
+
+def _sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+async def _io(fn, *args):
+    # The manager owns a cross-process lock during sync. Cancellation must not
+    # release it while a worker thread is still modifying workspace objects.
+    task = asyncio.create_task(asyncio.to_thread(fn, *args))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+        task.result()
+        raise
+
+
+class WorkspaceDeleted(Exception):
+    """The database workspace has been removed; old sandboxes must not publish files."""
 
 
 @dataclass
@@ -77,7 +111,7 @@ class WorkspaceStorage:
         return f"workspaces/{workspace_id}/files/"
 
     def _object_key(self, workspace_id: str, path: str) -> str:
-        return f"workspaces/{workspace_id}/files/{path.lstrip('/')}"
+        return f"workspaces/{workspace_id}/files/{self._valid_file(path.lstrip('/'))}"
 
     def _meta_key(self, workspace_id: str) -> str:
         return f"workspaces/{workspace_id}/meta.json"
@@ -93,323 +127,206 @@ class WorkspaceStorage:
     # MinIO → Sandbox (inject on container creation)
     # ================================================================
 
-    async def inject_files(
-        self,
-        sandbox_mgr: SandboxManager,
-        sandbox: Sandbox,
-        workspace_id: str,
-        workspace_slug: str | None = None,
-    ) -> SyncStats:
-        """
-        Pull workspace files from MinIO and inject them into the sandbox.
+    @staticmethod
+    def _valid_file(path: str) -> str:
+        if not path or "\x00" in path or any(part in {"", ".", ".."} for part in path.split("/")):
+            raise ValueError(f"Invalid workspace file path: {path!r}")
+        return path
 
-        Args:
-            workspace_slug: Directory name in sandbox (e.g., "default").
-                           If None, extracts to /workspace/ (backward compat).
-                           Otherwise extracts to /workspace/{workspace_slug}/.
-
-        Uses tar.gz + base64 over exec_run to transfer files efficiently.
-        For large workspaces, splits into chunks to avoid shell argument limits.
-        """
-        t_start = time.monotonic()
-        stats = SyncStats()
+    def _inventory(self, workspace_id: str) -> dict[str, ObjectInfo]:
         prefix = self._files_prefix(workspace_id)
-        # Determine extraction target directory
-        extract_dir = f"/workspace/{workspace_slug}" if workspace_slug else "/workspace"
+        return {self._valid_file(self._relative_path(workspace_id, obj.key)): obj
+                for obj in self._storage.list(prefix) if not obj.key.endswith("/")}
 
-        try:
-            # 1. List all files in MinIO
-            objects = self._storage.list(prefix, recursive=True)
-            if not objects:
-                logger.debug("workspace_inject_empty", workspace_id=workspace_id)
-                stats.duration_ms = (time.monotonic() - t_start) * 1000
-                return stats
+    def _is_marker(self, obj: ObjectInfo | None) -> bool:
+        if obj is None or obj.size != len(_DELETED):
+            return False
+        # Only same-length objects need HEAD; LIST generally omits Content-Type.
+        # The MIME type distinguishes a marker even when a user file has the same bytes.
+        if obj.content_type:
+            return obj.content_type == _DELETED_TYPE
+        info = self._storage.head(obj.key)
+        if info.etag != obj.etag:
+            raise OSError(f"Workspace object changed while listing: {obj.key!r}")
+        return info.content_type == _DELETED_TYPE
 
-            # 2. Download files and build tar.gz in memory
-            tar_buf = io.BytesIO()
-            with tarfile.open(fileobj=tar_buf, mode="w:gz") as tar:
-                for obj in objects:
-                    rel_path = self._relative_path(workspace_id, obj.key)
-                    if not rel_path:
-                        continue
-                    try:
-                        data = self._storage.get(obj.key)
-                        info = tarfile.TarInfo(name=rel_path)
-                        info.size = len(data)
-                        tar.addfile(info, io.BytesIO(data))
-                        stats.files_synced += 1
-                        stats.bytes_transferred += len(data)
-                    except Exception as e:
-                        stats.errors.append(f"download {rel_path}: {e}")
-                        logger.warning("workspace_inject_download_error", path=rel_path, error=str(e))
+    @staticmethod
+    def _entry(path, data_hash, size, etag):
+        return {"path": path, "sha256": data_hash, "size": size, "etag": etag}
 
-            # 3. Transfer tar.gz to container via base64 chunks
-            tar_bytes = tar_buf.getvalue()
-            b64_data = base64.b64encode(tar_bytes).decode("ascii")
+    def _read_baseline(self, workspace_id: str, container_id: str) -> dict:
+        raw = self._storage.get_optional(self._meta_key(workspace_id))
+        if raw is None:
+            return {}
+        manifest = json.loads(raw)
+        if manifest.get("deleted"):
+            raise WorkspaceDeleted(workspace_id)
+        if manifest.get("container_id") != container_id or manifest.get("version") != 2:
+            # A legacy manifest cannot establish which revisions this container saw.
+            return {}
+        return {self._valid_file(item["path"]): item for item in manifest["files"]}
 
-            if len(b64_data) <= _CHUNK_SIZE:
-                # Single chunk — direct transfer
-                cmd = f"mkdir -p {extract_dir} && echo '{b64_data}' | base64 -d | tar xzf - -C {extract_dir}"
-                result = await sandbox_mgr.execute(sandbox, cmd)
-                if result.exit_code != 0:
-                    stats.errors.append(f"tar extract failed: {result.stderr}")
-            else:
-                # Multi-chunk transfer
-                await self._inject_chunked(sandbox_mgr, sandbox, b64_data, stats, extract_dir)
-
-            logger.info(
-                "workspace_injected",
-                workspace_id=workspace_id,
-                workspace_slug=workspace_slug,
-                extract_dir=extract_dir,
-                files=stats.files_synced,
-                bytes=stats.bytes_transferred,
+    def remote_changed(self, workspace_id: str, container_id: str) -> bool:
+        baseline = self._read_baseline(workspace_id, container_id)
+        current = self._inventory(workspace_id)
+        return (
+            set(current) != set(baseline)
+            or any(
+                info.etag != baseline[path]["etag"]
+                or (info.size == len(_DELETED) and self._is_marker(info) != (baseline[path]["sha256"] is None))
+                for path, info in current.items()
             )
-
-        except Exception as e:
-            stats.errors.append(f"inject_files: {e}")
-            logger.error("workspace_inject_failed", workspace_id=workspace_id, error=str(e))
-
-        stats.duration_ms = (time.monotonic() - t_start) * 1000
-        return stats
-
-    async def _inject_chunked(
-        self,
-        sandbox_mgr: SandboxManager,
-        sandbox: Sandbox,
-        b64_data: str,
-        stats: SyncStats,
-        extract_dir: str = "/workspace",
-    ) -> None:
-        """Transfer a large base64 payload in chunks, then extract."""
-        tmp_file = "/tmp/_workspace_inject.tar.gz.b64"
-
-        # Clear any existing temp file
-        await sandbox_mgr.execute(sandbox, f"rm -f {tmp_file}")
-
-        # Write chunks
-        offset = 0
-        while offset < len(b64_data):
-            chunk = b64_data[offset:offset + _CHUNK_SIZE]
-            redirect = ">" if offset == 0 else ">>"
-            cmd = f"printf '%s' '{chunk}' {redirect} {tmp_file}"
-            await sandbox_mgr.execute(sandbox, cmd)
-            offset += _CHUNK_SIZE
-
-        # Decode and extract
-        result = await sandbox_mgr.execute(
-            sandbox,
-            f"mkdir -p {extract_dir} && base64 -d {tmp_file} | tar xzf - -C {extract_dir} && rm -f {tmp_file}",
         )
-        if result.exit_code != 0:
-            stats.errors.append(f"chunked extract failed: {result.stderr}")
 
-    # ================================================================
-    # Sandbox → MinIO (extract on container destruction / periodic sync)
-    # ================================================================
+    def _write_baseline(self, workspace_id: str, container_id: str, files: dict) -> None:
+        manifest = {
+            "version": 2, "workspace_id": workspace_id, "container_id": container_id,
+            "file_count": sum(item["sha256"] is not None for item in files.values()),
+            "total_size": sum(item["size"] for item in files.values()),
+            "files": [files[path] for path in sorted(files)],
+        }
+        self._storage.put(self._meta_key(workspace_id), json.dumps(manifest).encode(), "application/json")
 
-    async def extract_and_sync(
-        self,
-        sandbox_mgr: SandboxManager,
-        sandbox: Sandbox,
-        workspace_id: str,
-        workspace_slug: str | None = None,
-    ) -> SyncStats:
-        """
-        Extract workspace files from the sandbox and sync to MinIO.
-
-        Args:
-            workspace_slug: Directory name in sandbox (e.g., "default").
-                           If None, extracts from /workspace/ (backward compat).
-                           Otherwise extracts from /workspace/{workspace_slug}/.
-
-        Performs incremental sync:
-        1. Tar the workspace directory inside the container
-        2. Read tar via base64 over exec_run
-        3. Compare each file's hash with MinIO
-        4. Upload only changed/new files
-        5. Delete files from MinIO that no longer exist in the container
-        """
-        t_start = time.monotonic()
+    async def inject_files(self, sandbox_mgr, sandbox, workspace_id: str, workspace_slug: str | None = None) -> SyncStats:
+        """Restore authoritative remote versions and record exactly what was mounted."""
         stats = SyncStats()
-        prefix = self._files_prefix(workspace_id)
-        # Determine source directory in sandbox
-        source_dir = f"/workspace/{workspace_slug}" if workspace_slug else "/workspace"
-
+        started = time.monotonic()
         try:
-            # 1. Create tar.gz inside container from the workspace directory
-            result = await sandbox_mgr.execute(
-                sandbox,
-                f"tar czf /tmp/_workspace_sync.tar.gz -C {shlex.quote(source_dir)} . 2>/dev/null",
-            )
-            # tar exit code 1 means "files changed during read" — still OK
-            # exit code 2 means actual error
-            if result.exit_code > 1:
-                stats.errors.append(f"tar create failed: {result.stderr}")
-                stats.duration_ms = (time.monotonic() - t_start) * 1000
-                return stats
-
-            # 2. Read tar.gz as base64 from container
-            b64_data = await self._read_file_as_base64(sandbox_mgr, sandbox, "/tmp/_workspace_sync.tar.gz")
-            if not b64_data:
-                stats.errors.append("failed to read tar archive from container")
-                stats.duration_ms = (time.monotonic() - t_start) * 1000
-                return stats
-
-            # 3. Decode and extract files from tar
-            tar_bytes = base64.b64decode(b64_data)
-            container_files: dict[str, bytes] = {}
-            tar_buf = io.BytesIO(tar_bytes)
-            with tarfile.open(fileobj=tar_buf, mode="r:gz") as tar:
-                for member in tar.getmembers():
-                    # Skip directories and empty names
-                    if member.isdir() or not member.name or member.name in (".", "./"):
-                        continue
-                    # Remove the tar prefix, not the leading dots of hidden
-                    # files. Validate the full inventory before any writes or
-                    # deletions so invalid names cannot corrupt stored files.
-                    rel_path = member.name.removeprefix("./")
-                    if (
-                        "\x00" in rel_path
-                        or any(part in ("", ".", "..") for part in rel_path.split("/"))
-                        or rel_path in container_files
-                    ):
-                        raise ValueError(f"Unsafe or duplicate workspace archive path: {member.name!r}")
-                    f = tar.extractfile(member)
-                    if f:
-                        container_files[rel_path] = f.read()
-
-            # 4. List current files in MinIO
-            existing_objects = {
-                self._relative_path(workspace_id, obj.key): obj
-                for obj in self._storage.list(prefix, recursive=True)
-            }
-
-            # 5. Upload changed/new files
-            for rel_path, data in container_files.items():
-                existing = existing_objects.get(rel_path)
-
-                # Size alone cannot detect same-length edits. Hash the stored
-                # bytes rather than trusting ETags (multipart uploads differ)
-                # or meta.json, which may be stale after direct file uploads.
-                if existing and existing.size == len(data):
-                    stored_data = self._storage.get(existing.key)
-                    if hashlib.sha256(stored_data).digest() == hashlib.sha256(data).digest():
-                        continue
-
-                object_key = self._object_key(workspace_id, rel_path)
-                content_type = self._guess_content_type(rel_path)
-                self._storage.put(object_key, data, content_type)
+            await _io(self._read_baseline, workspace_id, sandbox.container_id)
+            files = {}
+            objects = await _io(self._inventory, workspace_id)
+            for path, obj in objects.items():
+                if await self._marker(obj):
+                    files[path] = self._entry(path, None, 0, obj.etag)
+                    continue
+                data = await _io(self._storage.get_version, obj.key, obj.etag)
+                digest = await _io(_sha256, data)
+                if not await self.write_file_live(sandbox_mgr, sandbox, path, data, workspace_slug):
+                    raise OSError(f"Could not restore workspace file {path!r}")
+                files[path] = {"path": path, "size": len(data), "sha256": digest, "etag": obj.etag}
                 stats.files_synced += 1
                 stats.bytes_transferred += len(data)
-
-            # 6. Delete files from MinIO that no longer exist in container
-            for rel_path, obj in existing_objects.items():
-                if rel_path not in container_files:
-                    self._storage.delete(obj.key)
-                    stats.files_deleted += 1
-
-            # 7. Update meta.json
-            await self._update_meta(workspace_id, container_files)
-
-            # Cleanup temp file
-            await sandbox_mgr.execute(sandbox, "rm -f /tmp/_workspace_sync.tar.gz")
-
-            logger.info(
-                "workspace_synced",
-                workspace_id=workspace_id,
-                uploaded=stats.files_synced,
-                deleted=stats.files_deleted,
-                bytes=stats.bytes_transferred,
-            )
-
-        except Exception as e:
-            stats.errors.append(f"extract_and_sync: {e}")
-            logger.error("workspace_sync_failed", workspace_id=workspace_id, error=str(e))
-
-        stats.duration_ms = (time.monotonic() - t_start) * 1000
+            await _io(self._write_baseline, workspace_id, sandbox.container_id, files)
+        except Exception as exc:
+            stats.errors.append(str(exc))
+            logger.warning("workspace_inject_failed", workspace_id=workspace_id, error=str(exc))
+        stats.duration_ms = (time.monotonic() - started) * 1000
         return stats
 
-    @staticmethod
-    async def _read_file_as_base64(
-        sandbox_mgr: SandboxManager,
-        sandbox: Sandbox,
-        filepath: str,
-    ) -> str:
-        """Read a file from the sandbox as base64, handling large files via chunks."""
-        # Check file size first
-        result = await sandbox_mgr.execute(sandbox, f"wc -c < {filepath}")
-        if result.exit_code != 0:
-            return ""
+    async def _marker(self, obj: ObjectInfo | None) -> bool:
+        return bool(obj and obj.size == len(_DELETED) and await _io(self._is_marker, obj))
 
+    async def _scan_live(self, manager, sandbox, root: str) -> dict:
+        result = await manager.execute(sandbox, _command("scan", root))
+        if result.exit_code:
+            raise OSError(f"Could not scan workspace: {result.stderr}")
+        rows = json.loads(result.stdout)
+        return {self._valid_file(path): (digest, size) for path, (digest, size) in rows.items()}
+
+    async def extract_and_sync(self, sandbox_mgr, sandbox, workspace_id: str, workspace_slug: str | None = None) -> SyncStats:
+        """Merge the mounted baseline, live file hashes and current object versions.
+
+        The sandbox manager serializes these calls under its cross-worker user
+        lock. Direct uploads are independent writers; mutations of object keys
+        consequently use the observed ETag even while that lock is held.
+        """
+        stats = SyncStats()
+        started = time.monotonic()
         try:
-            file_size = int(result.stdout.strip())
-        except ValueError:
-            file_size = 0
+            base = await _io(self._read_baseline, workspace_id, sandbox.container_id)
+            root = f"/workspace/{workspace_slug}" if workspace_slug else "/workspace"
+            local = await self._scan_live(sandbox_mgr, sandbox, root)
+            objects = await _io(self._inventory, workspace_id)
+            merged = {}
+            for path in sorted(set(local) | set(objects) | set(base)):
+                entry = await self._merge_file(
+                    sandbox_mgr, sandbox, workspace_id, workspace_slug, path,
+                    base.get(path), local.get(path), objects.get(path), stats,
+                )
+                if entry:
+                    merged[path] = entry
+            if merged != base:
+                await _io(self._write_baseline, workspace_id, sandbox.container_id, merged)
+        except WorkspaceDeleted:
+            # The container may still mount an old workspace until its TTL.
+            pass
+        except Exception as exc:
+            stats.errors.append(str(exc))
+            logger.warning("workspace_sync_failed", workspace_id=workspace_id, error=str(exc))
+        stats.duration_ms = (time.monotonic() - started) * 1000
+        return stats
 
-        if file_size == 0:
-            return ""
+    async def _merge_file(self, manager, sandbox, wid, slug, path, base, local, obj, stats):
+        base_hash = base["sha256"] if base else None
+        local_hash = local[0] if local else None
+        etag = obj.etag if obj else None
+        remote = None if await self._marker(obj) else obj
+        remote_unchanged = (
+            (base["etag"] if base else None) == etag
+            and (base_hash is not None) == (remote is not None)
+        )
+        if remote_unchanged and local_hash == base_hash:
+            return base
+        marker = self._entry(path, None, 0, etag) if obj and not remote else None
+        if not remote and not local:
+            return marker
 
-        # For small files, read in one go
-        b64_size = (file_size * 4 // 3) + 10  # approximate base64 size
-        if b64_size < _CHUNK_SIZE:
-            result = await sandbox_mgr.execute(sandbox, f"base64 {filepath}")
-            if result.exit_code != 0:
-                return ""
-            return result.stdout.strip()
+        # Publish local-only edits with a precondition on the observed object,
+        # including deletion markers and first creation.
+        key = self._object_key(wid, path)
 
-        # For large files, read in chunks
-        return await WorkspaceStorage._read_file_chunked(sandbox_mgr, sandbox, filepath, file_size)
+        async def local_bytes():
+            data = await self.read_file_live(manager, sandbox, path, slug)
+            if data is None or await _io(_sha256, data) != local_hash:
+                raise OSError(f"Workspace file changed during sync: {path!r}")
+            return data
 
-    @staticmethod
-    async def _read_file_chunked(
-        sandbox_mgr: SandboxManager,
-        sandbox: Sandbox,
-        filepath: str,
-        file_size: int,
-    ) -> str:
-        """Read a large file from the sandbox in base64 chunks."""
-        # First encode to a temp file to avoid piping overhead
-        b64_file = f"{filepath}.b64"
-        await sandbox_mgr.execute(sandbox, f"base64 {filepath} > {b64_file}")
+        if remote_unchanged:
+            if local:
+                data = await local_bytes()
+                version = await _io(self._storage.put_version, key, data, self._guess_content_type(path), etag)
+                stats.files_synced += 1
+                stats.bytes_transferred += len(data)
+                return {"path": path, "size": len(data), "sha256": local_hash, "etag": version}
+            if remote:
+                # Conditional DELETE is ignored by some MinIO versions. A
+                # conditional marker PUT cannot erase a concurrently finished upload.
+                version = await _io(self._storage.put_version, key, _DELETED, _DELETED_TYPE, etag)
+                stats.files_deleted += 1
+                return self._entry(path, None, 0, version)
+            return marker
 
-        # Read in chunks
-        chunks: list[str] = []
-        offset = 0
-        b64_total = (file_size * 4 // 3) + 100  # generous upper bound
+        # A direct upload/delete happened after mounting. The remote revision
+        # keeps its name; retain any divergent sandbox edit before replacing it.
+        data = await _io(self._storage.get_version, key, etag) if remote else None
+        digest = await _io(_sha256, data) if data is not None else None
+        if local_hash != digest:
+            if local and local_hash != base_hash:
+                await _io(self._save_conflict, wid, path, await local_bytes(), local_hash)
+            if data is not None:
+                if not await self.write_file_live(manager, sandbox, path, data, slug):
+                    raise OSError(f"Could not refresh workspace file {path!r}")
+            elif local:
+                root = f"/workspace/{slug}" if slug else "/workspace"
+                result = await manager.execute(sandbox, _command("remove", root, path))
+                if result.exit_code:
+                    raise OSError(f"Could not remove workspace file {path!r}: {result.stderr}")
+        if remote:
+            return self._entry(path, digest, len(data), etag)
+        return marker
 
-        while offset < b64_total:
-            result = await sandbox_mgr.execute(
-                sandbox,
-                f"dd if={b64_file} bs=1 skip={offset} count={_CHUNK_SIZE} 2>/dev/null",
-            )
-            chunk = result.stdout
-            if not chunk:
-                break
-            chunks.append(chunk)
-            offset += len(chunk)
-            if len(chunk) < _CHUNK_SIZE:
-                break
-
-        # Cleanup
-        await sandbox_mgr.execute(sandbox, f"rm -f {b64_file}")
-
-        return "".join(chunks).strip()
-
-    async def _update_meta(self, workspace_id: str, files: dict[str, bytes]) -> None:
-        """Write meta.json with file manifest."""
-        manifest = {
-            "workspace_id": workspace_id,
-            "file_count": len(files),
-            "total_size": sum(len(d) for d in files.values()),
-            "files": [
-                {"path": p, "size": len(d), "sha256": hashlib.sha256(d).hexdigest()}
-                for p, d in sorted(files.items())
-            ],
-        }
-        meta_key = self._meta_key(workspace_id)
-        meta_bytes = json.dumps(manifest, indent=2).encode()
-        self._storage.put(meta_key, meta_bytes, "application/json")
+    def _save_conflict(self, workspace_id, path, data, digest):
+        directory, filename = posixpath.split(path)
+        # Include the complete digest. Replaying a partial sync is idempotent.
+        prefix = filename.encode()[:112].decode(errors="ignore")
+        name = posixpath.join(directory, f".sandbox-conflict-{prefix}-{_sha256(filename.encode())[:12]}-{digest}")
+        key = self._object_key(workspace_id, name)
+        try:
+            self._storage.put_version(key, data, self._guess_content_type(path), None)
+        except S3Error as exc:
+            if exc.code != "PreconditionFailed" or self._storage.get(key) != data:
+                raise
+        logger.warning("workspace_sync_conflict_saved", path=path, conflict=name)
 
     # ================================================================
     # Live sandbox operations (container must be running)
@@ -485,68 +402,47 @@ class WorkspaceStorage:
         rel = WorkspaceStorage._validate_rel_path(path)
         if not rel:
             return None
-        if workspace_slug:
-            full_path = f"/workspace/{workspace_slug}/{rel}"
-        else:
-            full_path = f"/workspace/{rel}"
-        b64 = await WorkspaceStorage._read_file_as_base64(sandbox_mgr, sandbox, full_path)
-        if not b64:
-            return None
-        try:
-            return base64.b64decode(b64)
-        except Exception:
-            return None
+        root = f"/workspace/{workspace_slug}" if workspace_slug else "/workspace"
+        output = bytearray()
+        while True:
+            result = await sandbox_mgr.execute(
+                sandbox, _command("read", root, rel, str(len(output)), str(_READ_CHUNK_BYTES)),
+            )
+            if result.exit_code or getattr(result, "output_truncated", False):
+                return None
+            chunk = base64.b64decode(result.stdout.strip(), validate=True)
+            output.extend(chunk)
+            if len(chunk) < _READ_CHUNK_BYTES:
+                return bytes(output)
 
     @staticmethod
     async def write_file_live(
-        sandbox_mgr: SandboxManager,
-        sandbox: Sandbox,
-        path: str,
-        content: bytes,
+        sandbox_mgr: SandboxManager, sandbox: Sandbox, path: str, content: bytes,
         workspace_slug: str | None = None,
     ) -> bool:
-        """Write a file directly into the running sandbox, creating parent dirs.
-
-        Args:
-            path: Relative file path within the workspace
-            workspace_slug: Directory name in sandbox (e.g., "default").
-        """
+        """Stage outside the workspace, then atomically replace one regular file."""
         rel = WorkspaceStorage._validate_rel_path(path)
         if not rel:
             return False
-        if workspace_slug:
-            target = f"/workspace/{workspace_slug}/{rel}"
-        else:
-            target = f"/workspace/{rel}"
-        parent = posixpath.dirname(target)
-        result = await sandbox_mgr.execute(sandbox, f"mkdir -p {shlex.quote(parent)}")
-        if result.exit_code != 0:
-            return False
-
-        b64_data = base64.b64encode(content).decode("ascii")
-        if len(b64_data) <= _CHUNK_SIZE:
-            cmd = f"echo {shlex.quote(b64_data)} | base64 -d > {shlex.quote(target)}"
-            result = await sandbox_mgr.execute(sandbox, cmd)
-            return result.exit_code == 0
-
-        tmp_file = f"/tmp/_workspace_upload_{uuid4().hex}.b64"
+        root = f"/workspace/{workspace_slug}" if workspace_slug else "/workspace"
+        staged = f"/tmp/_workspace_upload_{uuid4().hex}"
         try:
-            offset = 0
-            while offset < len(b64_data):
-                chunk = b64_data[offset:offset + _CHUNK_SIZE]
-                redirect = ">" if offset == 0 else ">>"
+            # Each command is below the Docker argument-size limit. Empty
+            # files also create an empty staging object on the first pass.
+            result = await sandbox_mgr.execute(sandbox, f": > {staged}")
+            if result.exit_code:
+                return False
+            for offset in range(0, len(content), _WRITE_CHUNK_BYTES):
+                encoded = base64.b64encode(content[offset:offset + _WRITE_CHUNK_BYTES]).decode()
                 result = await sandbox_mgr.execute(
-                    sandbox, f"printf '%s' {shlex.quote(chunk)} {redirect} {tmp_file}",
+                    sandbox, f"printf %s {shlex.quote(encoded)} >> {staged}",
                 )
-                if result.exit_code != 0:
+                if result.exit_code:
                     return False
-                offset += _CHUNK_SIZE
-            result = await sandbox_mgr.execute(
-                sandbox, f"base64 -d < {tmp_file} > {shlex.quote(target)}",
-            )
+            result = await sandbox_mgr.execute(sandbox, _command("replace", root, rel, staged))
             return result.exit_code == 0
         finally:
-            await sandbox_mgr.execute(sandbox, f"rm -f {tmp_file}")
+            await sandbox_mgr.execute(sandbox, f"rm -f {staged}")
 
     @staticmethod
     async def delete_file_live(
@@ -564,12 +460,11 @@ class WorkspaceStorage:
         rel = WorkspaceStorage._validate_rel_path(path)
         if not rel:
             return False
-        if workspace_slug:
-            full_path = f"/workspace/{workspace_slug}/{rel}"
-        else:
-            full_path = f"/workspace/{rel}"
-        result = await sandbox_mgr.execute(sandbox, f"rm -rf -- {shlex.quote(full_path)}")
-        return result.exit_code == 0
+        root = f"/workspace/{workspace_slug}" if workspace_slug else "/workspace"
+        result = await sandbox_mgr.execute(sandbox, _command("delete", root, rel))
+        if result.exit_code:
+            raise OSError(f"Could not delete workspace path: {result.stderr}")
+        return result.stdout.strip() == "removed"
 
     # ================================================================
     # File browsing (no container required — reads from MinIO)
@@ -591,12 +486,14 @@ class WorkspaceStorage:
             prefix = f"{prefix}{path.strip('/')}/"
 
         # List non-recursively to get immediate children
-        objects = self._storage.list(prefix, recursive=False)
+        objects = self._storage.list(prefix, recursive=True)
 
         entries: list[FileEntry] = []
         seen_dirs: set[str] = set()
 
         for obj in objects:
+            if self._is_marker(obj):
+                continue
             rel = self._relative_path(workspace_id, obj.key)
             # Remove the base path prefix to get the relative name
             if path:
@@ -629,7 +526,10 @@ class WorkspaceStorage:
     def get_file(self, workspace_id: str, path: str) -> bytes:
         """Read a single file from MinIO."""
         key = self._object_key(workspace_id, path)
-        return self._storage.get(key)
+        info = self._storage.head(key)
+        if self._is_marker(info):
+            raise FileNotFoundError(path)
+        return self._storage.get_version(key, info.etag)
 
     def put_file(self, workspace_id: str, path: str, content: bytes) -> None:
         """Upload a single file to MinIO."""
@@ -637,15 +537,25 @@ class WorkspaceStorage:
         content_type = self._guess_content_type(path)
         self._storage.put(key, content, content_type)
 
-    def delete_file(self, workspace_id: str, path: str) -> None:
-        """Delete a single file from MinIO."""
+    def delete_file(self, workspace_id: str, path: str) -> bool:
+        """Delete the observed exact path and its children using conditional markers."""
         key = self._object_key(workspace_id, path)
-        self._storage.delete(key)
+        removed = False
+        for obj in self._storage.list(key):
+            if (obj.key == key or obj.key.startswith(key + "/")) and not self._is_marker(obj):
+                self._storage.put_version(obj.key, _DELETED, _DELETED_TYPE, obj.etag)
+                removed = True
+        return removed
 
     def file_exists(self, workspace_id: str, path: str) -> bool:
         """Check if a file exists in the workspace."""
         key = self._object_key(workspace_id, path)
-        return self._storage.exists(key)
+        try:
+            return not self._is_marker(self._storage.head(key))
+        except S3Error as exc:
+            if exc.code in {"NoSuchKey", "NoSuchObject", "NotFound"}:
+                return False
+            raise
 
     # ---- Presigned URLs ----
 
@@ -663,13 +573,14 @@ class WorkspaceStorage:
 
     def delete_workspace(self, workspace_id: str) -> int:
         """Delete all files in a workspace from MinIO."""
-        prefix = f"workspaces/{workspace_id}/"
-        return self._storage.delete_prefix(prefix)
+        marker = json.dumps({"workspace_id": workspace_id, "deleted": True}).encode()
+        self._storage.put(self._meta_key(workspace_id), marker, "application/json")
+        return self._storage.delete_prefix(self._files_prefix(workspace_id))
 
     def get_workspace_stats(self, workspace_id: str) -> tuple[int, int]:
         """Get file count and total size for a workspace."""
         prefix = self._files_prefix(workspace_id)
-        objects = self._storage.list(prefix, recursive=True)
+        objects = [obj for obj in self._storage.list(prefix, recursive=True) if not self._is_marker(obj)]
         total_size = sum(obj.size for obj in objects)
         return len(objects), total_size
 

@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Iterator
 from contextlib import AsyncExitStack
 from uuid import UUID
 
 import structlog
 
+from agent_platform.core.execution_scope import execution_tenant_id
+from agent_platform.tools.builtin import BUILTIN_TOOL_NAMES
 from agent_platform.tools.mcp.adapter import MCPServerConnection, MCPToolInfo, _join_task
 
 logger = structlog.get_logger()
@@ -37,7 +40,7 @@ class MCPManager:
         self._refresh_locks: dict[UUID, asyncio.Lock] = {}
         self._retry_after: dict[UUID, float] = {}
         self._connections: dict[UUID, MCPServerConnection] = {}
-        self._tool_to_server: dict[str, UUID] = {}  # full_tool_name -> server_id
+        self._tool_to_server: dict[tuple[UUID | None, str], UUID] = {}
         # Keep desired servers even when the initial handshake fails.
         self._configs: dict[UUID, dict] = {}
         self._reconnect_after: dict[UUID, float] = {}
@@ -170,18 +173,8 @@ class MCPManager:
         self._connections[server_id] = conn
         self._retry_after.pop(server_id, None)
 
-        # Register tool mappings
-        prefix = config.get("tool_prefix") or ""
-        discovered_tools = []
-        for tool in conn.tools:
-            full_name = f"{prefix}{tool.name}" if prefix else tool.name
-            if self._reserved_name(full_name, server_id):
-                logger.warning(
-                    "mcp_tool_name_conflict", server_id=str(server_id), tool=full_name,
-                )
-                continue
-            self._tool_to_server[full_name] = server_id
-            discovered_tools.append(tool)
+        self._sync_tool_mappings(server_id, conn)
+        discovered_tools = self.get_server_tools(server_id) or []
 
         logger.info(
             "mcp_server_added",
@@ -190,15 +183,6 @@ class MCPManager:
             tools_count=len(discovered_tools),
         )
         return discovered_tools
-
-    def _reserved_name(self, full_name: str, server_id: UUID) -> bool:
-        """Reject names owned by built-ins or by another server."""
-        owner = self._tool_to_server.get(full_name)
-        if owner is not None and owner != server_id:
-            return True
-        from agent_platform.tools.builtin import BUILTIN_TOOL_NAMES
-
-        return full_name in BUILTIN_TOOL_NAMES
 
     async def remove_server(self, server_id: UUID) -> None:
         """Disconnect and remove an MCP Server."""
@@ -232,12 +216,16 @@ class MCPManager:
     def _sync_tool_mappings(self, server_id: UUID, conn: MCPServerConnection) -> None:
         if self._connections.get(server_id) is not conn:
             return
-        mappings = {name: sid for name, sid in self._tool_to_server.items() if sid != server_id}
+        tenant = conn.config.get("tenant_id")
         prefix = conn.config.get("tool_prefix") or ""
-        mappings.update({
-            f"{prefix}{tool.name}": server_id for tool in conn.tools
-            if not self._reserved_name(f"{prefix}{tool.name}", server_id)
-        })
+        mappings = {key: sid for key, sid in self._tool_to_server.items() if sid != server_id}
+        for tool in conn.tools:
+            name = f"{prefix}{tool.name}"
+            key = tenant, name
+            if name in BUILTIN_TOOL_NAMES or key in mappings:
+                logger.warning("mcp_tool_name_conflict", server_id=str(server_id), tool=name)
+                continue
+            mappings[key] = server_id
         self._tool_to_server = mappings
 
     async def refresh_tools(self, server_id: UUID, *, force: bool = True) -> list[MCPToolInfo]:
@@ -283,9 +271,13 @@ class MCPManager:
             if server_ids is None or str(server_id) in server_ids
         ))
 
+    def server_for_tool(self, name: str, tenant_id: UUID | None) -> UUID | None:
+        """Resolve a model-visible name only within its owning tenant."""
+        return self._tool_to_server.get((tenant_id, name))
+
     def get_tool_info(self, tool_name: str) -> MCPToolInfo | None:
         """Get tool info by full name (with prefix)."""
-        server_id = self._tool_to_server.get(tool_name)
+        server_id = self.server_for_tool(tool_name, execution_tenant_id())
         if not server_id:
             return None
 
@@ -302,34 +294,32 @@ class MCPManager:
                 return tool
         return None
 
-    def list_all_tools(self) -> list[tuple[str, MCPToolInfo]]:
-        """
-        List all MCP tools across all connected servers.
-
-        Returns:
-            List of (full_name, tool_info) tuples
-        """
-        result = []
-        for _server_id, conn in self._connections.items():
+    def iter_tools(self, tenant_id: UUID | None) -> Iterator[tuple[UUID, str, MCPToolInfo]]:
+        """Enumerate routable tools with stable server identities for selection."""
+        for server_id, conn in self._connections.items():
+            if conn.config.get("tenant_id") != tenant_id:
+                continue
             prefix = conn.config.get("tool_prefix") or ""
             for tool in conn.tools:
-                full_name = f"{prefix}{tool.name}" if prefix else tool.name
-                if self._tool_to_server.get(full_name) != _server_id:
-                    continue
-                result.append((full_name, tool))
-        return result
+                name = f"{prefix}{tool.name}"
+                if self.server_for_tool(name, tenant_id) == server_id:
+                    yield server_id, name, tool
+
+    def list_all_tools(self) -> list[tuple[str, MCPToolInfo]]:
+        return [(name, tool) for _, name, tool in self.iter_tools(execution_tenant_id())]
 
     def is_mcp_tool(self, tool_name: str) -> bool:
-        """Check if a tool name is an MCP tool."""
-        return tool_name in self._tool_to_server
+        return self.server_for_tool(tool_name, execution_tenant_id()) is not None
 
     def timeout_for(self, tool_name: str) -> float:
         """Dispatch ceiling for one tool, taken from its server's configured timeout."""
-        server_id = self._tool_to_server.get(tool_name)
+        server_id = self.server_for_tool(tool_name, execution_tenant_id())
         conn = self._connections.get(server_id) if server_id else None
         return float(conn.config.get("timeout") or 60) if conn else 60.0
 
-    async def call_tool(self, tool_name: str, arguments: dict) -> str:
+    async def call_tool(
+        self, tool_name: str, arguments: dict, *, server_id: UUID | None = None,
+    ) -> str:
         """
         Call an MCP tool.
 
@@ -340,13 +330,17 @@ class MCPManager:
         Returns:
             Tool output as text
         """
-        server_id = self._tool_to_server.get(tool_name)
-        if not server_id:
+        tenant_id = execution_tenant_id()
+        routed = self.server_for_tool(tool_name, tenant_id)
+        if routed is None or (server_id is not None and server_id != routed):
             raise ValueError(f"Unknown MCP tool: {tool_name}")
 
+        server_id = routed
         conn = self._connections.get(server_id)
         if not conn or not conn.connected:
             conn = await self._ensure_connected(server_id)
+            if self.server_for_tool(tool_name, tenant_id) != server_id:
+                raise ValueError(f"MCP tool route changed: {tool_name}")
 
         # Strip prefix to get base tool name
         prefix = conn.config.get("tool_prefix") or ""
@@ -384,7 +378,7 @@ class MCPManager:
                     raise asyncio.CancelledError
         logger.info("mcp_manager_shutdown", servers_closed=len(server_ids))
 
-    def get_status(self) -> dict[str, dict]:
+    def get_status(self, tenant_id: UUID | None = None) -> dict[str, dict]:
         """
         Get status of all MCP Server connections.
 
@@ -396,10 +390,11 @@ class MCPManager:
                 "name": conn.config.get("name", "unknown"),
                 "transport": conn.config.get("transport_type"),
                 "connected": conn.connected,
-                "tools_count": len(conn.tools),
+                "tools_count": len(self.get_server_tools(server_id) or []),
                 "tool_prefix": conn.config.get("tool_prefix"),
             }
             for server_id, conn in self._connections.items()
+            if conn.config.get("tenant_id") == tenant_id
         }
 
     def get_server_tools(self, server_id: UUID) -> list[MCPToolInfo] | None:
@@ -407,4 +402,9 @@ class MCPManager:
         conn = self._connections.get(server_id)
         if not conn:
             return None
-        return conn.tools
+        prefix = conn.config.get("tool_prefix") or ""
+        tenant_id = conn.config.get("tenant_id")
+        return [
+            tool for tool in conn.tools
+            if self.server_for_tool(f"{prefix}{tool.name}", tenant_id) == server_id
+        ]

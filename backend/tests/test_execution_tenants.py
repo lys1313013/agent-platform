@@ -436,3 +436,46 @@ async def test_concurrent_cron_retries_create_one_row(scope_env, db_session):
     assert ids[0] == ids[1]
     jobs = (await db_session.scalars(select(CronJob).where(CronJob.name == "retry"))).all()
     assert len(jobs) == 1
+
+
+@pytest.mark.postgres
+async def test_status_command_uses_execution_tenant(scope_env, db_session, monkeypatch):
+    from agent_platform.channels.connection_manager import ChannelConnectionManager
+    from agent_platform.cron_jobs.scheduler import Scheduler
+    from agent_platform.interface.commands import dispatch
+    from agent_platform.interface.commands.handlers import inspect_admin
+    from agent_platform.interface.commands.models import CommandContext
+
+    d = scope_env
+    jobs = [
+        CronJob(tenant_id=tenant.id, user_id=d.user.id, name=name, cron_expr="0 9 * * *", is_active=active)
+        for tenant, name, active in [
+            (d.a, "scheduled", True), (d.a, "pending", True), (d.a, "inactive", False),
+            (d.b, "other tenant", True),
+        ]
+    ]
+    db_session.add_all(jobs)
+    await db_session.flush()
+    scheduler = Scheduler(d.factory)
+    for job in (jobs[0], jobs[3]):
+        scheduler.add_job(job)
+    monkeypatch.setattr(inspect_admin, "get_global_scheduler", lambda: scheduler)
+
+    channels = ChannelConnectionManager(tool_executor=None)
+    for tenant in (d.a, d.b):
+        channel_id = uuid4()
+        channels._channel_configs[channel_id] = SimpleNamespace(
+            tenant_id=tenant.id, name=f"{tenant.name} channel", channel_type="feishu", mode="webhook",
+        )
+        channels._adapters[channel_id] = SimpleNamespace(transport=None)
+    monkeypatch.setattr(inspect_admin, "get_global_channel_manager", lambda: channels)
+
+    ctx = CommandContext(user=d.user, user_id=str(d.user.id), db=db_session, raw="/status",
+                         session=d.session, execution_tenant_id=d.a.id)
+    assert "无权限" in (await dispatch(ctx)).content
+    d.user.role = "admin"
+    result = (await dispatch(ctx)).content
+    assert d.a.name in result and d.b.name not in result
+    assert f"{d.a.name} channel" in result
+    assert "**渠道连接**：1 个" in result
+    assert "**调度器**：1 个定时任务" in result and "活动中 cron：2" in result

@@ -33,6 +33,7 @@ export interface ObsTraceItem {
   duration_ms: number | null;
   created_at: string;
   session_title: string | null;
+  agent_name?: string | null;
 }
 
 export interface ObsTracePage {
@@ -44,6 +45,7 @@ export interface ObsTraceDetail {
   trace: Record<string, unknown>;
   llm_calls: Record<string, unknown>[];
   tool_calls: Record<string, unknown>[];
+  child_traces?: Record<string, unknown>[];
 }
 
 export interface ObsDistributionItem {
@@ -114,11 +116,14 @@ export const observabilityApi = {
     status?: string;
     agent_id?: string;
     session_id?: string;
+    trace_id?: string;
+    roots_only?: boolean;
   }) {
     return request<ObsTracePage>(`/observability/traces${queryString(q)}`);
   },
-  trace(id: string) {
-    return request<ObsTraceDetail>(`/observability/traces/${id}`);
+  trace(id: string, includeChildren = false) {
+    const query = includeChildren ? '?include_children=true' : '';
+    return request<ObsTraceDetail>(`/observability/traces/${encodeURIComponent(id)}${query}`);
   },
   stats(q: { window?: ObsWindow; start?: string; end?: string; by?: 'model' | 'agent' | 'user' | 'tenant'; metric?: string }) {
     return request<ObsDistributionItem[]>(`/observability/stats${queryString(q)}`);

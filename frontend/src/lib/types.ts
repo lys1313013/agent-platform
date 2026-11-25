@@ -60,6 +60,7 @@ export interface FileChangeInfo {
 
 export interface SessionDetail extends Session {
   messages: Message[];
+  has_more_messages: boolean;
 }
 
 export interface PageActionInfo {
@@ -854,5 +855,6 @@ export interface PetActiveTask {
   chat_key: string;
   /** 会话所属 Agent（点击任务条跳转会话页用） */
   agent_id: string;
+  workspace_id: string;
   started_at: number;
 }

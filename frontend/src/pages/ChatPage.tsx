@@ -30,7 +30,7 @@ export default function ChatPage() {
   // onDone 需要 flushNext，但 useChatStream 初始化早于 useMessageQueue —— 用 ref 打破循环依赖
   const flushNextRef = useRef<() => void>(() => {});
 
-  const { run, stopping, resume, streaming, error, setError, abortRef, turnSessionIdRef, beginTurn, interrupt, handleEvent } =
+  const { run, stopping, resume, streaming, error, setError, abortRef, turnSessionIdRef, beginTurn, interrupt } =
     useChatStream({
       onEvent: (event) => {
         // ui_* 页内操作事件统一进全局 store
@@ -59,7 +59,7 @@ export default function ChatPage() {
 
   // Codex-style message queue: while streaming, sent messages are queued and
   // flushed one by one as each turn completes.
-  const handleSendRef = useRef<(content: string, attachments?: ChatAttachment[], files?: FileAttachmentRef[]) => Promise<void> | void>();
+  const handleSendRef = useRef<(content: string, attachments?: ChatAttachment[], files?: FileAttachmentRef[]) => Promise<void | boolean> | void>();
   const interruptStream = useCallback(() => {
     const stopped = interrupt();
     usePetStore.getState().reportEvent('interrupt', {
@@ -75,12 +75,13 @@ export default function ChatPage() {
   flushNextRef.current = flushNext;
 
   const handleSend = useCallback(
-    async (content: string, attachments: ChatAttachment[] = [], fileAttachments: FileAttachmentRef[] = [], browser?: BrowserAuthorization) => {
+    async (content: string, attachments: ChatAttachment[] = [], fileAttachments: FileAttachmentRef[] = [], browser?: BrowserAuthorization, onSessionCreated?: (id: string) => void) => {
       let sessionId = browser?.sessionId || activeSessionId;
 
       // Create a new session if none is active
       if (!sessionId) {
         sessionId = await createSession(content.slice(0, 100));
+        onSessionCreated?.(sessionId);
         navigate(`/chat/${sessionId}`, { replace: true });
       } else if (content.trim()) {
         const session = sessions.find((s) => s.id === sessionId);
@@ -94,13 +95,6 @@ export default function ChatPage() {
         return;
       }
 
-      // Add user message to local store immediately
-      addMessage(sessionId, {
-        id: `msg-user-${Date.now()}`,
-        role: 'user',
-        content, attachments, file_attachments: fileAttachments,
-        created_at: new Date().toISOString(),
-      });
 
       const consume = beginTurn(sessionId);
       usePetStore.getState().startTask(sessionId, content);
@@ -112,8 +106,16 @@ export default function ChatPage() {
       );
 
       abortRef.current = controller;
+      if (!await controller.accepted) return false;
+      addMessage(sessionId, {
+        id: `msg-user-${Date.now()}`,
+        role: 'user',
+        content, attachments, file_attachments: fileAttachments,
+        created_at: new Date().toISOString(),
+      });
+      return true;
     },
-    [activeSessionId, sessions, navigate, createSession, renameSession, addMessage, message, beginTurn, handleEvent, abortRef],
+    [activeSessionId, sessions, navigate, createSession, renameSession, addMessage, message, beginTurn, abortRef],
   );
 
   handleSendRef.current = handleSend;
@@ -152,21 +154,20 @@ export default function ChatPage() {
     });
   };
 
-  const handleEditResend = (content: string) => {
+  const handleEditResend = useCallback((content: string) => {
     if (streaming.isStreaming) {
       enqueue(content, []);
       return;
     }
     handleSend(content);
-  };
+  }, [streaming.isStreaming, enqueue, handleSend]);
 
   const handleStop = () => {
     // Stop only cancels the current turn; queued messages stay in the queue.
     interruptStream();
   };
 
-  const currentMessages = (activeSessionId ? messages[activeSessionId] || [] : [])
-    .filter((item) => !(streaming.isStreaming && run && item.id === run.assistant_message_id));
+  const currentMessages = activeSessionId ? messages[activeSessionId] || [] : [];
 
   const activeSession = useMemo(
     () => sessions.find((s) => s.id === activeSessionId) ?? null,
@@ -206,7 +207,7 @@ export default function ChatPage() {
         {/* Chat area */}
         <ChatWindow
           loading={messagesLoading}
-          messages={{ messages: currentMessages, streaming, conversationId: activeSessionId, onNewChat: handleNewChat, onEditResend: handleEditResend }}
+          messages={{ messages: currentMessages, streaming, streamingMessageId: streaming.isStreaming ? run?.assistant_message_id : undefined, conversationId: activeSessionId, onNewChat: handleNewChat, onEditResend: handleEditResend }}
           status={<>
             <ChatRunNotice run={run} stopping={stopping} onResume={resume} />
             {error && (

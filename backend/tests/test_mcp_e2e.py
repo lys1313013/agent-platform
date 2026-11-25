@@ -320,8 +320,8 @@ async def mcp_authorization(monkeypatch, fake_mcp_server):
     await engine.dispose()
 
 
-def configured_agent(server_id):
-    return SimpleNamespace(id=uuid.uuid4(), enabled_tools=["wx_fake_weather"],
+def configured_agent(server_id, tenant_id=None):
+    return SimpleNamespace(id=uuid.uuid4(), tenant_id=tenant_id, enabled_tools=["wx_fake_weather"],
                            mcp_server_ids=[str(server_id)], mcp_all_tools_server_ids=[],
                            knowledge_bases=[], graph_knowledge_bases=[], children=[])
 
@@ -332,10 +332,12 @@ class TestExecutorMCPRouting:
         self, fake_mcp_server, mcp_manager, mcp_authorization
     ):
         server_id = uuid.uuid4()
+        scope = await mcp_authorization(server_id)
         await mcp_manager.add_server(
             server_id,
             {
                 "name": "fake-weather",
+                "tenant_id": scope.tenant_id,
                 "transport_type": "sse",
                 "url": fake_mcp_server,
                 "headers": {},
@@ -351,7 +353,6 @@ class TestExecutorMCPRouting:
             mcp_manager=mcp_manager,
         )
 
-        scope = await mcp_authorization(server_id)
         with bind_execution_scope(scope.user_id, scope.tenant_id):
             result = await executor.execute(
                 tool_name="wx_fake_weather", arguments={"city": "Tokyo"}, tool_call_id="call_1",
@@ -472,10 +473,12 @@ class TestLLMSeesMCPTools:
     ):
         """Full loop: LLM emits MCP tool_call -> executor -> MCP server -> LLM."""
         server_id = uuid.uuid4()
+        scope = await mcp_authorization(server_id)
         await mcp_manager.add_server(
             server_id,
             {
                 "name": "fake-weather",
+                "tenant_id": scope.tenant_id,
                 "transport_type": "sse",
                 "url": fake_mcp_server,
                 "headers": {},
@@ -493,7 +496,7 @@ class TestLLMSeesMCPTools:
             mcp_manager=mcp_manager,
         )
         assert _filter_tools_by_agent(executor, agent=None)[1] == []
-        _builtin, tools_schema = _filter_tools_by_agent(executor, agent=configured_agent(server_id))
+        _builtin, tools_schema = _filter_tools_by_agent(executor, agent=configured_agent(server_id, scope.tenant_id))
 
         # Script the LLM: first turn emits the MCP tool call, second turn
         # returns a final text answer that can reference the tool output.
@@ -506,7 +509,6 @@ class TestLLMSeesMCPTools:
         ]
         provider = _ScriptedLLMProvider(scripted_tool_calls=scripted)
 
-        scope = await mcp_authorization(server_id)
         loop = AgentLoop(execution_tenant_id=scope.tenant_id,
             allowed_tools={"wx_fake_weather"},
             provider=provider,

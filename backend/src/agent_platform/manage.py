@@ -259,6 +259,54 @@ async def hook_test(hook_id: str) -> None:
         await close_db()
 
 
+async def encrypt_tool_credentials(apply: bool) -> None:
+    """Verify and optionally convert legacy remote HTTP and search credentials."""
+    from agent_platform.core.credentials import (
+        decrypt_fields,
+        decrypt_tool_secret,
+        encrypt_fields,
+        encrypt_secret,
+    )
+    from agent_platform.db.models import RemoteTool, SystemConfig
+    from agent_platform.tools.web.config import DB_KEY_PREFIX, SECRET_FIELDS
+
+    counts = {"remote": 0, "web": 0}
+    try:
+        async with get_session_factory()() as db, db.begin():
+            tools = select(RemoteTool).order_by(RemoteTool.id)
+            keys = select(SystemConfig).where(
+                SystemConfig.key.in_([DB_KEY_PREFIX + field for field in SECRET_FIELDS])
+            ).order_by(SystemConfig.key)
+            if apply:
+                tools = tools.with_for_update()
+                keys = keys.with_for_update()
+            for tool in (await db.scalars(tools)).all():
+                changed = False
+                for field in ("headers", "auth_config"):
+                    original = getattr(tool, field)
+                    plain = decrypt_fields(original)
+                    converted = encrypt_fields(original)
+                    if decrypt_fields(converted) != plain:
+                        raise RuntimeError("Remote tool credential verification failed")
+                    if converted != original:
+                        changed = True
+                        if apply:
+                            setattr(tool, field, converted)
+                counts["remote"] += int(changed)
+            for row in (await db.scalars(keys)).all():
+                plain = decrypt_tool_secret(row.value)
+                converted = encrypt_secret(row.value)
+                if decrypt_tool_secret(converted) != plain:
+                    raise RuntimeError("Web credential verification failed")
+                if converted != row.value:
+                    counts["web"] += 1
+                    if apply:
+                        row.value = converted
+    finally:
+        await close_db()
+    print(f"{'已转换' if apply else '待转换'}远程工具 {counts['remote']} 条，Web 密钥 {counts['web']} 条。")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="agent-manage",
@@ -276,6 +324,9 @@ def main():
 
     # list-users
     subparsers.add_parser("list-users", help="列出所有用户及其角色")
+
+    sp = subparsers.add_parser("encrypt-tool-credentials", help="检查并加密历史远程工具和搜索密钥")
+    sp.add_argument("--apply", action="store_true", help="提交转换，默认只读检查")
 
     # hook
     sp = subparsers.add_parser("hook", help="Hook 配置管理")
@@ -311,6 +362,8 @@ def main():
             asyncio.run(remove_admin(args.username))
         case "list-users":
             asyncio.run(list_users())
+        case "encrypt-tool-credentials":
+            asyncio.run(encrypt_tool_credentials(args.apply))
         case "hook":
             if not args.hook_command:
                 sp.print_help()

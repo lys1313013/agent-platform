@@ -83,11 +83,11 @@ _execution_scope: ContextVar[ExecutionScope | None] = ContextVar(
 )
 
 
-def execution_tenant_id(user_id: UUID) -> UUID | None:
+def execution_tenant_id(user_id: UUID | None = None) -> UUID | None:
     scope = _execution_scope.get()
     if scope is None:
         return None
-    if scope.user_id != user_id:
+    if user_id is not None and scope.user_id != user_id:
         raise ValueError("执行上下文与用户不匹配")
     return scope.tenant_id
 

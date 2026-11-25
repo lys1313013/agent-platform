@@ -526,3 +526,28 @@ async def test_real_sdk_gateway_502_then_background_recovery(real_server, recove
         config["_availability"].online = True
     await eventually(lambda: manager._connections[sid].connected)
     assert await manager.call_tool("echo", {"text": "after recovery"}) == "after recovery"
+
+
+@pytest.mark.parametrize("real_server", ["sse"], indirect=True)
+async def test_real_sse_tool_post_failure_recovers_without_refresh(real_server, recovery_manager):
+    config, _ = real_server
+    manager = recovery_manager
+    sid = uuid4()
+    await asyncio.wait_for(manager.add_server(sid, config), timeout=_REAL_IO_TIMEOUT)
+    conn = manager._connections[sid]
+    owner = conn._owner_task
+    config["_availability"].online = False
+    try:
+        # The SDK swallows the POST's 502; only the caller's deadline ends the
+        # request. The still-open SSE GET must not keep connected=True.
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(manager.call_tool("echo", {"text": "outage"}), timeout=0.25)
+        assert not conn.connected
+        assert not owner.done()
+    finally:
+        config["_availability"].online = True
+
+    manager.start()
+    await eventually(lambda: conn.connected and conn._owner_task is not owner)
+    assert owner.done()
+    assert await manager.call_tool("echo", {"text": "recovered"}) == "recovered"

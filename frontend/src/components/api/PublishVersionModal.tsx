@@ -1,3 +1,4 @@
+import { errorMessage, isFormValidationError } from '@/lib/errors';
 import { useState } from 'react';
 import { Modal, Input, Form, App } from 'antd';
 import { RocketOutlined } from '@ant-design/icons';
@@ -30,9 +31,9 @@ export default function PublishVersionModal({ open, agentId, onClose, onPublishe
       onPublished(version);
       form.resetFields();
       onClose();
-    } catch (err: any) {
-      if (err?.errorFields) return; // form validation error
-      message.error(`发布失败: ${err?.message || '未知错误'}`);
+    } catch (err) {
+      if (isFormValidationError(err)) return; // form validation error
+      message.error(`发布失败: ${errorMessage(err, '未知错误')}`);
     } finally {
       setLoading(false);
     }

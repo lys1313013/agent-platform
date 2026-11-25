@@ -15,12 +15,14 @@ import structlog
 from sqlalchemy import select
 
 from agent_platform.core.config import WebSettings, settings
+from agent_platform.core.credentials import decrypt_tool_secret
 from agent_platform.db.connection import get_session_factory
 from agent_platform.db.models import SystemConfig
 
 logger = structlog.get_logger()
 
 DB_KEY_PREFIX = "web_"
+SECRET_FIELDS = {"brave_api_key", "tavily_api_key", "firecrawl_api_key"}
 
 DB_KEYS = (
     "enabled",
@@ -49,7 +51,7 @@ def overlay(env: WebSettings, db_values: dict[str, str]) -> WebSettings:
     def get_str(field: str) -> None:
         v = db_values.get(field)
         if v:
-            data[field] = v
+            data[field] = decrypt_tool_secret(v) if field in SECRET_FIELDS else v
 
     def get_int(field: str) -> None:
         v = db_values.get(field)
@@ -69,7 +71,7 @@ def overlay(env: WebSettings, db_values: dict[str, str]) -> WebSettings:
     try:
         return WebSettings(**data)
     except Exception:
-        logger.warning("invalid web config in DB, falling back to env", db_values=db_values)
+        logger.warning("invalid web config in DB, falling back to env", fields=sorted(db_values))
         return env
 
 

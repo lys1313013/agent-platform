@@ -39,3 +39,14 @@ async def async_hash_password(password: str) -> str:
 
 async def async_verify_password(password: str, hashed: str) -> bool:
     return await to_thread.run_sync(verify_password, password, hashed, limiter=_password_limiter)
+
+
+async def replace_password(db, user, password: str) -> None:
+    """Call with the user row locked so reset and refresh serialize."""
+    from sqlalchemy import delete
+
+    from agent_platform.db import RefreshToken
+
+    user.password_hash = await async_hash_password(password)
+    user.credential_version += 1
+    await db.execute(delete(RefreshToken).where(RefreshToken.user_id == user.id))

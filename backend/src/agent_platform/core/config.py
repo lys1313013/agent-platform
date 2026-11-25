@@ -6,6 +6,8 @@ from dotenv import load_dotenv
 from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from agent_platform.sandbox_policy import SandboxSettings
+
 # Load .env file early so nested BaseSettings subclasses can read env vars
 load_dotenv()
 
@@ -138,26 +140,6 @@ class AgentSettings(BaseSettings):
     context_history_soft_limit: int = Field(
         default=20, ge=5, le=100, description="Soft limit on history messages for adaptive loading"
     )
-
-
-class SandboxSettings(BaseSettings):
-    """Sandbox execution configuration."""
-
-    model_config = SettingsConfigDict(env_prefix="SANDBOX_")
-
-    image: str = Field(
-        default="crpi-yvha9coypdedaafa.cn-beijing.personal.cr.aliyuncs.com/lys1313013/agent-platform-sandbox:latest"
-    )
-    namespace: str = Field(default="agent-platform", min_length=1)
-    lock_dir: str = Field(default="/tmp/aio-sandbox-locks", min_length=1)
-    cpu_limit: float = Field(default=1.0, ge=0.1, le=32)
-    memory_limit: str = Field(default="512m")
-    tmpfs_size: str = Field(default="512m")
-    network_disabled: bool = Field(default=True, description="Disable outbound network from sandbox")
-    command_timeout: int = Field(default=60, ge=5, le=600)
-    session_ttl: int = Field(default=3600, ge=60, le=604800, description="Idle timeout in seconds (up to 7 days)")
-    workspace_quota_mb: int = Field(default=500, ge=10, le=10240)
-    max_concurrent: int = Field(default=10, ge=1, le=100)
 
 
 class StorageSettings(BaseSettings):

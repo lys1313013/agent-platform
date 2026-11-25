@@ -55,22 +55,18 @@ async def handle_knowledge_retrieval(
             return "Error: user tenant not found"
 
         # 1. 查询 agent 绑定的活跃知识库 → dataset_ids
-        kb_result = await db.execute(
-            select(KnowledgeBase.dataset_id, KnowledgeBase.name)
-            .join(
-                AgentKnowledgeBase,
-                AgentKnowledgeBase.knowledge_base_id == KnowledgeBase.id,
-            )
-            .where(
-                AgentKnowledgeBase.agent_id == UUID(agent_id),
-                KnowledgeBase.is_active,
-                KnowledgeBase.tenant_id == tenant_id,
-                or_(
-                    KnowledgeBase.visibility == "tenant",
-                    KnowledgeBase.created_by == UUID(user_id),
-                ),
-            )
+        query_kbs = select(KnowledgeBase.dataset_id, KnowledgeBase.name).where(
+            KnowledgeBase.is_active, KnowledgeBase.tenant_id == tenant_id,
+            or_(KnowledgeBase.visibility == "tenant", KnowledgeBase.created_by == UUID(user_id)),
         )
+        delegation = kwargs.get("delegation")
+        bindings = delegation.published_bindings if delegation else None
+        if bindings is None:
+            query_kbs = query_kbs.join(AgentKnowledgeBase, AgentKnowledgeBase.knowledge_base_id == KnowledgeBase.id).where(
+                AgentKnowledgeBase.agent_id == UUID(agent_id))
+        else:
+            query_kbs = query_kbs.where(KnowledgeBase.id.in_(bindings.knowledge_base_ids))
+        kb_result = await db.execute(query_kbs)
         kb_rows = kb_result.all()
 
         if not kb_rows:

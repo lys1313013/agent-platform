@@ -1,4 +1,4 @@
-import { ConfigProvider, App, theme } from 'antd';
+import { ConfigProvider, theme } from 'antd';
 import { useThemeStore } from '@/stores/themeStore';
 import { getSkin } from '@/styles/skins';
 import { useMemo } from 'react';
@@ -61,7 +61,7 @@ export default function AntdProvider({ children }: Props) {
         },
       }}
     >
-      <App>{children}</App>
+      {children}
     </ConfigProvider>
   );
 }

@@ -9,53 +9,19 @@ from typing import Annotated, Any
 from uuid import UUID
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from agent_platform.auth.dependencies import CurrentUser
-from agent_platform.auth.jwt_handler import TokenPayload, decode_token
+from agent_platform.auth.dependencies import ExecutionUser
 from agent_platform.core.confirmation import confirmation_manager
+from agent_platform.core.session_access import owned_session
 from agent_platform.core.ui_action import ui_action_manager
 from agent_platform.db.connection import get_db
-from agent_platform.db.models import Session
 
 logger = structlog.get_logger()
 
 router = APIRouter(prefix="/api/ui-actions", tags=["ui-actions"])
-
-_optional_security = HTTPBearer(auto_error=False)
-
-
-async def _user_id_from_header_or_query(
-    credentials: Annotated[
-        HTTPAuthorizationCredentials | None, Depends(_optional_security)
-    ],
-    token: Annotated[str | None, Query()] = None,
-) -> UUID:
-    """Auth for beacon/unload paths: Authorization header OR ?token= query param.
-
-    sendBeacon cannot set headers, so tab-unload cancel_all passes the access
-    token as a query parameter. Only the user id is extracted (ownership checks
-    compare against Session.user_id / pending.user_id).
-    """
-    raw = credentials.credentials if credentials else token
-    if not raw:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
-    try:
-        payload: TokenPayload = decode_token(raw)
-        if payload.type != "access":
-            raise ValueError("wrong token type")
-        return UUID(payload.sub)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token"
-        ) from e
-
 
 # ---- Schemas ----
 
@@ -97,7 +63,8 @@ class PendingUiActionResponse(BaseModel):
 async def respond_to_ui_action(
     action_id: str,
     body: UiActionRespondRequest,
-    user: CurrentUser,
+    user: ExecutionUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
 ) -> UiActionRespondResponse:
     """Submit the execution result of a pending frontend UI action.
 
@@ -115,6 +82,7 @@ async def respond_to_ui_action(
             detail="UI action not found or already resolved",
         )
 
+    await owned_session(db, UUID(pending.session_id), user.id, tenant_id=pending.execution_tenant_id)
     payload: dict[str, Any] = body.model_dump(exclude_none=True)
     logger.info(
         "ui_action_respond",
@@ -135,7 +103,7 @@ async def respond_to_ui_action(
 @router.get("/sessions/{session_id}/pending")
 async def get_pending_ui_actions(
     session_id: UUID,
-    user: CurrentUser,
+    user: ExecutionUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> list[PendingUiActionResponse]:
     """List pending UI actions for a session.
@@ -143,13 +111,8 @@ async def get_pending_ui_actions(
     Race-condition fallback only: an SSE disconnect cancels the agent run and
     its finally-block pops pendings, so this normally returns empty.
     """
-    owned = await db.scalar(
-        select(Session.id).where(
-            Session.id == session_id, Session.user_id == user.id
-        )
-    )
-    if not owned:
-        raise HTTPException(status_code=404, detail="Session not found")
+    actions = ui_action_manager.get_pending(str(session_id))
+    await _authorize_pending(db, session_id, user.id, actions)
 
     return [
         PendingUiActionResponse(
@@ -160,37 +123,28 @@ async def get_pending_ui_actions(
             risk=p.risk,
             created_at=p.created_at.isoformat(),
         )
-        for p in ui_action_manager.get_pending(str(session_id))
+        for p in actions
     ]
+
+
+async def _authorize_pending(db, session_id, user_id, pending) -> None:
+    for tenant_id in {item.execution_tenant_id for item in pending} or {None}:
+        await owned_session(db, session_id, user_id, tenant_id=tenant_id)
 
 
 @router.post("/sessions/{session_id}/cancel_all")
 async def cancel_all_ui_actions(
     session_id: UUID,
-    user_id: Annotated[UUID, Depends(_user_id_from_header_or_query)],
+    user: ExecutionUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict[str, int]:
-    """Cancel all pending UI actions AND pending confirmations for a session.
-
-    Called on SSE reconnect / tab unload (via sendBeacon — hence the query-token
-    auth fallback). Confirmations are cancelled too, otherwise a confirmation
-    card orphaned by an aborted ui flow would hang until the run ends.
-    """
-    owned = await db.scalar(
-        select(Session.id).where(
-            Session.id == session_id, Session.user_id == user_id
-        )
-    )
-    if not owned:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    cancelled = ui_action_manager.cancel_session(str(session_id))
-    # Resolve orphaned confirmations for the same session as rejected.
-    confirmations_cancelled = 0
-    for c in confirmation_manager.get_pending(str(session_id)):
-        if confirmation_manager.resolve_confirmation(
-            c.id, {"status": "rejected", "user_input": "session cancelled"}
-        ):
-            confirmations_cancelled += 1
-
+    """Cancel only the pending actions and confirmations authorized for this request."""
+    actions = ui_action_manager.get_pending(str(session_id))
+    confirmations = confirmation_manager.get_pending(str(session_id))
+    await _authorize_pending(db, session_id, user.id, [*actions, *confirmations])
+    cancelled = sum(ui_action_manager.resolve(action.id, {"status": "cancelled", "error": "cancelled"})
+                    for action in actions)
+    confirmations_cancelled = sum(confirmation_manager.resolve_confirmation(
+        item.id, {"status": "rejected", "user_input": "session cancelled"}
+    ) for item in confirmations)
     return {"cancelled": cancelled, "confirmations_cancelled": confirmations_cancelled}

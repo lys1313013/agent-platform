@@ -536,6 +536,7 @@ class SkillService:
         user_message: str,
         top_k: int = 3,
         bound_skills: list | None = None,
+        bound_skill_ids: tuple[UUID, ...] | None = None,
     ) -> list[Skill]:
         """Get relevant skills to inject into the system prompt.
 
@@ -550,7 +551,7 @@ class SkillService:
             db, user_id, user_message, top_k=top_k
         )
         relevant = [skill for skill, _score in results]
-        bound_ids = list(dict.fromkeys(s.id for s in bound_skills or []))
+        bound_ids = list(dict.fromkeys(bound_skill_ids if bound_skill_ids is not None else (s.id for s in bound_skills or [])))
         bound: list[Skill] = []
         if bound_ids:
             rows = (await db.execute(select(Skill).where(Skill.id.in_(bound_ids),

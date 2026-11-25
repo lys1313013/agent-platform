@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { chatApi } from '@/lib/api';
+import { tokenStorage } from '@/lib/auth';
 import type { StreamingState, WsServerMessage } from '@/lib/types';
 
 const INITIAL_STATE: StreamingState = {
@@ -37,6 +38,7 @@ export function useWebSocket(sessionId: string | null) {
     wsRef.current = ws;
 
     ws.onopen = () => {
+      ws.send(JSON.stringify({ type: 'authenticate', token: tokenStorage.getAccess() }));
       setConnected(true);
       // Send any queued message
       if (pendingMessageRef.current !== null) {
@@ -182,6 +184,7 @@ export function useWebSocket(sessionId: string | null) {
             wsRef.current = newWs;
 
             newWs.onopen = () => {
+              newWs.send(JSON.stringify({ type: 'authenticate', token: tokenStorage.getAccess() }));
               setConnected(true);
               setError(null);
               setStreaming(INITIAL_STATE);

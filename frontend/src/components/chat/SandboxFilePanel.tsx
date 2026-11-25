@@ -16,11 +16,8 @@ import { App, Button, Empty, Input, Modal, Popconfirm, Spin, Tag, Tooltip, Typog
 import { workspacesApi } from '@/lib/api';
 import type { WorkspaceFileEntry } from '@/lib/api';
 import { cn } from '@/lib/utils';
-import WorkspaceFilePreview, {
-  FilePreviewContent,
-  inferFileMimeType,
-  isEditableTextFile,
-} from '@/components/files/WorkspaceFilePreview';
+import WorkspaceFilePreview, { FilePreviewContent } from '@/components/files/WorkspaceFilePreview';
+import { inferFileMimeType, isEditableTextFile } from '@/components/files/workspaceFile';
 
 const { Text } = Typography;
 const { TextArea } = Input;
@@ -121,8 +118,12 @@ export default function SandboxFilePanel({ workspaceId }: SandboxFilePanelProps)
     try {
       const blob = new Blob([modalContent], { type: 'text/plain' });
       const file = new File([blob], modalEntry.path, { type: 'text/plain' });
-      await workspacesApi.uploadFile(workspaceId, fullPath, file);
-      message.success(`已保存 ${modalEntry.path}`);
+      const result = await workspacesApi.uploadFile(workspaceId, fullPath, file);
+      if (result.sandbox_sync_status === 'pending') {
+        message.warning(`已保存 ${modalEntry.path}，沙箱待同步`);
+      } else {
+        message.success(`已保存 ${modalEntry.path}`);
+      }
       setEditing(false);
       fetchFiles(currentPath);
     } catch {

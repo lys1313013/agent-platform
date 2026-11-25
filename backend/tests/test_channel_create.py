@@ -113,7 +113,7 @@ async def test_update_cannot_clear_last_webhook_credential():
     row.scalar_one_or_none.return_value = channel
     db = MagicMock(execute=AsyncMock(return_value=row))
     with pytest.raises(HTTPException) as exc:
-        await channels.update_channel(uuid4(), channels.ChannelUpdate(verification_token=""), SimpleNamespace(tenant_id=uuid4()), db)
+        await channels.update_channel(uuid4(), channels.ChannelUpdate(verification_token=""), SimpleNamespace(tenant_id=uuid4()), db, SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace())))
     assert exc.value.status_code == 400
     assert channel.verification_token_encrypted == "token"
     db.commit.assert_not_called()

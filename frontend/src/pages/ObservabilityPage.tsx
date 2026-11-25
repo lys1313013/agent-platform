@@ -1,6 +1,6 @@
 import { usePageQuery, queryChoice, queryPage } from '@/hooks/usePageQuery';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Bar, Line } from '@ant-design/plots';
+import { Bar, Line } from '@/components/charts/Plots';
 import { ReloadOutlined } from '@ant-design/icons';
 import {
   Alert,
@@ -11,9 +11,11 @@ import {
   Descriptions,
   Drawer,
   Empty,
+  Input,
   Result,
   Row,
   Segmented,
+  Select,
   Skeleton,
   Space,
   Spin,
@@ -231,46 +233,72 @@ function OverviewTab({ range }: { range: ObsRangeQuery }) {
 
 // ---- Traces ----
 
-function TracesTab({ range }: { range: ObsRangeQuery }) {
+const ID_PATTERN = /^[\da-f]{8}-(?:[\da-f]{4}-){3}[\da-f]{12}$/i;
+
+function TracesTab({ range, standalone = false }: { range: ObsRangeQuery; standalone?: boolean }) {
   const [items, setItems] = useState<ObsTraceItem[]>([]);
   const [total, setTotal] = useState(0);
   const [params, updateQuery] = usePageQuery();
   const page = queryPage(params.get('page'));
   const status = queryChoice(params.get('status'), ['all', 'completed', 'error', 'interrupted', 'timeout'], 'all');
+  const filterId = params.get('id');
+  const searchBy = queryChoice(params.get('by'), ['trace', 'session'], 'trace');
+  const id = standalone && filterId && ID_PATTERN.test(filterId) ? filterId : undefined;
+  const [searchText, setSearchText] = useState(id ?? '');
+  const [invalidId, setInvalidId] = useState(false);
   const setPage = (value: number) => updateQuery({ page: value === 1 ? null : value });
   const setStatus = (value: string) => updateQuery({ status: value === 'all' ? null : value, page: null });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [detail, setDetail] = useState<ObsTraceDetail | null>(null);
-  const [detailOpen, setDetailOpen] = useState(false);
-  const [detailLoading, setDetailLoading] = useState(false);
+  const selected = params.get('trace');
+  const selectedTrace = selected && ID_PATTERN.test(selected) ? selected : null;
+  const [detailResult, setDetailResult] = useState<{ id: string; data: ObsTraceDetail | null } | null>(null);
+  const detail = detailResult?.id === selectedTrace ? detailResult.data : null;
+  const detailLoading = selectedTrace !== null && detailResult?.id !== selectedTrace;
   const listRequest = useRef(0);
   const detailRequest = useRef(0);
 
   const load = useCallback(() => {
     const request = ++listRequest.current;
     setLoading(true); setError(''); setItems([]); setTotal(0);
-    observabilityApi.traces({ ...range, page, page_size: 20, status: status === 'all' ? undefined : status })
+    observabilityApi.traces({
+      ...range, page, page_size: 20, status: status === 'all' ? undefined : status,
+      roots_only: standalone ? true : undefined,
+      trace_id: searchBy === 'trace' ? id : undefined,
+      session_id: searchBy === 'session' ? id : undefined,
+    })
       .then(result => { if (request === listRequest.current) { setItems(result.items); setTotal(result.total); } })
       .catch(() => { if (request === listRequest.current) setError('Trace 列表加载失败'); })
       .finally(() => { if (request === listRequest.current) setLoading(false); });
-  }, [range, page, status]);
+  }, [range, page, status, standalone, id, searchBy]);
 
   useEffect(() => { load(); return () => { listRequest.current += 1; }; }, [load]);
-  useEffect(() => { setDetailOpen(false); return () => { detailRequest.current += 1; }; }, [range]);
-
-  const openDetail = (id: string) => {
+  useEffect(() => { setSearchText(id ?? ''); setInvalidId(false); }, [id, searchBy]);
+  useEffect(() => {
+    if (!selectedTrace) return;
     const request = ++detailRequest.current;
-    setDetail(null); setDetailOpen(true); setDetailLoading(true);
-    observabilityApi.trace(id).then(value => { if (request === detailRequest.current) setDetail(value); })
-      .catch(() => { if (request === detailRequest.current) setDetail(null); })
-      .finally(() => { if (request === detailRequest.current) setDetailLoading(false); });
+    observabilityApi.trace(selectedTrace, standalone)
+      .then(data => { if (request === detailRequest.current) setDetailResult({ id: selectedTrace, data }); })
+      .catch(() => { if (request === detailRequest.current) setDetailResult({ id: selectedTrace, data: null }); });
+    return () => { detailRequest.current += 1; };
+  }, [selectedTrace, standalone]);
+
+  const openDetail = (traceId: string) => updateQuery({ trace: traceId });
+  const search = (value: string) => {
+    const trimmed = value.trim();
+    if (trimmed && !ID_PATTERN.test(trimmed)) {
+      setInvalidId(true);
+      return;
+    }
+    setInvalidId(false);
+    updateQuery({ id: trimmed || null, page: null, trace: null });
   };
 
   const columns: ColumnsType<ObsTraceItem> = [
-    { title: 'Trace ID', dataIndex: 'trace_id', width: 120, render: (v: string) => <Text code copyable={{ text: v }}>{v.slice(0, 8)}</Text> },
+    { title: 'Trace ID', dataIndex: 'trace_id', width: 150, render: (v: string) => <Space size={0}><Button type="link" size="small" title={v} onClick={() => openDetail(v)}>{v.slice(0, 8)}</Button><Text copyable={{ text: v }} /></Space> },
     { title: '开始时间', dataIndex: 'created_at', width: 170, render: (v: string, record) => record.duration_ms == null ? '-' : dayjs(v).subtract(record.duration_ms, 'millisecond').format('YYYY-MM-DD HH:mm:ss') },
     { title: '会话', dataIndex: 'session_title', ellipsis: true, render: (v: string | null) => v || <Text type="secondary">未命名会话</Text> },
+    ...(standalone ? [{ title: '智能体', dataIndex: 'agent_name', ellipsis: true, render: (v: string | null) => v ?? '—' }] : []),
     { title: '状态', dataIndex: 'status', width: 90, render: (v: string) => <StatusTag status={v} /> },
     { title: 'LLM 轮数', dataIndex: 'iteration_count', width: 100, align: 'right' },
     { title: '工具调用', dataIndex: 'tool_call_count', width: 100, align: 'right' },
@@ -282,12 +310,26 @@ function TracesTab({ range }: { range: ObsRangeQuery }) {
   return (
     <div className="obs-tab-content">
       <div className="obs-toolbar">
-        <Segmented value={status} onChange={(v) => { setPage(1); setStatus(String(v)); }} options={[
+        <Segmented value={status} onChange={(v) => setStatus(String(v))} options={[
           { label: '全部', value: 'all' }, { label: '完成', value: 'completed' }, { label: '失败', value: 'error' },
           { label: '中断', value: 'interrupted' }, { label: '超时', value: 'timeout' },
         ]} />
-        <Text type="secondary">共 {total} 条执行记录 · 点击行查看完整链路</Text>
+        {standalone ? <div className="obs-trace-search">
+          <Space.Compact>
+            <Select aria-label="搜索类型" value={searchBy} onChange={(by) => updateQuery({ by, id: null, page: null })} options={[
+              { value: 'trace', label: 'Trace ID' }, { value: 'session', label: '会话 ID' },
+            ]} />
+            <Input.Search aria-label="搜索执行记录" value={searchText} placeholder="输入完整 ID" allowClear
+              status={invalidId ? 'error' : undefined}
+              onChange={(event) => {
+                setSearchText(event.target.value);
+                setInvalidId(false);
+              }} onSearch={search} />
+          </Space.Compact>
+          <Button aria-label="刷新执行记录" title="刷新" icon={<ReloadOutlined />} loading={loading} onClick={load} />
+        </div> : <Text type="secondary">共 {total} 条执行记录 · 点击行查看完整链路</Text>}
       </div>
+      {invalidId && <Alert type="error" showIcon title="请输入完整的 Trace ID 或会话 ID" />}
       {error && <ErrorState message={error} retry={load} />}
       <Card size="small" className="obs-table-card">
         <Table<ObsTraceItem> rowKey="trace_id" loading={loading} columns={columns} dataSource={items} size="small" scroll={{ x: 1050 }}
@@ -295,7 +337,7 @@ function TracesTab({ range }: { range: ObsRangeQuery }) {
           onRow={(record) => ({ onClick: () => openDetail(record.trace_id), style: { cursor: 'pointer' } })}
           pagination={{ current: page, pageSize: 20, total, showSizeChanger: false, showTotal: (t) => `共 ${t} 条`, onChange: setPage }} />
       </Card>
-      <Drawer title={detail ? `Trace ${String(trace.trace_id).slice(0, 8)}` : 'Trace 明细'} width="min(1440px, 96vw)" open={detailOpen} onClose={() => setDetailOpen(false)}>
+      <Drawer title={detail ? `Trace ${String(trace.trace_id).slice(0, 8)}` : 'Trace 明细'} width="min(1440px, 96vw)" open={selectedTrace !== null} onClose={() => { setDetailResult(null); updateQuery({ trace: null }); }}>
         {detailLoading ? <Skeleton active paragraph={{ rows: 12 }} /> : detail ? <>
           <Descriptions size="small" bordered column={{ xs: 1, sm: 2, lg: 3 }} className="obs-detail-summary" items={[
             { key: 'status', label: '状态', children: <StatusTag status={String(trace.status)} /> },
@@ -495,7 +537,7 @@ function QualityTab({ range }: { range: ObsRangeQuery }) {
   );
 }
 
-export default function ObservabilityPage() {
+export default function ObservabilityPage({ traceOnly = false }: { traceOnly?: boolean }) {
   const role = useAuthStore((s) => s.role);
   const isAdmin = role === 'admin' || role === 'superadmin';
   const [params, updateQuery] = usePageQuery();
@@ -521,11 +563,11 @@ export default function ObservabilityPage() {
     };
   }, [customRange, rangeMode]);
 
-  if (!isAdmin) return <Result status="403" title="403" subTitle="需要管理员权限访问可观测页" />;
+  if (!isAdmin) return <Result status="403" title="403" subTitle="需要管理员权限访问此页面" />;
   return (
     <div className={`obs-page${isDark ? ' obs-page--dark' : ''}`}>
       <div className="obs-page-header">
-        <div><Title level={3}>大模型可观测性</Title><Text type="secondary">从模型请求到工具执行，定位性能、错误与上下文消耗</Text></div>
+        <div><Title level={3}>{traceOnly ? '执行追踪' : '大模型可观测性'}</Title><Text type="secondary">{traceOnly ? '查看每次执行的模型调用、工具耗时和 Agent 委派' : '从模型请求到工具执行，定位性能、错误与上下文消耗'}</Text></div>
         <div className="obs-time-control">
           <Segmented value={rangeMode} onChange={(v) => setRangeMode(v as ObsWindow | 'custom')} options={[
             { label: '近 1 小时', value: '1h' },
@@ -551,13 +593,13 @@ export default function ObservabilityPage() {
           )}
         </div>
       </div>
-      <Tabs activeKey={tab} onChange={setTab} destroyOnHidden items={[
+      {traceOnly ? <div className="obs-trace-page-content"><TracesTab range={range} standalone /></div> : <Tabs activeKey={tab} onChange={setTab} destroyOnHidden items={[
         { key: 'overview', label: '实时监控', children: <OverviewTab range={range} /> },
         { key: 'traces', label: 'Trace 明细', children: <TracesTab range={range} /> },
         { key: 'stats', label: '聚合报表', children: <StatsTab range={range} /> },
         { key: 'tools', label: '工具排行', children: <ToolsTab range={range} /> },
         { key: 'quality', label: '对话质量', children: <QualityTab range={range} /> },
-      ]} />
+      ]} />}
     </div>
   );
 }

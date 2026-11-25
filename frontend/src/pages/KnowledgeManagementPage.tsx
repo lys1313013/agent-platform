@@ -1,3 +1,4 @@
+import { errorMessage, isFormValidationError } from '@/lib/errors';
 import { useState, useEffect, useCallback } from 'react';
 import {
   DatabaseOutlined,
@@ -80,8 +81,8 @@ function KnowledgeManagementPageContent() {
     setLoading(true);
     try {
       setKnowledgeBases(await knowledgeApi.list());
-    } catch (err: any) {
-      message.error(`加载数据失败：${err.message}`);
+    } catch (err) {
+      message.error(`加载数据失败：${errorMessage(err)}`);
     } finally {
       setLoading(false);
     }
@@ -96,8 +97,8 @@ function KnowledgeManagementPageContent() {
         base_url: ragSettings.base_url,
         api_key: '',
       });
-    } catch (err: any) {
-      message.error(`加载数据失败：${err.message}`);
+    } catch (err) {
+      message.error(`加载数据失败：${errorMessage(err)}`);
     } finally {
       setSettingsLoading(false);
     }
@@ -122,9 +123,9 @@ function KnowledgeManagementPageContent() {
       setSettings(updated);
       settingsForm.setFieldsValue({ api_key: '' });
       message.success('RAGFlow 配置已保存');
-    } catch (err: any) {
-      if (err?.errorFields) return;
-      message.error(err.message || '保存失败');
+    } catch (err) {
+      if (isFormValidationError(err)) return;
+      message.error(errorMessage(err, '保存失败'));
     } finally {
       setSettingsSaving(false);
     }
@@ -170,9 +171,9 @@ function KnowledgeManagementPageContent() {
       }
       setModalOpen(false);
       fetchData();
-    } catch (err: any) {
-      if (err?.errorFields) return;
-      message.error(err.message || '操作失败');
+    } catch (err) {
+      if (isFormValidationError(err)) return;
+      message.error(errorMessage(err, '操作失败'));
     }
   };
 
@@ -182,8 +183,8 @@ function KnowledgeManagementPageContent() {
       await knowledgeApi.delete(id);
       message.success('知识库已删除');
       fetchData();
-    } catch (err: any) {
-      message.error(`删除失败：${err.message}`);
+    } catch (err) {
+      message.error(`删除失败：${errorMessage(err)}`);
     }
   };
 
@@ -222,9 +223,9 @@ function KnowledgeManagementPageContent() {
       } else {
         setRetrievalError(result.message || '检索失败');
       }
-    } catch (err: any) {
-      if (err?.errorFields) return;
-      setRetrievalError(err.message || '检索失败');
+    } catch (err) {
+      if (isFormValidationError(err)) return;
+      setRetrievalError(errorMessage(err, '检索失败'));
     } finally {
       setRetrievalLoading(false);
     }

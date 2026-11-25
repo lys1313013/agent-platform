@@ -12,9 +12,10 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import time
-from dataclasses import dataclass
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import structlog
 from sqlalchemy import func
@@ -46,6 +47,12 @@ class ObsContext:
     tenant_id: UUID | None = None
     agent_id: UUID | None = None
     call_order: int = 0
+    root_trace_id: UUID | None = None
+    parent_tool_span_id: UUID | None = None
+    started_at: float = field(default_factory=time.monotonic)
+    iteration: int | None = None
+    tool_call_count: int = 0
+    total_tokens: int = 0
 
     def next_call_order(self) -> int:
         self.call_order += 1
@@ -54,6 +61,9 @@ class ObsContext:
 
 _obs_ctx: contextvars.ContextVar[ObsContext | None] = contextvars.ContextVar(
     "observation_context", default=None
+)
+_tool_span: contextvars.ContextVar[UUID | None] = contextvars.ContextVar(
+    "observation_tool_span", default=None
 )
 
 
@@ -65,6 +75,31 @@ def set_obs_context(ctx: ObsContext | None) -> None:
 def get_obs_context() -> ObsContext | None:
     """Get the current observation context, if any."""
     return _obs_ctx.get()
+
+
+def get_tool_span_id() -> UUID | None:
+    return _tool_span.get()
+
+
+@contextmanager
+def bind_obs_context(ctx: ObsContext):
+    context_token = _obs_ctx.set(ctx)
+    tool_token = _tool_span.set(None)
+    try:
+        yield
+    finally:
+        _tool_span.reset(tool_token)
+        _obs_ctx.reset(context_token)
+
+
+@contextmanager
+def bind_tool_span():
+    span_id = uuid4() if get_obs_context() is not None else None
+    token = _tool_span.set(span_id)
+    try:
+        yield span_id
+    finally:
+        _tool_span.reset(token)
 
 
 class Recorder:
@@ -123,6 +158,7 @@ class Recorder:
             "tenant_id": ctx.tenant_id if ctx else None,
             "agent_id": ctx.agent_id if ctx else None,
             "call_order": ctx.next_call_order() if ctx else 0,
+            "iteration": ctx.iteration if ctx else None,
             "created_at": datetime.now(UTC),
             **fields,
         }
@@ -146,6 +182,7 @@ class Recorder:
         is_truncated: bool = False,
         is_concurrent: bool = False,
         call_order: int = 1,
+        span_id: UUID | None = None,
         **fields: object,
     ) -> None:
         ctx = get_obs_context()
@@ -163,6 +200,7 @@ class Recorder:
             "is_truncated": is_truncated,
             "is_concurrent": is_concurrent,
             "call_order": call_order,
+            "iteration": ctx.iteration if ctx else None,
             "user_id": user_id if user_id else (str(ctx.user_id) if ctx and ctx.user_id else None),
             "session_id": session_id if session_id else (ctx.session_id if ctx else None),
             "trace_id": ctx.trace_id if ctx else None,
@@ -171,6 +209,8 @@ class Recorder:
             "created_at": datetime.now(UTC),
             **fields,
         }
+        if span_id is not None:
+            payload["id"] = span_id
         self._enqueue("tool_call", payload)
 
     def record_trace(self, **fields: object) -> None:

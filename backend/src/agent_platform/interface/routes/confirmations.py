@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_platform.auth.dependencies import ExecutionUser
+from agent_platform.core import run_confirmations
 from agent_platform.core.confirmation import confirmation_manager
 from agent_platform.core.session_access import owned_session
 from agent_platform.db.connection import get_db
@@ -86,6 +87,8 @@ async def respond_to_confirmation(
             confirmation_id=confirmation_id, **body.model_dump(),
         ))
         return ConfirmResponseResponse(success=True, message="Confirmation submitted")
+    if await run_confirmations.submit(db, user.id, confirmation_id, body.model_dump()):
+        return ConfirmResponseResponse(success=True, message="Confirmation submitted")
     confirmation = confirmation_manager.get(confirmation_id)
     if not confirmation or confirmation.user_id != str(user.id):
         raise HTTPException(
@@ -124,6 +127,23 @@ async def get_pending_confirmations(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> list[PendingConfirmationResponse]:
     """Get all pending confirmation requests for a session (for page refresh recovery)."""
+    from agent_platform.core.chat_runs import authorize_run, expire_run
+    from agent_platform.db.models import ChatRun
+
+    run = await db.scalar(select(ChatRun).where(
+        ChatRun.user_id == user.id, ChatRun.session_id == session_id, ChatRun.status == "running",
+    ).with_for_update())
+    if run is not None:
+        await authorize_run(db, run)
+        await expire_run(db, run)
+        return [
+            PendingConfirmationResponse(
+                id=card["confirmation_id"], question=card["question"], mode=card["mode"],
+                options=card.get("options", []), context=card["context"],
+                timeout_seconds=card["context"]["timeout_seconds"], created_at=card["created_at"],
+                table_schema=card.get("table_schema"),
+            ) for card in run_confirmations.pending(run)
+        ]
     pending = confirmation_manager.get_pending(str(session_id))
     if not pending:
         await owned_session(db, session_id, user.id)

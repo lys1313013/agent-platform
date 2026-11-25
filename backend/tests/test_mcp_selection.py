@@ -49,8 +49,7 @@ def test_chat_filter_includes_tool_added_after_all_was_selected() -> None:
     server_id = uuid4()
     tool_info = MCPToolInfo(name="new_tool", description="New upstream tool")
     mcp_manager = SimpleNamespace(
-        _tool_to_server={"docs_new_tool": server_id},
-        list_all_tools=lambda: [("docs_new_tool", tool_info)],
+        iter_tools=lambda tenant: [(server_id, "docs_new_tool", tool_info)],
     )
     executor = SimpleNamespace(registry=ToolRegistry(), mcp_manager=mcp_manager)
     agent = SimpleNamespace(

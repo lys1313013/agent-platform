@@ -1,4 +1,6 @@
-import { useState, useEffect, useMemo } from 'react';
+import SessionHistoryMore from '@/components/chat/SessionHistoryMore';
+import { useSessionHistory } from '@/hooks/useSessionHistory';
+import { useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { CloseOutlined, HistoryOutlined, MessageOutlined, SearchOutlined, PushpinOutlined, PushpinFilled, InboxOutlined, EditOutlined, CheckOutlined, MoreOutlined, UndoOutlined, DeleteOutlined } from '@ant-design/icons';
 import { Input, Typography, Spin, App, Dropdown } from 'antd';
@@ -33,11 +35,10 @@ export function HistoryPanel({ agentId, closePanel }: { agentId: string; closePa
     renameSession,
     pinSession,
     archiveSession,
-    refreshSessions,
     isSessionsLoading,
+    sessionListError,
   } = useChatStore();
 
-  useEffect(() => { void refreshSessions(agentId); }, [agentId, refreshSessions]);
   const handleDeleteSession = (id: string) => {
     modal.confirm({
       title: '删除对话？',
@@ -80,13 +81,9 @@ export function HistoryPanel({ agentId, closePanel }: { agentId: string; closePa
     navigate(`/agents/${agentId}/chat/${id}`, { replace: true });
   };
 
-  const filteredSessions = sessions.filter(
-    (s) =>
-      s.agent_id === agentId && (searchQuery === '' ||
-        (s.title || '').toLowerCase().includes(searchQuery.toLowerCase())),
-  );
+  const filteredSessions = useSessionHistory(true, searchQuery, agentId);
 
-  const pinnedSessions = filteredSessions.filter((s) => s.is_pinned);
+  const pinnedSessions = filteredSessions.filter((s) => s.is_pinned && !s.is_archived);
   const regularSessions = filteredSessions.filter((s) => !s.is_pinned && !s.is_archived);
   const archivedSessions = filteredSessions.filter((s) => s.is_archived);
 
@@ -151,11 +148,11 @@ export function HistoryPanel({ agentId, closePanel }: { agentId: string; closePa
       </div>
 
       <div className="flex-1 overflow-y-auto px-2 pb-4">
-        {isSessionsLoading ? (
+        {isSessionsLoading && !filteredSessions.length ? (
           <div className="px-3 py-8 text-center">
             <Spin size="small" />
           </div>
-        ) : filteredSessions.length === 0 ? (
+        ) : !sessionListError && filteredSessions.length === 0 ? (
           <div className="flex flex-col items-center gap-2 px-3 py-10 text-center">
             <MessageOutlined className="text-3xl text-muted-foreground/20" />
             <span className="text-xs text-muted-foreground">
@@ -257,6 +254,7 @@ export function HistoryPanel({ agentId, closePanel }: { agentId: string; closePa
             )}
           </div>
         )}
+        <SessionHistoryMore />
       </div>
     </>
   );

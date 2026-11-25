@@ -107,7 +107,7 @@ async def test_cron_uses_job_tenant_after_ui_switch(cron_data, db_session, monke
         execute_cron_job, tool_executor=object(), push_to_channel=AsyncMock()))
     monkeypatch.setattr(scheduler._claims, "claim", AsyncMock(return_value=True))
     try:
-        await (scheduler.run_now(d.job.id) if manual else scheduler._execute(d.job.id))
+        await (scheduler.run_now(d.job.id) if manual else scheduler._execute(d.job.id, d.job.schedule_version))
     finally:
         await scheduler._claims.close()
     assert len(seen) == 1

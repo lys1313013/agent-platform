@@ -71,6 +71,9 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
   const [stopping, setStopping] = useState(false);
   const runRef = useRef<ChatRunInfo | null>(null);
   const generationRef = useRef(0);
+  const scheduleRecovery = useRef<() => void>(() => {});
+  const reconnectNeededRef = useRef(false);
+  const priorRunIdRef = useRef<string | undefined>(undefined);
   const sequenceRef = useRef(0);
   const revokedSessionRef = useRef<string | null>(null);
   const consumeRef = useRef<(event: ChatStreamEvent) => void>(() => {});
@@ -124,7 +127,12 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
     abortRef.current?.abort();
     abortRef.current = null;
     const generation = ++generationRef.current;
+    if (textFrameRef.current !== null) cancelAnimationFrame(textFrameRef.current);
+    textFrameRef.current = null;
+    pendingTextRef.current = '';
+    reconnectNeededRef.current = false;
     sequenceRef.current = 0;
+    priorRunIdRef.current = opts?.flushOnDone === false ? undefined : runRef.current?.id;
     runRef.current = null;
     setRun(null);
     turnSessionIdRef.current = sessionId;
@@ -138,6 +146,10 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
   }, []);
 
   const disconnect = useCallback(() => {
+    if (textFrameRef.current !== null) cancelAnimationFrame(textFrameRef.current);
+    textFrameRef.current = null;
+    pendingTextRef.current = '';
+    reconnectNeededRef.current = false;
     generationRef.current += 1;
     abortRef.current?.abort();
     abortRef.current = null;
@@ -208,8 +220,10 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
         break;
       }
       case 'transport_error':
+        reconnectNeededRef.current = true;
         abortRef.current = null;
-        setError('连接已断开，后台任务继续执行，正在重新连接…');
+        setError('连接已断开，正在确认后台任务状态…');
+        scheduleRecovery.current();
         break;
 
       case 'session':
@@ -244,7 +258,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
           useChatStore.getState().setActiveSession(data.new_session_id as string);
         }
         if (data.deleted_session_id) {
-          useChatStore.getState().deleteSession(data.deleted_session_id as string);
+          useChatStore.getState().removeSessionLocal(data.deleted_session_id as string);
         }
         if (data.session_id && data.title) {
           useChatStore.getState().setSessionTitleLocal(
@@ -396,12 +410,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
 
       case 'access_revoked': {
         revokedSessionRef.current = turnSessionIdRef.current;
-        generationRef.current += 1;
-        abortRef.current?.abort();
-        abortRef.current = null;
-        runRef.current = null;
-        setRun(null);
-        setStreaming(IDLE_STREAMING);
+        disconnect();
         const reason = '会话访问权限已失效，请检查租户和成员权限';
         setError(reason);
         onErrorRef.current?.(reason);
@@ -598,12 +607,14 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
       case 'closed':
         // 回放流正常结束但未收到 done（如空流/任务已结束）：复位 streaming
         abortRef.current = null;
-        if (runRef.current?.status !== 'running') {
+        if (runRef.current?.status === 'running' || reconnectNeededRef.current) {
+          scheduleRecovery.current();
+        } else {
           setStreaming((prev) => (prev.isStreaming ? IDLE_STREAMING : prev));
         }
         break;
     }
-  }, []);
+  }, [disconnect, flushPendingText]);
 
   consumeRef.current = handleEvent;
 
@@ -618,13 +629,24 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
     if (!activeSessionId) return;
     let disposed = false;
     let busy = false;
+    let timer: number | undefined;
+    let retryDelay = 1000;
+    const schedule = () => {
+      if (disposed || timer !== undefined || document.visibilityState === 'hidden') return;
+      timer = window.setTimeout(() => {
+        timer = undefined;
+        void recover();
+      }, retryDelay);
+    };
     const recover = async () => {
-      if (disposed || busy || abortRef.current || revokedSessionRef.current === activeSessionId) return;
+      if (disposed || abortRef.current || revokedSessionRef.current === activeSessionId || document.visibilityState === 'hidden') return;
+      if (busy) { schedule(); return; }
       busy = true;
       const generation = generationRef.current;
       try {
         const info = await chatApi.latestRun(activeSessionId);
         if (disposed || generation !== generationRef.current || abortRef.current) return;
+        retryDelay = 1000;
         const changed = info?.id !== runRef.current?.id || info?.status !== runRef.current?.status;
         runRef.current = info;
         setRun(info);
@@ -633,19 +655,41 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
           if (disposed || generation !== generationRef.current || abortRef.current) return;
           const consume = beginTurn(activeSessionId, { flushOnDone: false });
           abortRef.current = chatApi.watchRun(info.id, consume);
-        } else if (changed) {
+        } else if (changed || reconnectNeededRef.current) {
+          if (reconnectNeededRef.current) {
+            reconnectNeededRef.current = false;
+            setError(info && info.id !== priorRunIdRef.current ? null : '未发现已受理的新任务，请检查消息后重试');
+          }
           setStreaming(IDLE_STREAMING);
           await useChatStore.getState().loadSessionMessages(activeSessionId);
         }
       } catch {
-        if (!disposed) setError('暂时无法读取后台任务状态，正在重试…');
+        if (!disposed) {
+          setError('暂时无法读取后台任务状态，正在重试…');
+          schedule();
+          retryDelay = Math.min(retryDelay * 2, 30_000);
+        }
       } finally {
         busy = false;
       }
     };
+    const onVisibleOrOnline = () => {
+      if (document.visibilityState === 'hidden') return;
+      window.clearTimeout(timer);
+      timer = undefined;
+      void recover();
+    };
+    scheduleRecovery.current = schedule;
     void recover();
-    const timer = window.setInterval(() => void recover(), 3000);
-    return () => { disposed = true; window.clearInterval(timer); };
+    document.addEventListener('visibilitychange', onVisibleOrOnline);
+    window.addEventListener('online', onVisibleOrOnline);
+    return () => {
+      disposed = true;
+      scheduleRecovery.current = () => {};
+      window.clearTimeout(timer);
+      document.removeEventListener('visibilitychange', onVisibleOrOnline);
+      window.removeEventListener('online', onVisibleOrOnline);
+    };
   }, [activeSessionId, beginTurn, disconnect]);
 
   const resume = useCallback(() => {

@@ -55,7 +55,7 @@ export const workspacesApi = {
     );
   },
 
-  uploadFile(id: string, path: string, file: File): Promise<{ path: string; size: number }> {
+  uploadFile(id: string, path: string, file: File): Promise<{ path: string; size: number; sandbox_sync_status?: 'pending' }> {
     const form = new FormData();
     form.append('file', file);
     return uploadForm(`/workspaces/${id}/files/content?path=${encodeURIComponent(path)}`, form);

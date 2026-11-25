@@ -8,41 +8,47 @@ name: agent-platform
 
 services:
   # Pre-pull the image into the host Docker daemon. The backend later creates
-  # ephemeral containers from the same image through /var/run/docker.sock.
+  # ephemeral containers from the same image through the sandbox broker.
   sandbox-image:
     image: ${SANDBOX_IMAGE:-crpi-yvha9coypdedaafa.cn-beijing.personal.cr.aliyuncs.com/lys1313013/agent-platform-sandbox:latest}
     pull_policy: always
     command: ["/bin/true"]
     restart: "no"
 
-  # Restricts the backend to container lifecycle/exec APIs instead of the raw
-  # Docker socket, which would otherwise grant host root on compromise.
+  # The broker has no network interface shared with any application. Only
+  # SandboxManager mounts its Unix socket. Tenant-configured HTTP connections
+  # retain access to business networks but cannot address this control plane.
+  # Keep the previous service name so upgrades replace the old TCP listener.
   docker-proxy:
-    image: tecnativa/docker-socket-proxy:0.3
+    image: ${BACKEND_IMAGE:-crpi-yvha9coypdedaafa.cn-beijing.personal.cr.aliyuncs.com/lys1313013/agent-platform-backend:latest}
+    pull_policy: always
+    command: ["/app/.venv/bin/python", "-m", "agent_platform.sandbox_broker"]
     restart: unless-stopped
-    environment:
-      CONTAINERS: "1"
-      IMAGES: "1"
-      EXEC: "1"
-      POST: "1"
-      ALLOW_START: "1"
-      ALLOW_STOP: "1"
-      ALLOW_RESTARTS: "1"
-      VOLUMES: "0"
-      NETWORKS: "0"
-      SYSTEM: "0"
-      INFO: "0"
+    network_mode: none
+    environment: &sandbox-policy
+      SANDBOX_IMAGE: ${SANDBOX_IMAGE:-crpi-yvha9coypdedaafa.cn-beijing.personal.cr.aliyuncs.com/lys1313013/agent-platform-sandbox:latest}
+      SANDBOX_CPU_LIMIT: ${SANDBOX_CPU_LIMIT:-1.0}
+      SANDBOX_MEMORY_LIMIT: ${SANDBOX_MEMORY_LIMIT:-512m}
+      SANDBOX_TMPFS_SIZE: ${SANDBOX_TMPFS_SIZE:-512m}
+      SANDBOX_NAMESPACE: ${SANDBOX_NAMESPACE:-${COMPOSE_PROJECT_NAME:-agent-platform}}
+      SANDBOX_WORKSPACE_QUOTA_MB: ${SANDBOX_WORKSPACE_QUOTA_MB:-500}
+      SANDBOX_NETWORK_DISABLED: ${SANDBOX_NETWORK_DISABLED:-true}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-    networks:
-      - app-network
+      - sandbox-control:/run/aio-sandbox
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--unix-socket", "/run/aio-sandbox/control.sock", "http://localhost/version"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   backend:
     image: ${BACKEND_IMAGE:-crpi-yvha9coypdedaafa.cn-beijing.personal.cr.aliyuncs.com/lys1313013/agent-platform-backend:latest}
     pull_policy: always
     restart: unless-stopped
     environment:
-      DOCKER_HOST: tcp://docker-proxy:2375
+      <<: *sandbox-policy
+      SANDBOX_BROKER_SOCKET: /run/aio-sandbox/control.sock
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
       REDIS_HOST: ${REDIS_HOST:-redis}
       REDIS_PORT: ${REDIS_PORT:-6379}
@@ -50,6 +56,7 @@ services:
       REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}
       REDIS_USERNAME: ${REDIS_USERNAME:-}
       JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env}
+      CREDENTIALS_KEY: ${CREDENTIALS_KEY:-}
       JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
       JWT_ACCESS_TOKEN_EXPIRE_MINUTES: ${JWT_ACCESS_TOKEN_EXPIRE_MINUTES:-${ACCESS_TOKEN_EXPIRE_MINUTES:-15}}
       JWT_REFRESH_TOKEN_EXPIRE_DAYS: ${JWT_REFRESH_TOKEN_EXPIRE_DAYS:-${REFRESH_TOKEN_EXPIRE_DAYS:-7}}
@@ -57,15 +64,9 @@ services:
       AGENT_TEMPERATURE: ${AGENT_TEMPERATURE:-0.7}
       AGENT_TRUST_LEVEL: ${AGENT_TRUST_LEVEL:-ask_dangerous}
       AGENT_MEMORY_TOP_K: ${AGENT_MEMORY_TOP_K:-5}
-      SANDBOX_IMAGE: ${SANDBOX_IMAGE:-crpi-yvha9coypdedaafa.cn-beijing.personal.cr.aliyuncs.com/lys1313013/agent-platform-sandbox:latest}
-      SANDBOX_CPU_LIMIT: ${SANDBOX_CPU_LIMIT:-1.0}
-      SANDBOX_MEMORY_LIMIT: ${SANDBOX_MEMORY_LIMIT:-512m}
       SANDBOX_SESSION_TTL: ${SANDBOX_SESSION_TTL:-3600}
-      SANDBOX_NAMESPACE: ${SANDBOX_NAMESPACE:-${COMPOSE_PROJECT_NAME:-agent-platform}}
       SANDBOX_LOCK_DIR: /var/lib/aio-sandbox-locks
       SANDBOX_COMMAND_TIMEOUT: ${SANDBOX_COMMAND_TIMEOUT:-60}
-      SANDBOX_WORKSPACE_QUOTA_MB: ${SANDBOX_WORKSPACE_QUOTA_MB:-500}
-      SANDBOX_NETWORK_DISABLED: ${SANDBOX_NETWORK_DISABLED:-true}
       STORAGE_ENDPOINT: ${STORAGE_ENDPOINT:?Set STORAGE_ENDPOINT in .env}
       STORAGE_ACCESS_KEY: ${STORAGE_ACCESS_KEY:?Set STORAGE_ACCESS_KEY in .env}
       STORAGE_SECRET_KEY: ${STORAGE_SECRET_KEY:?Set STORAGE_SECRET_KEY in .env}
@@ -82,11 +83,12 @@ services:
       LANGFUSE_BASE_URL: ${LANGFUSE_BASE_URL:-http://localhost:3000}
     volumes:
       - sandbox-locks:/var/lib/aio-sandbox-locks
+      - sandbox-control:/run/aio-sandbox:ro
     depends_on:
       sandbox-image:
         condition: service_completed_successfully
       docker-proxy:
-        condition: service_started
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://localhost:8100/health"]
       interval: 15s
@@ -117,6 +119,7 @@ services:
 
 volumes:
   sandbox-locks:
+  sandbox-control:
 
 networks:
   app-network:

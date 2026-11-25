@@ -8,6 +8,7 @@ import StreamingMessage from './StreamingMessage';
 import MessageList from './MessageList';
 import type { Message } from '@/lib/types';
 import { chatApi } from '@/lib/api';
+import { IDLE_STREAMING } from '@/hooks/useChatStream';
 import { emptyMentionDraft, mentionRecipients } from '@/lib/roomMentions';
 import { roomMessageStreaming, type RoomMessage } from '@/lib/rooms';
 
@@ -57,6 +58,24 @@ describe('shared conversation composer', () => {
     await submit();
     expect(onSend).toHaveBeenCalledTimes(2);
     expect(editor().value).toBe('');
+  });
+
+  it('keeps the first draft in its new session after the server rejects the submission', async () => {
+    function NewChat() {
+      const [id, setId] = useState<string | null>(null);
+      return createElement(ChatInput, {
+        simple: true, sessionId: id, onEnsureSession: async () => 'session-ready',
+        onSend: (_text, _images, _files, _browser, promote) => {
+          promote?.('session-ready');
+          setId('session-ready');
+          return false;
+        },
+      });
+    }
+    await act(async () => root.render(createElement(NewChat)));
+    await type('draft before creating a session');
+    await submit();
+    expect(editor().value).toBe('draft before creating a session');
   });
 
   it('queues normal messages, but never resubmits a busy room draft', async () => {
@@ -170,4 +189,16 @@ it('preserves the reading position when older room messages are prepended', asyn
   await act(async () => render([{ ...recent }]));
   await act(async () => render([older, recent]));
   expect(scroll.scrollTop).toBe(400);
+});
+
+it('retains the historical message subtree as streaming text changes', async () => {
+  const messages: Message[] = [{ id: 'history', role: 'assistant', content: '历史', created_at: '' }];
+  const renderMessage = vi.fn((message: Message) => createElement('p', null, message.content));
+  for (const finalText of ['a', 'ab', 'abc']) {
+    await act(async () => root.render(createElement(MessageList, {
+      messages, renderMessage, conversationId: 'session', streaming: { ...IDLE_STREAMING, isStreaming: true, finalText },
+    })));
+  }
+  expect(renderMessage).toHaveBeenCalledTimes(1);
+  expect(container.textContent).toContain('abc');
 });

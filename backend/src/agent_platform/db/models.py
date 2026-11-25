@@ -118,6 +118,7 @@ class User(Base):
     username: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, comment="用户名")
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, comment="邮箱地址")
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False, comment="密码哈希")
+    credential_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     tenant_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True), nullable=False, default=DEFAULT_TENANT_ID, comment="所属租户ID"
     )
@@ -240,6 +241,7 @@ class RefreshToken(Base):
         comment="关联用户ID",
     )
     token_hash: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, comment="令牌哈希值")
+    family_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False, default=uuid4)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, comment="过期时间")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now(), comment="创建时间")
 
@@ -251,6 +253,7 @@ class RefreshToken(Base):
 
     __table_args__ = (
         Index("idx_refresh_tokens_user", "user_id"),
+        Index("uq_refresh_tokens_family", "family_id", unique=True),
         {"comment": "刷新令牌表"},
     )
 
@@ -1103,6 +1106,8 @@ class Trace(Base):
 class CronJob(Base):
     __tablename__ = "cron_jobs"
 
+    schedule_version: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), default=uuid4, server_default=text("gen_random_uuid()"))
+
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4, comment="主键ID")
     tenant_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
@@ -1598,6 +1603,7 @@ class GraphRelationship(Base):
 
     __table_args__ = (
         Index("idx_graph_rels_kb_source", "knowledge_base_id", "source_entity_id"),
+        Index("idx_graph_rels_traversal", "knowledge_base_id", "status", "source_entity_id", "id"),
         Index("idx_graph_rels_kb_type", "knowledge_base_id", "relation_type"),
         {"comment": "图谱关系"},
     )
@@ -1614,6 +1620,8 @@ class GraphExtractionJob(Base):
     status: Mapped[str] = mapped_column(
         String(16), default="pending", server_default="pending", comment="状态: pending/running/done/failed"
     )
+    lease_token: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True))
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     total_chunks: Mapped[int] = mapped_column(Integer, default=0, comment="分块总数")
     processed_chunks: Mapped[int] = mapped_column(Integer, default=0, comment="已处理分块数")
     entities_found: Mapped[int] = mapped_column(Integer, default=0, comment="抽取实体数")
@@ -1627,8 +1635,20 @@ class GraphExtractionJob(Base):
 
     __table_args__ = (
         Index("idx_graph_jobs_kb", "knowledge_base_id"),
+        Index("idx_graph_jobs_claim", "status", "lease_until", "created_at"),
         {"comment": "图谱抽取任务"},
     )
+
+
+class GraphExtractionChunk(Base):
+    """Persistent chunk manifest and write checkpoint for an extraction job."""
+
+    __tablename__ = "graph_extraction_chunks"
+    job_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
+    chunk_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="pending")
+
+    __table_args__ = (Index("idx_graph_extraction_chunks_pending", "job_id", "status", "chunk_id"),)
 
 
 class AgentGraphKnowledgeBase(Base):
@@ -1734,6 +1754,8 @@ class ChannelConfig(Base):
     """IM 渠道配置 — 承载飞书/企微/钉钉等渠道的凭证与运行模式。"""
     __tablename__ = "channel_configs"
 
+    transport_version: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), default=uuid4, server_default=text("gen_random_uuid()"))
+
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4, comment="主键ID")
     tenant_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True), nullable=False, default=DEFAULT_TENANT_ID, comment="所属租户ID"
@@ -1799,6 +1821,39 @@ class ChannelConfig(Base):
     @property
     def verification_token(self) -> str | None:
         return decrypt_secret(self.verification_token_encrypted)
+
+
+class ChannelInboxEvent(Base):
+    """A unique delivery receipt. Terminal rows retain only deduplication metadata."""
+
+    __tablename__ = "channel_inbox_events"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    channel_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
+    event_id: Mapped[str] = mapped_column(Text, nullable=False)
+    chat_id: Mapped[str] = mapped_column(Text, nullable=False)
+    external_id: Mapped[str] = mapped_column(Text, nullable=False)
+    message_id: Mapped[str | None] = mapped_column(Text)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    owner: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True))
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="queued")
+    payload: Mapped[dict | None] = mapped_column(JSONB)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (
+        Index("ix_channel_inbox_recall", "channel_id", "message_id", postgresql_where=text("kind = 'recall'")),
+        Index("ix_channel_inbox_retention", "channel_id", "finished_at"),
+        UniqueConstraint("channel_id", "event_id", name="uq_channel_inbox_delivery"),
+        Index("ix_channel_inbox_work", "channel_id", "status", "id",
+              postgresql_where=text("status IN ('queued', 'claimed', 'running')")),
+    )
+
+
+class ChannelInboxLease(Base):
+    """All turns and immediate control events of a channel use one live consumer."""
+
+    __tablename__ = "channel_inbox_leases"
+    channel_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
+    owner: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class ChannelBinding(Base):
@@ -2036,6 +2091,7 @@ class LLMCallLog(Base):
     model: Mapped[str] = mapped_column(String(128), nullable=False, comment="模型标识")
     provider: Mapped[str] = mapped_column(String(32), nullable=False, comment="提供商类型")
     call_order: Mapped[int] = mapped_column(Integer, nullable=False, default=1, comment="一次执行中的第几轮")
+    iteration: Mapped[int | None] = mapped_column(Integer, comment="Agent 循环轮次")
     prompt_tokens: Mapped[int] = mapped_column(Integer, default=0, comment="输入令牌数")
     completion_tokens: Mapped[int] = mapped_column(Integer, default=0, comment="输出令牌数")
     total_tokens: Mapped[int] = mapped_column(Integer, default=0, comment="总令牌数")
@@ -2079,6 +2135,7 @@ class ToolCallLog(Base):
     tool_name: Mapped[str] = mapped_column(String(128), nullable=False, comment="工具名")
     exec_type: Mapped[str] = mapped_column(String(16), nullable=False, default="direct", comment="执行类型: sandbox/direct/mcp/remote/builtin")
     call_order: Mapped[int] = mapped_column(Integer, nullable=False, default=1, comment="执行链路序号")
+    iteration: Mapped[int | None] = mapped_column(Integer, comment="Agent 循环轮次")
     duration_ms: Mapped[int | None] = mapped_column(Integer, comment="耗时(毫秒)")
     is_error: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, comment="是否失败")
     error_type: Mapped[str | None] = mapped_column(String(32), comment="错误分类")
@@ -2108,6 +2165,8 @@ class AgentTraceLog(Base):
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4, comment="主键ID")
     trace_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), unique=True, nullable=False, comment="执行实例ID")
+    root_trace_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), comment="委派链的根执行实例ID")
+    parent_tool_span_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), comment="发起委派的工具调用明细ID")
     session_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), comment="会话ID")
     user_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), comment="用户ID")
     tenant_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), comment="租户ID")
@@ -2130,6 +2189,7 @@ class AgentTraceLog(Base):
     __table_args__ = (
         Index("idx_agent_trace_logs_tenant_created", "tenant_id", "created_at"),
         Index("idx_agent_trace_logs_session", "session_id"),
+        Index("idx_agent_trace_logs_root", "root_trace_id"),
         {"comment": "Agent执行明细表"},
     )
 

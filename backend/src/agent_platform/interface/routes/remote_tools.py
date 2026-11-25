@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_platform.auth.dependencies import AdminUser
+from agent_platform.core.credentials import encrypt_fields, merge_masked_fields
 from agent_platform.db.connection import get_db
 from agent_platform.db.models import Agent, RemoteTool, User
 from agent_platform.tools.builtin import BUILTIN_TOOL_NAMES
@@ -44,7 +45,7 @@ class RemoteToolCreate(BaseModel):
     method: str = Field(..., pattern=r"^(GET|POST|PUT|DELETE|PATCH)$")
     url_template: str = Field(..., min_length=1, max_length=1024)
     parameters_schema: dict = Field(default_factory=lambda: {"type": "object", "properties": {}})
-    headers: dict | None = None
+    headers: dict[str, str] | None = None
     auth_type: str = Field(default="none", pattern=r"^(none|bearer|api_key|basic|custom_header)$")
     auth_config: dict | None = None
     query_params: dict | None = None
@@ -61,7 +62,7 @@ class RemoteToolUpdate(BaseModel):
     method: str | None = Field(default=None, pattern=r"^(GET|POST|PUT|DELETE|PATCH)$")
     url_template: str | None = Field(default=None, min_length=1, max_length=1024)
     parameters_schema: dict | None = None
-    headers: dict | None = None
+    headers: dict[str, str] | None = None
     auth_type: str | None = Field(default=None, pattern=r"^(none|bearer|api_key|basic|custom_header)$")
     auth_config: dict | None = None
     query_params: dict | None = None
@@ -79,7 +80,7 @@ class RemoteToolOut(BaseModel):
     method: str
     url_template: str
     parameters_schema: dict
-    headers: dict | None = None
+    headers: dict[str, str] | None = None
     auth_type: str
     auth_config_masked: dict | None = None
     query_params: dict | None = None
@@ -133,7 +134,7 @@ def _tool_to_dict(tool: RemoteTool) -> dict:
         "method": tool.method,
         "url_template": tool.url_template,
         "parameters_schema": tool.parameters_schema or {},
-        "headers": tool.headers,
+        "headers": _mask_auth_config(tool.headers),
         "auth_type": tool.auth_type,
         "auth_config_masked": _mask_auth_config(tool.auth_config),
         "query_params": tool.query_params,
@@ -147,7 +148,7 @@ def _tool_to_dict(tool: RemoteTool) -> dict:
 
 
 async def _check_name_conflict(
-    db: AsyncSession, name: str, request: Request, exclude_id: UUID | None = None
+    db: AsyncSession, name: str, request: Request, tenant_id: UUID, exclude_id: UUID | None = None
 ) -> None:
     """Check if tool name conflicts with built-in, MCP, or other remote tools."""
     # Check built-in names
@@ -156,7 +157,7 @@ async def _check_name_conflict(
 
     # Check MCP tool names
     mcp_manager = getattr(request.app.state, "mcp_manager", None)
-    if mcp_manager and mcp_manager.is_mcp_tool(name):
+    if mcp_manager and mcp_manager.server_for_tool(name, tenant_id):
         raise HTTPException(status_code=400, detail=f"工具名称 '{name}' 与 MCP 工具冲突")
 
     # Check other remote tools
@@ -193,7 +194,7 @@ async def create_remote_tool(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict:
     """Create a new remote tool owned by the caller's tenant."""
-    await _check_name_conflict(db, req.name, request)
+    await _check_name_conflict(db, req.name, request, user.tenant_id)
 
     tool = RemoteTool(
         tenant_id=user.tenant_id,
@@ -203,9 +204,9 @@ async def create_remote_tool(
         method=req.method,
         url_template=req.url_template,
         parameters_schema=req.parameters_schema,
-        headers=req.headers,
+        headers=encrypt_fields(req.headers),
         auth_type=req.auth_type,
-        auth_config=req.auth_config,
+        auth_config=encrypt_fields(req.auth_config),
         query_params=req.query_params,
         body_template=req.body_template,
         response_extract=req.response_extract,
@@ -258,10 +259,11 @@ async def update_remote_tool(
         raise HTTPException(status_code=404, detail="远程工具不存在")
 
     old_name = tool.name
+    old_auth_type = tool.auth_type
 
     # Check name conflict if name changed
     if req.name is not None and req.name != old_name:
-        await _check_name_conflict(db, req.name, request, exclude_id=tool_id)
+        await _check_name_conflict(db, req.name, request, tool.tenant_id, exclude_id=tool_id)
 
     # Apply updates
     if req.name is not None:
@@ -277,11 +279,12 @@ async def update_remote_tool(
     if req.parameters_schema is not None:
         tool.parameters_schema = req.parameters_schema
     if req.headers is not None:
-        tool.headers = req.headers
+        tool.headers = encrypt_fields(merge_masked_fields(req.headers, tool.headers))
     if req.auth_type is not None:
         tool.auth_type = req.auth_type
     if req.auth_config is not None:
-        tool.auth_config = req.auth_config
+        previous = tool.auth_config if req.auth_type in (None, old_auth_type) else None
+        tool.auth_config = encrypt_fields(merge_masked_fields(req.auth_config, previous))
     if req.query_params is not None:
         tool.query_params = req.query_params
     if req.body_template is not None:
@@ -397,17 +400,14 @@ async def test_remote_tool(
     if not remote_manager:
         raise HTTPException(status_code=503, detail="Remote Tool Manager 未初始化")
 
-    # Temporarily register if not active
     config = RemoteToolConfig.from_db(tool)
-    if not remote_manager.is_remote_tool(tool.name):
-        await remote_manager.add_tool(config)
 
     executor = None
     try:
         from agent_platform.tools.remote.executor import RemoteToolExecutor
 
         executor = RemoteToolExecutor(remote_manager)
-        response_body = await executor.call(tool.name, req.arguments)
+        response_body = await executor.call_config(config, req.arguments)
         return {
             "success": True,
             "status_code": 200,
@@ -431,6 +431,3 @@ async def test_remote_tool(
     finally:
         if executor is not None:
             await executor.aclose()
-        # Clean up temp registration if tool is not active
-        if not tool.is_active:
-            await remote_manager.remove_tool(tool.name)

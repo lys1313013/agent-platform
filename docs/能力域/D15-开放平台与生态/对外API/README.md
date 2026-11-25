@@ -182,7 +182,7 @@ POST /api/agents/{agent_id}/execute
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `user_input` | string | ✓ | 用户消息文本 |
-| `variables` | object | ✗ | 初始变量键值对，用于传递业务上下文 |
+| `variables` | object | ✗ | 仅送入本轮模型的 JSON 业务上下文，最多 32 KiB（UTF-8）。会话历史中的用户消息只保存 `user_input`。后续调用若仍需要这些变量，请再次传入 |
 | `session_rid` | string | ✗ | 复用已有 Session 进行多轮对话 |
 
 **Response** (200 OK):
@@ -624,7 +624,7 @@ export const agentApiApi = {
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `user_input` | string | ✓ | 用户消息文本 |
-| `variables` | object | ✗ | 初始变量键值对，用于传递业务上下文 |
+| `variables` | object | ✗ | 仅送入本轮模型的 JSON 业务上下文，最多 32 KiB（UTF-8）。会话历史中的用户消息只保存 `user_input`。后续调用若仍需要这些变量，请再次传入 |
 | `session_rid` | string | ✗ | 复用已有 Session 进行多轮对话 |
 
 **输出**:
@@ -824,3 +824,5 @@ POST   /api/sessions/{session_id}/clear               → 清空会话
 DELETE /api/sessions/{session_id}                     → 删除会话
 POST   /api/sessions/{session_id}/messages/{id}/feedback → 消息反馈
 ```
+
+已发布版本按快照中的标识解析绑定的技能、知识库、图知识库和子智能体，并按执行用户及租户校验当前可见性。早期版本没有记录图知识库标识，沿用当前可见图知识库绑定。重新发布后，图知识库绑定随版本固定。

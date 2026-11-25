@@ -60,6 +60,11 @@ async def log_event(user_id: UUID, session_id: UUID, event: dict) -> None:
         logger.warning("task_event_log_write_failed", session_id=str(session_id))
 
 
+async def clear_events(user_id: UUID, session_id: UUID) -> None:
+    """Expire replay immediately when the caller explicitly clears the session."""
+    await _redis().delete(_stream_key(user_id, session_id))
+
+
 async def read_events(user_id: UUID, session_id: UUID) -> list[tuple[str, dict]]:
     """全量读出会话事件，返回 [(stream_id, event), ...]。"""
     try:

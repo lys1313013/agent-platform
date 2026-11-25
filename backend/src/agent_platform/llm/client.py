@@ -176,6 +176,7 @@ class LLMMessage:
     # Per-request runtime context (clock, taint notices). Never part of the
     # cached system prefix.
     transient: bool = False
+    omit_from_trace: bool = False
 
 
 # ---- Provider Interface ----
@@ -272,7 +273,7 @@ class OpenAIProvider(LLMProvider):
         mt = max_tokens if max_tokens is not None else self.default_max_tokens
         t_start = time.monotonic()
         retries = 0
-        cache_kwargs = self._prompt_cache_kwargs(openai_messages, tools)
+        cache_kwargs = self._prompt_cache_kwargs(messages, tools)
 
         async def _call():
             nonlocal retries
@@ -368,6 +369,9 @@ class OpenAIProvider(LLMProvider):
         if self.langfuse_client and not is_private_browser_run():
             from agent_platform.observation import get_current_observation
             parent = get_current_observation()
+            trace_messages = openai_messages
+            if any(message.omit_from_trace for message in messages):
+                trace_messages = self._to_openai_messages([m for m in messages if not m.omit_from_trace])
             factory = parent.start_observation if parent else self.langfuse_client.start_observation
             gen_obs = factory(
                 name="OpenAI Chat Completion",
@@ -377,7 +381,7 @@ class OpenAIProvider(LLMProvider):
                     "temperature": temp,
                     "max_tokens": str(mt) if mt else None,
                 },
-                input=sanitize_messages_for_trace(openai_messages),
+                input=sanitize_messages_for_trace(trace_messages),
             )
 
         accumulated_text = ""
@@ -385,7 +389,7 @@ class OpenAIProvider(LLMProvider):
         last_usage = None
 
         try:
-            cache_kwargs = self._prompt_cache_kwargs(openai_messages, tools)
+            cache_kwargs = self._prompt_cache_kwargs(messages, tools)
 
             async def _open_stream():
                 nonlocal retries
@@ -413,7 +417,7 @@ class OpenAIProvider(LLMProvider):
                 else:
                     stream = await _open_stream()
             except Exception as e:
-                llm_error_type = "server_error"
+                llm_error_type = "timeout" if isinstance(e, openai.APITimeoutError) else "server_error"
                 logger.warning("LLM stream connection failed after retries (OpenAI)", model=self.model, error=str(e))
                 if gen_obs:
                     gen_obs.update(level="ERROR", status_message=str(e))
@@ -446,13 +450,6 @@ class OpenAIProvider(LLMProvider):
                     gen_obs.update(level="ERROR", status_message=str(e))
                     gen_obs.end()
                 raise LLMStreamError(f"LLM 流式连接中断: {e}") from e
-            except openai.APIConnectionError as e:
-                llm_error_type = "connection"
-                logger.warning("LLM API connection error (OpenAI)", model=self.model, error=str(e))
-                if gen_obs:
-                    gen_obs.update(level="ERROR", status_message=str(e))
-                    gen_obs.end()
-                raise LLMStreamError(f"LLM API 连接失败: {e}") from e
             except openai.APITimeoutError as e:
                 llm_error_type = "timeout"
                 logger.warning("LLM API timeout (OpenAI)", model=self.model, error=str(e))
@@ -460,6 +457,19 @@ class OpenAIProvider(LLMProvider):
                     gen_obs.update(level="ERROR", status_message=str(e))
                     gen_obs.end()
                 raise LLMStreamError(f"LLM API 超时: {e}") from e
+            except openai.APIConnectionError as e:
+                llm_error_type = "connection"
+                logger.warning("LLM API connection error (OpenAI)", model=self.model, error=str(e))
+                if gen_obs:
+                    gen_obs.update(level="ERROR", status_message=str(e))
+                    gen_obs.end()
+                raise LLMStreamError(f"LLM API 连接失败: {e}") from e
+        except (asyncio.CancelledError, GeneratorExit):
+            llm_error_type = "interrupted"
+            raise
+        except Exception:
+            llm_error_type = llm_error_type or "server_error"
+            raise
         finally:
             if gen_obs:
                 output = accumulated_text
@@ -761,7 +771,10 @@ class AnthropicProvider(LLMProvider):
         from agent_platform.browser.context import is_private_browser_run
         if self.langfuse_client and not is_private_browser_run():
             from agent_platform.observation import get_current_observation
-            model_input = {"system": system_content, "messages": anthropic_messages}
+            trace_system, trace_messages = system_content, anthropic_messages
+            if any(message.omit_from_trace for message in messages):
+                trace_system, trace_messages = self._to_anthropic_format([m for m in messages if not m.omit_from_trace])
+            model_input = {"system": trace_system, "messages": trace_messages}
             parent = get_current_observation()
             factory = parent.start_observation if parent else self.langfuse_client.start_observation
             gen_obs = factory(
@@ -846,13 +859,6 @@ class AnthropicProvider(LLMProvider):
                 gen_obs.update(level="ERROR", status_message=str(e))
                 gen_obs.end()
             raise LLMStreamError(f"LLM 流式连接中断: {e}") from e
-        except anthropic.APIConnectionError as e:
-            llm_error_type = "connection"
-            logger.warning("LLM API connection error (Anthropic)", model=self.model, error=str(e))
-            if gen_obs:
-                gen_obs.update(level="ERROR", status_message=str(e))
-                gen_obs.end()
-            raise LLMStreamError(f"LLM API 连接失败: {e}") from e
         except anthropic.APITimeoutError as e:
             llm_error_type = "timeout"
             logger.warning("LLM API timeout (Anthropic)", model=self.model, error=str(e))
@@ -860,6 +866,19 @@ class AnthropicProvider(LLMProvider):
                 gen_obs.update(level="ERROR", status_message=str(e))
                 gen_obs.end()
             raise LLMStreamError(f"LLM API 超时: {e}") from e
+        except anthropic.APIConnectionError as e:
+            llm_error_type = "connection"
+            logger.warning("LLM API connection error (Anthropic)", model=self.model, error=str(e))
+            if gen_obs:
+                gen_obs.update(level="ERROR", status_message=str(e))
+                gen_obs.end()
+            raise LLMStreamError(f"LLM API 连接失败: {e}") from e
+        except (asyncio.CancelledError, GeneratorExit):
+            llm_error_type = "interrupted"
+            raise
+        except Exception:
+            llm_error_type = "server_error"
+            raise
         finally:
             if gen_obs:
                 output = accumulated_text

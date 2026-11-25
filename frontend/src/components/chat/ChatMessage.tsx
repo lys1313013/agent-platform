@@ -7,11 +7,12 @@ import type { Message, ToolCallInfo, DelegationInfo, PersistedConfirmation } fro
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import CodeBlock from './CodeBlock';
-import ToolCallCard, { parseWebpageResult } from './ToolCallCard';
+import ToolCallCard from './ToolCallCard';
 import ArtifactLink from './ArtifactLink';
 import DelegationCard from './DelegationCard';
 import { ConfirmationCard } from '../confirmation';
-import FileChangeList, { resolveToolFileChange } from './FileChangeList';
+import { parseWebpageResult, resolveToolFileChange } from './artifacts';
+import FileChangeList from './FileChangeList';
 import { useReasoningVisibility, type ReasoningVisibility } from './useReasoningVisibility';
 
 interface Props {

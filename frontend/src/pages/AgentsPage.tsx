@@ -1,3 +1,4 @@
+import { errorMessage, isFormValidationError } from '@/lib/errors';
 import { usePageQuery, queryChoice } from '@/hooks/usePageQuery';
 import { useState, useEffect, useCallback } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
@@ -60,7 +61,7 @@ export default function AgentsPage() {
       setAgents(a);
       setAllTools(t);
     } catch (err: unknown) {
-      setLoadError(err instanceof Error ? `加载智能体失败：${err.message}` : '加载智能体失败，请重试');
+      setLoadError(err instanceof Error ? `加载智能体失败：${errorMessage(err)}` : '加载智能体失败，请重试');
     } finally {
       setLoading(false);
     }
@@ -129,9 +130,9 @@ export default function AgentsPage() {
         fetchData();
         navigate(`/agents/${created.id}/chat`);
       }
-    } catch (err: any) {
-      if (err?.errorFields) return;
-      message.error(err.message || '操作失败');
+    } catch (err) {
+      if (isFormValidationError(err)) return;
+      message.error(errorMessage(err, '操作失败'));
     } finally {
       setSaving(false);
     }
@@ -142,8 +143,8 @@ export default function AgentsPage() {
       await agentsApi.adminDelete(id);
       message.success('智能体已删除');
       fetchData();
-    } catch (err: any) {
-      message.error(err.message || '删除失败');
+    } catch (err) {
+      message.error(errorMessage(err, '删除失败'));
     }
   };
 

@@ -40,7 +40,7 @@ def make_executor(manager, kind, output):
         executor._authorize_mcp_tool = AsyncMock()
     elif kind == "remote":
         executor.remote_manager = SimpleNamespace(is_remote_tool=lambda _: True)
-        executor.remote_executor = SimpleNamespace(call=handler)
+        executor.remote_executor = SimpleNamespace(call_config=handler)
         # Real tenant ownership is covered by test_remote_api / executor security tests.
         executor._authorize_remote_tool = AsyncMock()
     else:
@@ -104,6 +104,18 @@ async def test_sandbox_only_file_is_explicitly_marked(setup):
     result = await execute(executor)
     assert result.output_file
     assert "durable storage is unavailable" in result.output
+
+
+async def test_sandbox_capture_limit_preserves_partial_file_reference(setup):
+    manager, _, _ = setup
+    output = ToolExecutor._format_exec_result(SimpleNamespace(
+        stdout="x" * 60000, stderr="", exit_code=0, output_truncated=True,
+    ))
+    executor, _ = make_executor(manager, "builtin", output)
+    result = await execute(executor)
+    assert result.success and result.output_file
+    assert result.output.startswith(f"[Captured tool output saved: {result.output_file}]")
+    assert "Sandbox capture limit reached" in result.output
 
 
 async def test_unique_files_and_no_permission_bypass(setup):

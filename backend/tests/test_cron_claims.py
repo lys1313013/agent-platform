@@ -109,15 +109,15 @@ def scheduler_with_job(job, claims):
 @pytest.mark.parametrize("one_shot", [False, True])
 async def test_two_schedulers_only_execute_once(claims_pair, one_shot):
     job_id = uuid4()
-    jobs = [SimpleNamespace(id=job_id, is_active=True,
+    jobs = [SimpleNamespace(id=job_id, schedule_version=job_id, is_active=True,
                             run_at=datetime.now(UTC) if one_shot else None,
                             cron_expr=None if one_shot else "* * * * *") for _ in range(2)]
     schedulers = [scheduler_with_job(job, claim)
                   for job, claim in zip(jobs, claims_pair, strict=True)]
     token = scheduled_run_time.set(datetime.now(UTC))
     try:
-        await asyncio.gather(*(s._execute(job_id) for s in schedulers))
-        await schedulers[1]._execute(job_id)  # arrival after winner has finished
+        await asyncio.gather(*(s._execute(job_id, job_id) for s in schedulers))
+        await schedulers[1]._execute(job_id, job_id)  # arrival after winner has finished
     finally:
         scheduled_run_time.reset(token)
     assert sum(s._execute_job.await_count for s in schedulers) == 1
@@ -126,14 +126,14 @@ async def test_two_schedulers_only_execute_once(claims_pair, one_shot):
 
 
 async def test_failed_attempt_keeps_claim(claims_pair):
-    job = SimpleNamespace(id=uuid4(), is_active=True, run_at=None, cron_expr="* * * * *")
+    job = SimpleNamespace(id=uuid4(), schedule_version=uuid4(), is_active=True, run_at=None, cron_expr="* * * * *")
     first, second = [scheduler_with_job(job, claim) for claim in claims_pair]
     first._execute_job.side_effect = RuntimeError("execution failed")
     token = scheduled_run_time.set(datetime.now(UTC))
     try:
         with pytest.raises(RuntimeError):
-            await first._execute(job.id)
-        await second._execute(job.id)
+            await first._execute(job.id, job.schedule_version)
+        await second._execute(job.id, job.schedule_version)
     finally:
         scheduled_run_time.reset(token)
     second._execute_job.assert_not_awaited()
@@ -181,3 +181,29 @@ async def test_system_jobs_share_occurrence_claim(claims_pair):
     finally:
         scheduled_run_time.reset(token)
     handler.assert_awaited_once()
+
+async def test_stale_one_shot_trigger_cannot_consume_revised_job():
+    claims = AsyncMock()
+    job = SimpleNamespace(id=uuid4(), schedule_version=uuid4(), is_active=True,
+                          run_at=datetime.now(UTC), cron_expr=None)
+    scheduler = scheduler_with_job(job, claims)
+    await scheduler._execute(job.id, uuid4())
+    claims.claim.assert_not_awaited()
+    scheduler._execute_job.assert_not_awaited()
+    assert job.is_active
+
+
+async def test_reconcile_refreshes_schedule_loaded_by_another_replica(monkeypatch):
+    job = SimpleNamespace(id=uuid4(), name="updated", schedule_version=uuid4(), is_active=True,
+                          run_at=datetime.now(UTC) + timedelta(days=1), cron_expr=None)
+    scheduler = scheduler_with_job(job, AsyncMock())
+    scheduler.add_job(job)
+    job.schedule_version = uuid4()
+    from agent_platform.cron_jobs.service import CronJobService
+    monkeypatch.setattr(CronJobService, "get_active_jobs", AsyncMock(return_value=[job]))
+    scheduler._scheduler.start(paused=True)
+    try:
+        await scheduler._reconcile()
+        assert scheduler._scheduler.get_job(str(job.id)).args == (job.id, job.schedule_version)
+    finally:
+        await scheduler.shutdown()

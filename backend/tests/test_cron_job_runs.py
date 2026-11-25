@@ -103,7 +103,7 @@ async def _get_runs(factory, job_id):
 
 async def test_execute_records_run_on_success(engine):
     factory = _factory(engine)
-    job_id, _ = await _create_job(engine)
+    job_id, saved_job = await _create_job(engine)
 
     captured = {}
 
@@ -118,7 +118,7 @@ async def test_execute_records_run_on_success(engine):
         await db.commit()
 
     scheduler = Scheduler(factory, executor=exec_ok)
-    await scheduler._execute(job_id)
+    await scheduler._execute(job_id, saved_job.schedule_version)
 
     assert captured["initial_status"] == "running"
     assert captured["started_at"] is not None
@@ -139,13 +139,13 @@ async def test_execute_records_run_on_success(engine):
 
 async def test_execute_marks_run_failed_when_executor_raises(engine):
     factory = _factory(engine)
-    job_id, _ = await _create_job(engine)
+    job_id, saved_job = await _create_job(engine)
 
     async def exec_fail(job, db, run_id):
         raise RuntimeError("boom")
 
     scheduler = Scheduler(factory, executor=exec_fail)
-    await scheduler._execute(job_id)
+    await scheduler._execute(job_id, saved_job.schedule_version)
 
     runs = await _get_runs(factory, job_id)
     assert len(runs) == 1
@@ -160,13 +160,13 @@ async def test_execute_never_leaves_run_stuck_when_executor_noops(engine):
     """Regression: an executor that returns without finalizing must not leave
     the run stuck at 'running' (e.g. job without message/agent, early return)."""
     factory = _factory(engine)
-    job_id, _ = await _create_job(engine)
+    job_id, saved_job = await _create_job(engine)
 
     async def exec_noop(job, db, run_id):
         pass  # forgets to finalize the run record
 
     scheduler = Scheduler(factory, executor=exec_noop)
-    await scheduler._execute(job_id)
+    await scheduler._execute(job_id, saved_job.schedule_version)
 
     runs = await _get_runs(factory, job_id)
     assert len(runs) == 1
@@ -179,7 +179,7 @@ async def test_execute_never_leaves_run_stuck_when_executor_noops(engine):
 
 async def test_one_shot_job_deactivated_after_execution(engine):
     factory = _factory(engine)
-    job_id, _ = await _create_job(
+    job_id, saved_job = await _create_job(
         engine,
         run_at=datetime.now(UTC) + timedelta(minutes=1),
         cron_expr=None,
@@ -191,7 +191,7 @@ async def test_one_shot_job_deactivated_after_execution(engine):
         await db.commit()
 
     scheduler = Scheduler(factory, executor=exec_ok)
-    await scheduler._execute(job_id)
+    await scheduler._execute(job_id, saved_job.schedule_version)
 
     async with factory() as db:
         job = await db.get(CronJob, job_id)

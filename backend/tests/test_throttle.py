@@ -16,3 +16,13 @@ async def test_claim_message_batch_requires_minimum_delta():
     assert await throttle.claim_message_batch(key, 10, min_delta=4) == 0
     assert await throttle.claim_message_batch(key, 12, min_delta=4) is None
     assert await throttle.claim_message_batch(key, 14, min_delta=4) == 10
+
+
+async def test_failed_summary_can_retry_without_resetting_a_later_claim():
+    key = f"test:batch:{uuid4()}"
+    assert await throttle.claim_message_batch(key, 10, min_delta=4) == 0
+    await throttle.release_message_batch(key, 10, 0)
+    assert await throttle.claim_message_batch(key, 10, min_delta=4) == 0
+    assert await throttle.claim_message_batch(key, 14, min_delta=4) == 10
+    await throttle.release_message_batch(key, 10, 0)
+    assert await throttle.claim_message_batch(key, 16, min_delta=4) is None

@@ -1,3 +1,4 @@
+import { errorMessage, isFormValidationError } from '@/lib/errors';
 import { useState, useEffect, useCallback } from 'react';
 import {
   ApiOutlined,
@@ -28,7 +29,7 @@ import {
   Collapse,
 } from 'antd';
 import { remoteToolsApi } from '@/lib/api';
-import type { RemoteTool, RemoteToolCreate } from '@/lib/types';
+import type { RemoteTool, RemoteToolCreate, AuthType } from '@/lib/types';
 import { useAuthStore } from '@/stores/authStore';
 import { Navigate } from 'react-router-dom';
 import { cn } from '@/lib/utils';
@@ -55,8 +56,53 @@ const AUTH_META: Record<string, { label: string; color: string }> = {
   custom_header: { label: '自定义 Header', color: 'purple' },
 };
 
-type HttpMethod = 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH';
-type AuthType = 'none' | 'bearer' | 'api_key' | 'basic' | 'custom_header';
+type RemoteToolForm = Omit<RemoteToolCreate, 'parameters_schema' | 'body_template' | 'headers' | 'auth_config'> & {
+  parameters_schema?: string;
+  body_template?: string;
+  headers?: string;
+  auth_token?: string;
+  auth_key?: string;
+  auth_username?: string;
+  auth_password?: string;
+  auth_header_name?: string;
+  auth_custom_headers?: string;
+};
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function parseObject(text: string): Record<string, unknown> {
+  let value: unknown;
+  try { value = JSON.parse(text); }
+  catch { throw new Error('JSON 格式不正确'); }
+  if (!isObject(value)) throw new Error('需要 JSON 对象');
+  return value;
+}
+
+function parseHeaders(text: string): Record<string, string> {
+  const headers: Record<string, string> = {};
+  for (const [name, value] of Object.entries(parseObject(text))) {
+    if (typeof value !== 'string') throw new Error('Header 的值必须是字符串');
+    headers[name] = value;
+  }
+  return headers;
+}
+
+function testParameters(schema?: RemoteTool['parameters_schema']) {
+  const properties = schema?.properties;
+  const required = Array.isArray(schema?.required) ? schema.required : [];
+  return Object.entries(isObject(properties) ? properties : {}).map(([key, entry]) => {
+    const property = isObject(entry) ? entry : {};
+    return {
+      key,
+      required: required.includes(key),
+      type: typeof property.type === 'string' ? property.type : '',
+      description: typeof property.description === 'string' ? property.description : '',
+      initial: property.default == null ? '' : String(property.default),
+    };
+  });
+}
 
 export default function RemoteToolManagementPage() {
   const role = useAuthStore((s) => s.role);
@@ -77,13 +123,13 @@ function RemoteToolManagementPageContent() {
   // ---- Edit/Create modal ----
   const [modalOpen, setModalOpen] = useState(false);
   const [editingTool, setEditingTool] = useState<RemoteTool | null>(null);
-  const [form] = Form.useForm();
+  const [form] = Form.useForm<RemoteToolForm>();
   const [authType, setAuthType] = useState<AuthType>('none');
 
   // ---- Test modal ----
   const [testModalOpen, setTestModalOpen] = useState(false);
   const [testTool, setTestTool] = useState<RemoteTool | null>(null);
-  const [testForm] = Form.useForm();
+  const [testForm] = Form.useForm<Record<string, string | boolean>>();
   const [testResult, setTestResult] = useState<{ success: boolean; body: string; error: string | null } | null>(null);
   const [testLoading, setTestLoading] = useState(false);
 
@@ -93,24 +139,14 @@ function RemoteToolManagementPageContent() {
     try {
       const data = await remoteToolsApi.list();
       setTools(data);
-    } catch (err: any) {
-      message.error(`加载远程工具失败：${err.message}`);
+    } catch (err) {
+      message.error(`加载远程工具失败：${errorMessage(err)}`);
     } finally {
       setLoading(false);
     }
   }, [message]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
-
-  // ---- Parse JSON safely ----
-  const parseJSON = (text: string | undefined | null): any => {
-    if (!text?.trim()) return undefined;
-    try {
-      return JSON.parse(text);
-    } catch {
-      throw new Error('JSON 格式不正确');
-    }
-  };
 
   // ---- Modal open/close ----
   const openModal = (tool?: RemoteTool) => {
@@ -153,7 +189,7 @@ function RemoteToolManagementPageContent() {
   };
 
   // ---- Build auth_config from form values ----
-  const buildAuthConfig = (values: any): Record<string, unknown> | undefined => {
+  const buildAuthConfig = (values: RemoteToolForm): Record<string, unknown> | undefined => {
     switch (values.auth_type) {
       case 'bearer':
         return values.auth_token ? { token: values.auth_token } : undefined;
@@ -170,7 +206,7 @@ function RemoteToolManagementPageContent() {
       case 'custom_header': {
         if (!values.auth_custom_headers?.trim()) return undefined;
         try {
-          return { headers: JSON.parse(values.auth_custom_headers) };
+          return { headers: parseHeaders(values.auth_custom_headers) };
         } catch {
           throw new Error('自定义 Header JSON 格式不正确');
         }
@@ -189,18 +225,18 @@ function RemoteToolManagementPageContent() {
       // Parse JSON fields
       let parametersSchema: Record<string, unknown>;
       try {
-        parametersSchema = parseJSON(values.parameters_schema) || { type: 'object', properties: {} };
-      } catch (e: any) {
-        message.error(`参数 Schema ${e.message}`);
+        parametersSchema = values.parameters_schema?.trim() ? parseObject(values.parameters_schema) : { type: 'object', properties: {} };
+      } catch (e) {
+        message.error(`参数 Schema ${errorMessage(e)}`);
         return;
       }
 
       let headers: Record<string, string> | null = null;
       if (values.headers?.trim()) {
         try {
-          headers = parseJSON(values.headers);
-        } catch (e: any) {
-          message.error(`Headers ${e.message}`);
+          headers = parseHeaders(values.headers);
+        } catch (e) {
+          message.error(`Headers ${errorMessage(e)}`);
           return;
         }
       }
@@ -208,9 +244,9 @@ function RemoteToolManagementPageContent() {
       let bodyTemplate: Record<string, unknown> | null = null;
       if (values.body_template?.trim()) {
         try {
-          bodyTemplate = parseJSON(values.body_template);
-        } catch (e: any) {
-          message.error(`请求体模板 ${e.message}`);
+          bodyTemplate = parseObject(values.body_template);
+        } catch (e) {
+          message.error(`请求体模板 ${errorMessage(e)}`);
           return;
         }
       }
@@ -218,8 +254,8 @@ function RemoteToolManagementPageContent() {
       let authConfig: Record<string, unknown> | null = null;
       try {
         authConfig = buildAuthConfig(values) ?? null;
-      } catch (e: any) {
-        message.error(e.message);
+      } catch (e) {
+        message.error(errorMessage(e));
         return;
       }
 
@@ -232,11 +268,11 @@ function RemoteToolManagementPageContent() {
         name: values.name,
         label: values.label,
         description: values.description,
-        method: values.method as HttpMethod,
+        method: values.method,
         url_template: values.url_template,
         parameters_schema: parametersSchema,
         headers,
-        auth_type: values.auth_type as AuthType,
+        auth_type: values.auth_type,
         auth_config: authConfig,
         body_template: bodyTemplate,
         response_extract: values.response_extract || null,
@@ -253,9 +289,9 @@ function RemoteToolManagementPageContent() {
       }
       setModalOpen(false);
       fetchData();
-    } catch (err: any) {
-      if (err?.errorFields) return;
-      message.error(err.message || '操作失败');
+    } catch (err) {
+      if (isFormValidationError(err)) return;
+      message.error(errorMessage(err, '操作失败'));
     } finally {
       setSaving(false);
     }
@@ -268,8 +304,8 @@ function RemoteToolManagementPageContent() {
       await remoteToolsApi.delete(id);
       message.success('远程工具已删除');
       fetchData();
-    } catch (err: any) {
-      message.error(`删除失败：${err.message}`);
+    } catch (err) {
+      message.error(`删除失败：${errorMessage(err)}`);
     } finally {
       setDeletingId(null);
     }
@@ -282,8 +318,8 @@ function RemoteToolManagementPageContent() {
       await remoteToolsApi.toggle(id);
       message.success('状态已更新');
       fetchData();
-    } catch (err: any) {
-      message.error(`操作失败：${err.message}`);
+    } catch (err) {
+      message.error(`操作失败：${errorMessage(err)}`);
     } finally {
       setTogglingId(null);
     }
@@ -295,11 +331,8 @@ function RemoteToolManagementPageContent() {
     setTestResult(null);
     setTestLoading(false);
     // Build form fields from parameters_schema
-    const props = (tool.parameters_schema as any)?.properties || {};
-    const defaults: Record<string, string> = {};
-    for (const [key, schema] of Object.entries(props)) {
-      defaults[key] = (schema as any)?.default?.toString() || '';
-    }
+    const defaults = Object.fromEntries(testParameters(tool.parameters_schema).map(({ key, initial }) => [key, initial]));
+    testForm.resetFields();
     testForm.setFieldsValue(defaults);
     setTestModalOpen(true);
   };
@@ -312,14 +345,14 @@ function RemoteToolManagementPageContent() {
       setTestResult(null);
 
       // Convert empty strings to proper types based on schema
-      const props = (testTool.parameters_schema as any)?.properties || {};
+      const parameters = testParameters(testTool.parameters_schema);
       const args: Record<string, unknown> = {};
-      for (const [key, value] of Object.entries(values)) {
+      for (const { key, type } of parameters) {
+        const value = values[key];
         if (value === '' || value === undefined) continue;
-        const propSchema = props[key] as any;
-        if (propSchema?.type === 'number' || propSchema?.type === 'integer') {
+        if (type === 'number' || type === 'integer') {
           args[key] = Number(value);
-        } else if (propSchema?.type === 'boolean') {
+        } else if (type === 'boolean') {
           args[key] = value === 'true' || value === true;
         } else {
           args[key] = value;
@@ -332,12 +365,12 @@ function RemoteToolManagementPageContent() {
         body: result.response_body || '',
         error: result.error,
       });
-    } catch (err: any) {
-      if (err?.errorFields) return;
+    } catch (err) {
+      if (isFormValidationError(err)) return;
       setTestResult({
         success: false,
         body: '',
-        error: err.message || '测试失败',
+        error: errorMessage(err, '测试失败'),
       });
     } finally {
       setTestLoading(false);
@@ -756,26 +789,22 @@ function RemoteToolManagementPageContent() {
             </div>
 
             <Form form={testForm} layout="vertical">
-              {(() => {
-                const props = (testTool?.parameters_schema as any)?.properties || {};
-                const required = ((testTool?.parameters_schema as any)?.required || []) as string[];
-                return Object.entries(props).map(([key, schema]: [string, any]) => (
-                  <Form.Item
-                    key={key}
-                    name={key}
-                    label={
-                      <span>
-                        <code className="font-mono">{key}</code>
-                        {required.includes(key) && <span className="text-red-500 ml-1">*</span>}
-                      </span>
-                    }
-                    tooltip={schema.description}
-                    rules={required.includes(key) ? [{ required: true, message: `${key} 为必填` }] : []}
-                  >
-                    <Input placeholder={schema.description || schema.type || ''} />
-                  </Form.Item>
-                ));
-              })()}
+              {testParameters(testTool?.parameters_schema).map(({ key, type, description, required }) => (
+                <Form.Item
+                  key={key}
+                  name={key}
+                  label={
+                    <span>
+                      <code className="font-mono">{key}</code>
+                      {required && <span className="text-red-500 ml-1">*</span>}
+                    </span>
+                  }
+                  tooltip={description}
+                  rules={required ? [{ required: true, message: `${key} 为必填` }] : []}
+                >
+                  <Input placeholder={description || type || ''} />
+                </Form.Item>
+              ))}
             </Form>
 
             <Button

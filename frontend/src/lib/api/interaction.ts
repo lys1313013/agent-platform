@@ -58,13 +58,14 @@ export const uiActionsApi = {
     );
   },
 
-  /** cancel_all via sendBeacon — for tab unload (beforeunload) */
+  /** Keep the unload request alive while keeping credentials out of its URL. */
   cancelAllBeacon(sessionId: string) {
-    const token = tokenStorage.getAccess() || '';
-    const blob = new Blob([], { type: 'application/json' });
-    navigator.sendBeacon(
-      `${API_BASE}/ui-actions/sessions/${sessionId}/cancel_all?token=${encodeURIComponent(token)}`,
-      blob,
-    );
+    const token = tokenStorage.getAccess();
+    if (!token) return;
+    void fetch(`${API_BASE}/ui-actions/sessions/${sessionId}/cancel_all`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      keepalive: true,
+    }).catch(() => { /* The tab is closing. */ });
   },
 };

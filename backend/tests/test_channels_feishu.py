@@ -59,12 +59,6 @@ from agent_platform.channels.pipeline import (
     _build_image_data_uri,
     _byte_truncate,
     _collect_image_attachments,
-    _dedup,
-    _event_seen,
-    _pending_attachments,
-    _pending_key,
-    _PendingAttachment,
-    _pop_pending,
     _split_text,
     _StreamingReply,
     _strip_internal_keys,
@@ -254,57 +248,6 @@ def test_normalize_malformed_content_yields_empty_text() -> None:
 
 # ---------------------------------------------------------------------------
 # pipeline — dedup & text splitting
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture(autouse=True)
-def _clear_dedup_cache():
-    _event_seen.clear()
-    yield
-    _event_seen.clear()
-
-
-def test_dedup_detects_duplicates() -> None:
-    assert _dedup("evt_a") is False
-    assert _dedup("evt_a") is True
-    assert _dedup("evt_b") is False
-
-
-def test_dedup_expires_old_entries(monkeypatch: pytest.MonkeyPatch) -> None:
-    assert _dedup("evt_old") is False
-    # 快进 2 小时，超过 1h TTL；触发 pruning 需要 >10000 条，
-    # 直接塞入过期时间戳模拟。
-    _event_seen["evt_old"] = time.monotonic() - 7200
-    for i in range(10_001):
-        _event_seen[f"filler_{i}"] = time.monotonic() - 7200
-    assert _dedup("evt_new") is False
-    # 过期条目被清理，evt_old 不再被视为重复
-    assert "evt_old" not in _event_seen
-
-
-def test_pending_attachment_roundtrip() -> None:
-    _pending_attachments.clear()
-    key = _pending_key(uuid4(), "oc_chat", "ou_user")
-    assert key.endswith("oc_chat:ou_user")
-    ref = {"file_id": "abc123", "filename": "x.pdf", "workspace_path": "uploads/abc_x.pdf"}
-    _pending_attachments[key] = [_PendingAttachment(ref=ref, ts=time.monotonic())]
-    assert _pop_pending(key) == [ref]
-    # 已被清空，再次弹出为空
-    assert _pop_pending(key) == []
-
-
-def test_pending_attachment_expires(monkeypatch: pytest.MonkeyPatch) -> None:
-    _pending_attachments.clear()
-    key = _pending_key(uuid4(), "oc_chat2", "ou_user2")
-    ref = {"file_id": "abc", "filename": "x.pdf", "workspace_path": "uploads/abc_x.pdf"}
-    _pending_attachments[key] = [
-        _PendingAttachment(ref=ref, ts=time.monotonic() - 4000)  # 超过 30min TTL
-    ]
-    assert _pop_pending(key) == []
-
-
-# ---------------------------------------------------------------------------
-# 图片多模态直喂 — 纯函数
 # ---------------------------------------------------------------------------
 
 
@@ -1020,7 +963,8 @@ async def test_adapter_send_mp3_falls_back_to_file() -> None:
 
 
 def _make_webhook_app(channel: SimpleNamespace) -> tuple[FastAPI, MagicMock]:
-    pipeline = MagicMock()
+    pipeline = MagicMock(receive=AsyncMock())
+    pipeline.inbox.check_available = AsyncMock()
     register_webhook(channel.channel_key, pipeline, channel)
     app = FastAPI()
     app.include_router(build_webhook_router())
@@ -1106,8 +1050,8 @@ async def test_webhook_dispatches_message_event() -> None:
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         resp = await c.post("/api/channels/feishu/events/k_evt", json=_message_event_payload())
     assert resp.status_code == 200
-    pipeline.submit.assert_called_once()
-    inbound = pipeline.submit.call_args[0][0]
+    pipeline.receive.assert_called_once()
+    inbound = pipeline.receive.call_args[0][0]
     assert isinstance(inbound, InboundEvent)
     assert inbound.text == "webhook hi"
     assert inbound.event_id == "evt_wh_1"
@@ -1120,7 +1064,7 @@ async def test_webhook_ignores_non_message_events() -> None:
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         resp = await c.post("/api/channels/feishu/events/k_other", json=payload)
     assert resp.status_code == 200
-    pipeline.submit.assert_not_called()
+    pipeline.receive.assert_not_called()
 
 
 async def test_webhook_signature_uses_encrypt_key_not_verification_token() -> None:
@@ -1151,7 +1095,7 @@ async def test_webhook_signature_uses_encrypt_key_not_verification_token() -> No
             },
         )
         assert resp.status_code == 200
-    pipeline.submit.assert_called_once()
+    pipeline.receive.assert_called_once()
 
 
 async def test_webhook_decrypts_encrypted_payload() -> None:
@@ -1173,12 +1117,13 @@ async def test_webhook_decrypts_encrypted_payload() -> None:
             },
         )
     assert resp.status_code == 200
-    pipeline.submit.assert_called_once()
-    assert pipeline.submit.call_args[0][0].event_id == "evt_enc"
+    pipeline.receive.assert_called_once()
+    assert pipeline.receive.call_args[0][0].event_id == "evt_enc"
 
 
 async def test_webhook_transport_stop_unregisters() -> None:
-    pipeline = MagicMock()
+    pipeline = MagicMock(receive=AsyncMock())
+    pipeline.inbox.check_available = AsyncMock()
     pipeline.channel = SimpleNamespace(channel_key="k_stop")
     register_webhook("k_stop", pipeline, SimpleNamespace())
     transport = FeishuWebhookTransport(pipeline, channel=pipeline.channel)
@@ -1193,7 +1138,8 @@ async def test_webhook_transport_stop_unregisters() -> None:
 
 
 def _make_ws_transport() -> tuple[FeishuWebSocketTransport, MagicMock]:
-    pipeline = MagicMock()
+    pipeline = MagicMock(receive=AsyncMock())
+    pipeline.inbox.check_available = AsyncMock()
     pipeline.channel = SimpleNamespace(id=uuid4())
     return FeishuWebSocketTransport(app_id=BOT_APP_ID, app_secret="s", pipeline=pipeline), pipeline
 
@@ -1229,8 +1175,8 @@ async def test_ws_data_frame_dispatches_and_acks() -> None:
     raw = _build_frame(method=1, headers={"type": "event", "message_id": "m1"}, payload=payload)
     await transport._handle_frame(raw, ws)
 
-    pipeline.submit.assert_called_once()
-    assert pipeline.submit.call_args[0][0].event_id == "evt_ws"
+    pipeline.receive.assert_called_once()
+    assert pipeline.receive.call_args[0][0].event_id == "evt_ws"
 
     # ACK：回显帧并附带 {"code": 200} 与 biz_rt 头
     assert len(ws.sent) == 1
@@ -1247,7 +1193,7 @@ async def test_ws_non_event_frame_ignored() -> None:
     ws = _FakeWS()
     raw = _build_frame(method=1, headers={"type": "something_else"}, payload=b"{}")
     await transport._handle_frame(raw, ws)
-    pipeline.submit.assert_not_called()
+    pipeline.receive.assert_not_called()
     assert ws.sent == []
 
 
@@ -1268,7 +1214,7 @@ async def test_ws_invalid_frame_does_not_crash() -> None:
     transport, pipeline = _make_ws_transport()
     ws = _FakeWS()
     await transport._handle_frame(b"\x08", ws)  # 截断的 protobuf
-    pipeline.submit.assert_not_called()
+    pipeline.receive.assert_not_called()
     assert ws.sent == []
 
 
@@ -1574,7 +1520,7 @@ async def test_webhook_without_authentication_fails_closed(payload):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
         response = await client.post("/api/channels/webhook/no_auth", json=payload)
     assert response.status_code == 401
-    pipeline.submit.assert_not_called()
+    pipeline.receive.assert_not_called()
 
 
 @pytest.mark.parametrize("token", [None, "wrong"])
@@ -1586,7 +1532,7 @@ async def test_plaintext_webhook_requires_payload_token(token):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
         response = await client.post("/api/channels/webhook/plain", json=payload)
     assert response.status_code == 401
-    pipeline.submit.assert_not_called()
+    pipeline.receive.assert_not_called()
 
 
 async def test_encrypted_webhook_rejects_plaintext_downgrade():
@@ -1599,7 +1545,7 @@ async def test_encrypted_webhook_rejects_plaintext_downgrade():
             "X-Lark-Request-Timestamp": "1700000000", "X-Lark-Request-Nonce": "n1",
         })
     assert response.status_code == 401
-    pipeline.submit.assert_not_called()
+    pipeline.receive.assert_not_called()
 
 
 @pytest.mark.parametrize("signing_key", [None, "vtok"])
@@ -1614,7 +1560,7 @@ async def test_encrypted_webhook_rejects_missing_or_wrong_signing_key(signing_ke
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
         response = await client.post("/api/channels/webhook/wrong_sig", content=body, headers=headers)
     assert response.status_code == 401
-    pipeline.submit.assert_not_called()
+    pipeline.receive.assert_not_called()
 
 
 async def test_encrypted_url_challenge_works_without_signature_headers():
@@ -1625,4 +1571,4 @@ async def test_encrypted_url_challenge_works_without_signature_headers():
         response = await client.post("/api/channels/webhook/encrypted_challenge", json={"encrypt": _encrypt("enc-key", payload)})
     assert response.status_code == 200
     assert response.json() == {"challenge": "valid-challenge"}
-    pipeline.submit.assert_not_called()
+    pipeline.receive.assert_not_called()

@@ -76,6 +76,7 @@ async def connect_mcp_servers(manager: MCPManager, factory) -> None:
         async def connect_one(server) -> None:
             config = {
                 "name": server.name,
+                "tenant_id": server.tenant_id,
                 "transport_type": server.transport_type,
                 "url": server.url,
                 "headers": {

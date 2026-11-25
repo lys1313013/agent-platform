@@ -116,6 +116,7 @@ def _build_config(server: MCPServer) -> dict:
         "transport_type": server.transport_type,
         "url": server.url,
         "headers": _decrypt_headers(server.headers),
+        "tenant_id": server.tenant_id,
         "tool_prefix": server.tool_prefix,
         "timeout": server.timeout,
     }
@@ -134,7 +135,7 @@ def _get_live_tools(mcp_manager, server: MCPServer) -> tuple[int, list[dict]]:
                 "description": t.description,
                 "input_schema": t.input_schema,
             }
-            for t in conn.tools
+            for t in mcp_manager.get_server_tools(server.id) or []
         ]
         return len(tools), tools
     if server.is_active:

@@ -5,7 +5,7 @@ import { Alert, Spin, App } from 'antd';
 import { CloseOutlined, DeleteOutlined, PlusOutlined } from '@ant-design/icons';
 import { useChatStore } from '@/stores/chatStore';
 import { usePetStore } from '@/stores/petStore';
-import { chatApi, petsApi } from '@/lib/api';
+import { chatApi } from '@/lib/api';
 import { useChatStream } from '@/hooks/useChatStream';
 import ChatRunNotice from '@/components/chat/ChatRunNotice';
 import { useMessageQueue } from '@/hooks/useMessageQueue';
@@ -28,9 +28,9 @@ interface Props {
   pet: UserPet | null;
   sessionId: string | null;
   agentId: string | null;
+  workspaceId: string | null;
   onClose: () => void;
-  /** 新建会话后回调，由父组件切换 chatDlg 的 sessionId */
-  onSessionChange?: (sessionId: string, agentId: string | null) => void;
+  onNewConversation: () => Promise<void>;
 }
 
 function defaultPos() {
@@ -45,10 +45,9 @@ function defaultPos() {
  * 复用 chatStore 的 messages 缓存按 sessionId 读写，不切换全局
  * activeSessionId，因此不影响主界面正在查看的会话。
  */
-export default function PetChatPanel({ open, pet, sessionId, agentId, onClose, onSessionChange }: Props) {
+export default function PetChatPanel({ open, pet, sessionId, agentId, workspaceId, onClose, onNewConversation }: Props) {
   const { message, modal } = App.useApp();
   const addMessage = useChatStore((s) => s.addMessage);
-  const selectedWorkspaceId = useChatStore((s) => s.selectedWorkspaceId);
   const deleteSession = useChatStore((s) => s.deleteSession);
   const messages = useChatStore((s) => (sessionId ? s.messages[sessionId] : undefined)) ?? [];
   const flushNextRef = useRef<() => void>(() => {});
@@ -127,9 +126,8 @@ export default function PetChatPanel({ open, pet, sessionId, agentId, onClose, o
     setNewSessionLoading(true);
     void (async () => {
       try {
-        const r = await petsApi.petChat(pet.id, { forceNew: true, workspaceId: selectedWorkspaceId });
+        await onNewConversation();
         setError(null);
-        onSessionChange?.(r.conversation_id, r.agent_id ?? null);
       } catch (err) {
         message.warning(err instanceof Error ? err.message : '新建会话失败');
       } finally {
@@ -140,7 +138,7 @@ export default function PetChatPanel({ open, pet, sessionId, agentId, onClose, o
 
   const handleClose = onClose;
 
-  const handleSendRef = useRef<(content: string, attachments?: ChatAttachment[], fileAttachments?: FileAttachmentRef[]) => Promise<void> | void>();
+  const handleSendRef = useRef<(content: string, attachments?: ChatAttachment[], fileAttachments?: FileAttachmentRef[]) => Promise<void | boolean> | void>();
   const { queue, enqueue, remove: removeQueued, clear: clearQueue, flushNext, sendNow: sendQueuedNow } =
     useMessageQueue(
       (content, attachments, fileAttachments) => { void handleSendRef.current?.(content, attachments, fileAttachments); },
@@ -156,17 +154,9 @@ export default function PetChatPanel({ open, pet, sessionId, agentId, onClose, o
     async (content: string, attachments: ChatAttachment[] = [], fileAttachments?: FileAttachmentRef[], browser?: BrowserAuthorization) => {
       if (!sessionId) return;
 
-      addMessage(sessionId, {
-        id: `msg-user-${Date.now()}`,
-        role: 'user',
-        content,
-        attachments: attachments.length > 0 ? attachments : null,
-        file_attachments: fileAttachments && fileAttachments.length > 0 ? fileAttachments : null,
-        created_at: new Date().toISOString(),
-      });
 
       const consume = beginTurn(sessionId);
-      usePetStore.getState().startTask(sessionId, content || '文件任务', agentId ?? undefined);
+      usePetStore.getState().startTask(sessionId, content || '文件任务', agentId ?? undefined, workspaceId);
 
       const controller = chatApi.stream(
         {
@@ -182,19 +172,29 @@ export default function PetChatPanel({ open, pet, sessionId, agentId, onClose, o
       );
 
       abortRef.current = controller;
+      if (!await controller.accepted) return false;
+      addMessage(sessionId, {
+        id: `msg-user-${Date.now()}`,
+        role: 'user',
+        content,
+        attachments: attachments.length > 0 ? attachments : null,
+        file_attachments: fileAttachments && fileAttachments.length > 0 ? fileAttachments : null,
+        created_at: new Date().toISOString(),
+      });
+      return true;
     },
-    [sessionId, agentId, addMessage, beginTurn, abortRef],
+    [sessionId, agentId, workspaceId, addMessage, beginTurn, abortRef],
   );
 
   handleSendRef.current = handleSend;
 
-  const handleEditResend = (content: string) => {
+  const handleEditResend = useCallback((content: string) => {
     if (streaming.isStreaming) {
       enqueue(content, []);
       return;
     }
     handleSend(content);
-  };
+  }, [streaming.isStreaming, enqueue, handleSend]);
 
   const handleStop = () => {
     interruptStream();
@@ -362,7 +362,10 @@ export default function PetChatPanel({ open, pet, sessionId, agentId, onClose, o
           </div>
         ) : (
           <MessageList
-            messages={messages.filter((item) => !(streaming.isStreaming && run && item.id === run.assistant_message_id))}
+            messages={messages}
+            streamingMessageId={streaming.isStreaming ? run?.assistant_message_id : undefined}
+            conversationId={sessionId}
+            workspaceId={workspaceId}
             streaming={streaming}
             compact
             emptyTitle={pet ? `和 ${pet.package.display_name} 打个招呼吧` : '和宠物打个招呼吧'}

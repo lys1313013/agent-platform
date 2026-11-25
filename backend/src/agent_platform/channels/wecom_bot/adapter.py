@@ -54,8 +54,7 @@ class WeComBotAdapter(ChannelAdapter):
     ):
         self.channel_id = channel_id
         self.pipeline = pipeline
-        self._stream_req_id = ""
-        self._stream_chatid = ""
+        self._stream_recipients: dict[str, tuple[str, str]] = {}
 
     @property
     def ws(self) -> WeComBotTransport | None:
@@ -128,37 +127,39 @@ class WeComBotAdapter(ChannelAdapter):
         if not req_id:
             return None
         stream_id = _new_stream_id()
-        self._stream_req_id = req_id
-        self._stream_chatid = self._chatid(event)
         try:
             await self._stream_reply(
                 req_id, stream_id, text or _THINKING_MESSAGE, finish=False
             )
+            self._stream_recipients[stream_id] = (req_id, self._chatid(event))
             return stream_id
         except Exception:
             logger.warning("wecom_bot_stream_start_failed", exc_info=True)
-            self._stream_req_id = ""
             return None
 
     async def update_stream(self, stream_id: str, text: str, sequence: int) -> bool:
-        if not self._stream_req_id:
+        recipient = self._stream_recipients.get(stream_id)
+        if recipient is None:
             return False
+        req_id, _ = recipient
         try:
-            await self._stream_reply(self._stream_req_id, stream_id, text, finish=False)
+            await self._stream_reply(req_id, stream_id, text, finish=False)
             return True
         except Exception:
             logger.warning("wecom_bot_stream_update_failed", exc_info=True)
             return False
 
     async def finish_stream(self, stream_id: str, text: str, sequence: int) -> bool:
-        if not self._stream_req_id:
+        recipient = self._stream_recipients.pop(stream_id, None)
+        if recipient is None:
             return False
+        req_id, chat_id = recipient
         content = text or _STREAM_FALLBACK_TEXT
         try:
-            await self._stream_reply(self._stream_req_id, stream_id, content, finish=True)
+            await self._stream_reply(req_id, stream_id, content, finish=True)
             return True
         except StreamExpiredError:
-            await self._fallback_proactive(self._stream_chatid, content)
+            await self._fallback_proactive(chat_id, content)
             return True
         except Exception:
             logger.warning("wecom_bot_stream_finish_failed", exc_info=True)
@@ -224,6 +225,7 @@ class WeComBotAdapter(ChannelAdapter):
             return None
 
     async def stop(self) -> None:
+        self._stream_recipients.clear()
         if self.transport:
             await self.transport.stop()
 

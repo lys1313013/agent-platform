@@ -8,7 +8,7 @@ from __future__ import annotations
 from uuid import UUID
 
 import structlog
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_platform.db.models import (
@@ -16,12 +16,12 @@ from agent_platform.db.models import (
     GraphChunk,
     GraphDocument,
     GraphEntity,
+    GraphExtractionChunk,
     GraphExtractionJob,
     GraphKnowledgeBase,
     GraphRelationship,
 )
 from agent_platform.graph_knowledge.chunking import chunk_text
-from agent_platform.graph_knowledge.extraction import start_extraction_job
 
 logger = structlog.get_logger(__name__)
 
@@ -153,6 +153,12 @@ async def update_kb(
 
 async def delete_kb(db: AsyncSession, kb: GraphKnowledgeBase) -> None:
     kb_id = kb.id
+    await db.scalar(select(GraphKnowledgeBase.id).where(GraphKnowledgeBase.id == kb_id).with_for_update())
+    jobs = select(GraphExtractionJob.id).where(GraphExtractionJob.knowledge_base_id == kb_id)
+    # A concurrent first claim may still be creating its manifest. Finish it
+    # before deleting checkpoints, including for installations without foreign keys.
+    await db.execute(jobs.with_for_update())
+    await db.execute(delete(GraphExtractionChunk).where(GraphExtractionChunk.job_id.in_(jobs)))
     await db.execute(
         delete(AgentGraphKnowledgeBase).where(
             AgentGraphKnowledgeBase.knowledge_base_id == kb_id
@@ -167,19 +173,12 @@ async def delete_kb(db: AsyncSession, kb: GraphKnowledgeBase) -> None:
     await db.execute(
         delete(GraphEntity).where(GraphEntity.knowledge_base_id == kb_id)
     )
-    chunk_ids = (
-        await db.execute(
-            select(GraphChunk.id).where(GraphChunk.knowledge_base_id == kb_id)
-        )
-    ).scalars().all()
     await db.execute(
         delete(GraphChunk).where(GraphChunk.knowledge_base_id == kb_id)
     )
     await db.execute(
         delete(GraphDocument).where(GraphDocument.knowledge_base_id == kb_id)
     )
-    # Silence unused warning; chunk_ids reserved for future provenance cleanup.
-    _ = chunk_ids
     await db.delete(kb)
     await db.flush()
 
@@ -305,20 +304,22 @@ async def delete_document(
     return True
 
 
-async def list_chunks(db: AsyncSession, doc_id: UUID, user) -> list[dict]:
-    result = await db.execute(
-        select(GraphChunk)
-        .where(GraphChunk.document_id == doc_id)
-        .order_by(GraphChunk.seq)
-    )
-    return [
-        {
-            "id": chunk.id,
-            "seq": chunk.seq,
-            "content": chunk.content,
-        }
-        for chunk in result.scalars().all()
-    ]
+async def list_chunks(db: AsyncSession, kb_id: UUID, doc_id: UUID, user) -> list[dict] | None:
+    # The outer join distinguishes an authorized empty document from a missing one.
+    rows = (await db.execute(
+        select(GraphChunk.id, GraphChunk.seq, GraphChunk.content)
+        .select_from(GraphDocument)
+        .join(GraphKnowledgeBase, GraphKnowledgeBase.id == GraphDocument.knowledge_base_id)
+        .outerjoin(GraphChunk, and_(
+            GraphChunk.document_id == GraphDocument.id,
+            GraphChunk.knowledge_base_id == GraphDocument.knowledge_base_id,
+        ))
+        .where(GraphDocument.id == doc_id, GraphKnowledgeBase.id == kb_id, kb_visible_to(user))
+        .order_by(GraphChunk.seq, GraphChunk.id)
+    )).mappings().all()
+    if not rows:
+        return None
+    return [dict(row) for row in rows if row["id"] is not None]
 
 
 # ---- Extraction jobs ----
@@ -354,19 +355,39 @@ async def create_extraction_job(
     db: AsyncSession,
     kb: GraphKnowledgeBase,
     user,
+    retry_job_id: UUID | None = None,
 ) -> tuple[GraphExtractionJob | None, bool]:
-    """Create and launch an extraction job. Returns (job, started).
-
-    Refuses to start when a job is already pending/running for this KB.
-    """
-    running = await db.execute(
-        select(GraphExtractionJob).where(
-            GraphExtractionJob.knowledge_base_id == kb.id,
-            GraphExtractionJob.status.in_(_RUNNING_STATUSES),
-        )
-    )
-    if running.scalar_one_or_none():
+    """Serialize admission per KB; repeat retries reuse the same job and checkpoints."""
+    locked = await db.scalar(select(GraphKnowledgeBase.id).where(
+        GraphKnowledgeBase.id == kb.id, kb_visible_to(user)).with_for_update())
+    if locked is None:
         return None, False
+    if retry_job_id is not None:
+        retry = await db.scalar(select(GraphExtractionJob).where(
+            GraphExtractionJob.id == retry_job_id, GraphExtractionJob.knowledge_base_id == kb.id
+        ).with_for_update().execution_options(populate_existing=True))
+        if retry is None:
+            return None, False
+        if retry.status != "failed":
+            return retry, True
+    running = await db.scalar(select(GraphExtractionJob.id).where(
+        GraphExtractionJob.knowledge_base_id == kb.id,
+        GraphExtractionJob.status.in_(_RUNNING_STATUSES)).limit(1))
+    if running is not None:
+        return None, False
+
+    if retry_job_id is not None:
+        failed = await db.execute(update(GraphExtractionChunk).where(
+            GraphExtractionChunk.job_id == retry.id, GraphExtractionChunk.status == "failed"
+        ).values(status="pending"))
+        retry.processed_chunks = max(0, retry.processed_chunks - failed.rowcount)
+        retry.status = "pending"
+        retry.lease_until = None
+        retry.lease_token = None
+        retry.error = None
+        retry.finished_at = None
+        await db.commit()
+        return retry, True
 
     job = GraphExtractionJob(
         knowledge_base_id=kb.id,
@@ -376,7 +397,6 @@ async def create_extraction_job(
     db.add(job)
     await db.flush()
     await db.commit()
-    start_extraction_job(job.id)
     return job, True
 
 
