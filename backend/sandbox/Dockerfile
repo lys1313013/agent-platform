@@ -3,7 +3,7 @@
 # All commands run here, never on the host
 # ============================================================
 # Keep the runtime and npm patched independently: Node's bundled npm can lag behind.
-FROM node:24.22.2-bookworm-slim AS node-runtime
+FROM node:24.22.3-bookworm-slim AS node-runtime
 
 FROM python:3.13-slim
 
@@ -38,6 +38,6 @@ WORKDIR /workspace
 USER sandbox
 # Validate the copied runtime and npm entrypoints as the actual sandbox user
 # on every target architecture, including CI's amd64 and arm64 builds.
-RUN test "$(node --version)" = "v24.22.2" \
+RUN test "$(node --version)" = "v24.22.3" \
     && test "$(npm --version)" = "11.21.2" && npx --version
 CMD ["sleep", "infinity"]
