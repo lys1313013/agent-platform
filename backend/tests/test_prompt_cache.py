@@ -270,6 +270,7 @@ async def test_turn_only_context_survives_provider_transport_and_is_omitted_from
             result = await provider.complete([LLMMessage(role="system", content="stable"),
                                               LLMMessage(role="user", content="question")])
             assert result.content == "ok"
+            assert all("max_tokens" not in body for body in captured)
             assert len({body["prompt_cache_key"] for body in captured}) == 1
         assert "turn-only-secret" not in str(hooks.mock_calls)
         assert "turn-only-secret" not in str(recorder.mock_calls)
